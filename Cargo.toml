@@ -8,6 +8,7 @@ members = [
     "crates/oximo-highs",
     "crates/oximo-io",
     "crates/oximo-gurobi",
+    "crates/oximo-mosek",
     "crates/oximo-gams",
     "crates/oximo-baron",
     "crates/oximo-clarabel",
@@ -36,6 +37,7 @@ oximo-solver = { path = "crates/oximo-solver", version = "0.5.0" }
 oximo-highs  = { path = "crates/oximo-highs",  version = "0.5.0" }
 oximo-io     = { path = "crates/oximo-io",     version = "0.5.0" }
 oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.5.0" }
+oximo-mosek  = { path = "crates/oximo-mosek",  version = "0.5.0" }
 oximo-gams   = { path = "crates/oximo-gams",   version = "0.5.0" }
 oximo-baron  = { path = "crates/oximo-baron",  version = "0.5.0" }
 oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.5.0" }
@@ -55,6 +57,7 @@ thiserror        = "2.0"
 num-traits       = "0.2"
 highs            = "2.4"
 grb              = "3.0"    
+mosek            = "11.2"
 clarabel         = "0.11"
 pounce-rs        = "0.8"
 
