@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use crate::MosekOptions;
 
 #[derive(Debug)]
-struct Meta {
+pub(crate) struct Meta {
     kind: ModelKind,
     row_by_constraint: Vec<Option<i32>>,
     explicit_accs: Vec<(SocConstraintId, i64, usize)>,
@@ -28,6 +28,18 @@ struct Meta {
 /// Returns an error for unsupported model kinds or variable domains, invalid
 /// expressions, and native MOSEK setup, optimization, or solution-query errors.
 pub fn solve(model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
+    let (mut task, meta) = build_task(model, opts)?;
+    solve_task(model, &mut task, &meta)
+}
+
+/// Build a callback-capable MOSEK task from an oximo model.
+///
+/// This is shared by one-shot and persistent solves. A persistent handle retains
+/// the returned task only when its model snapshot remains compatible.
+pub(crate) fn build_task(
+    model: &Model,
+    opts: &MosekOptions,
+) -> Result<(TaskCB, Meta), SolverError> {
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {
@@ -35,22 +47,31 @@ pub fn solve(model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverE
     }
     reject_semi_domains(model)?;
 
-    let mut task =
+    let task =
         Task::new().ok_or_else(|| SolverError::Backend("MOSEK: failed to create task".into()))?;
-    build_base(model, &mut task)?;
-    opts.apply(&mut task)?;
-
     let mut task = task.with_callbacks();
+    build_base(model, &mut task)?;
+    opts.apply_cb(&mut task)?;
+
     if opts.universal.verbose.unwrap_or(false) {
         task.put_stream_callback(Streamtype::LOG, |message| print!("{message}"))
             .map_err(backend)?;
     }
     let meta = build_rows_and_cones(model, kind, &mut task)?;
 
+    Ok((task, meta))
+}
+
+/// Optimize an already built task and read its result.
+pub(crate) fn solve_task(
+    model: &Model,
+    task: &mut TaskCB,
+    meta: &Meta,
+) -> Result<SolverResult, SolverError> {
     let started = Instant::now();
     let trm = task.optimize().map_err(backend)?;
     let elapsed = started.elapsed();
-    extract_result(model, &task, &meta, trm, elapsed)
+    extract_result(model, task, meta, trm, elapsed)
 }
 
 fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
@@ -66,7 +87,7 @@ fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
     Ok(())
 }
 
-fn build_base(model: &Model, task: &mut Task) -> Result<(), SolverError> {
+fn build_base(model: &Model, task: &mut TaskCB) -> Result<(), SolverError> {
     let arena = model.arena();
     let variables = model.variables();
     let objective = model.objective();
@@ -232,7 +253,7 @@ fn put_linear_row(task: &mut TaskCB, row: i32, terms: &[(VarId, f64)]) -> Result
     task.put_a_row(row, &columns, &values).map_err(backend)
 }
 
-fn put_q_objective(task: &mut Task, terms: &QuadraticTerms) -> Result<(), SolverError> {
+fn put_q_objective(task: &mut TaskCB, terms: &QuadraticTerms) -> Result<(), SolverError> {
     if terms.hessian.is_empty() {
         return Ok(());
     }

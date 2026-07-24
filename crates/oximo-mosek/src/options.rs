@@ -1,4 +1,4 @@
-use mosek::{Dparam, Iparam, Sparam, Task};
+use mosek::{Dparam, Iparam, Sparam, TaskCB};
 use oximo_solver::{HasUniversal, SolverError, UniversalOptions};
 
 /// MOSEK-specific solver options.
@@ -369,7 +369,8 @@ impl MosekOptions {
         (str, stat_name, STAT_NAME),
     );
 
-    pub(crate) fn apply(&self, task: &mut Task) -> Result<(), SolverError> {
+    /// Apply options to a callback-capable MOSEK task.
+    pub(crate) fn apply_cb(&self, task: &mut TaskCB) -> Result<(), SolverError> {
         if let Some(limit) = self.universal.time_limit {
             task.put_dou_param(Dparam::OPTIMIZER_MAX_TIME, limit.as_secs_f64()).map_err(backend)?;
         }
@@ -402,7 +403,7 @@ fn backend(message: String) -> SolverError {
 mod tests {
     use std::collections::HashSet;
 
-    use mosek::Parametertype;
+    use mosek::{Parametertype, Task};
 
     use super::*;
 
@@ -442,8 +443,8 @@ mod tests {
             .log(0)
             .mio_tol_rel_gap(1e-4)
             .remote_optserver_host("example.invalid");
-        let mut task = Task::new().expect("create MOSEK task");
-        opts.apply(&mut task).unwrap();
+        let mut task = Task::new().expect("create MOSEK task").with_callbacks();
+        opts.apply_cb(&mut task).unwrap();
         assert!(
             (task.get_dou_param(Dparam::OPTIMIZER_MAX_TIME).unwrap() - 3.5).abs() < f64::EPSILON
         );

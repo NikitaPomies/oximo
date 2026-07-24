@@ -2,13 +2,15 @@
 #![forbid(unsafe_code)]
 
 mod options;
+mod persistent;
 mod translate;
 
 pub use options::MosekOptions;
+pub use persistent::MosekPersistent;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{Solver, SolverError, SolverResult};
+use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
 
 /// MOSEK solver backend.
 #[derive(Debug, Default, Clone, Copy)]
@@ -43,5 +45,13 @@ impl Solver for Mosek {
 
     fn solve(&mut self, model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts)
+    }
+}
+
+impl PersistentSolver for Mosek {
+    type Handle = MosekPersistent;
+
+    fn persistent(&self) -> MosekPersistent {
+        MosekPersistent::new()
     }
 }
