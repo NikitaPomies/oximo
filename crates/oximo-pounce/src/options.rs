@@ -1,6 +1,5 @@
+use oximo_core::ModelKind;
 use oximo_solver::{HasUniversal, UniversalOptions};
-
-// TODO: Add the rest of the POUNCE options, when v0.9.0 is released.
 
 /// POUNCE-specific solver options.
 ///
@@ -27,6 +26,9 @@ pub struct PounceOptions {
     pub print_level: Option<u32>,
     /// Barrier parameter update strategy (`mu_strategy`).
     pub mu_strategy: Option<MuStrategy>,
+    /// POUNCE's top-level solve algorithm. Defaults to the interior-point
+    /// method when omitted.
+    pub algorithm: Option<PounceAlgorithm>,
     /// Macro-generated typed options, kept by value kind and applied in order.
     num_opts: Vec<(&'static str, f64)>,
     int_opts: Vec<(&'static str, i32)>,
@@ -41,6 +43,39 @@ pub struct PounceOptions {
 pub enum MuStrategy {
     Monotone,
     Adaptive,
+}
+
+/// POUNCE algorithms available through its Rust library API.
+///
+/// Both algorithms accept every continuous [`ModelKind`] supported by this
+/// backend. `ActiveSetSqp` is a general NLP algorithm despite its QP
+/// subproblems, so oximo intentionally permits it for LP, QP, QCP, and NLP
+/// models. POUNCE's `lp-ipm`, `qp-ipm`, and `socp` selectors are CLI-only and
+/// are not exposed here.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PounceAlgorithm {
+    /// POUNCE's IPOPT-lineage primal-dual interior-point method.
+    #[default]
+    InteriorPoint,
+    /// Active-set sequential quadratic programming.
+    ActiveSetSqp,
+}
+
+impl PounceAlgorithm {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InteriorPoint => "interior-point",
+            Self::ActiveSetSqp => "active-set-sqp",
+        }
+    }
+
+    pub(crate) const fn supports(self, kind: ModelKind) -> bool {
+        match self {
+            Self::InteriorPoint | Self::ActiveSetSqp => {
+                matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::NLP)
+            }
+        }
+    }
 }
 
 /// A raw POUNCE option value for [`PounceOptions::extra`].
@@ -212,6 +247,13 @@ impl PounceOptions {
     #[must_use]
     pub fn mu_strategy(mut self, s: MuStrategy) -> Self {
         self.mu_strategy = Some(s);
+        self
+    }
+
+    /// Select POUNCE's top-level algorithm.
+    #[must_use]
+    pub fn algorithm(mut self, algorithm: PounceAlgorithm) -> Self {
+        self.algorithm = Some(algorithm);
         self
     }
 

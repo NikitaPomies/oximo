@@ -17,7 +17,9 @@ use pounce_rs::{
 };
 
 use crate::options::PounceOptions;
-use crate::translate::{Outcome, Prepared, WarmStart, apply_options, map_status, set_str};
+use crate::translate::{
+    Outcome, Prepared, WarmStart, apply_options, map_status, set_str,
+};
 
 /// A derivative source for [`OximoTnlp`].
 ///
@@ -115,7 +117,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
 
 /// The Ipopt-style end-of-solve report off the application's statistics
 /// (values are in POUNCE's minimization sense).
-fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnStatus) -> String {
+pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnStatus) -> String {
     let mut log = String::new();
     let _ = writeln!(log, "Number of Iterations....: {}", stats.iteration_count);
     let _ =

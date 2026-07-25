@@ -13,7 +13,7 @@ mod hybrid;
 #[cfg(not(feature = "enzyme"))]
 mod stable;
 
-pub use options::{MuStrategy, PounceOptionValue, PounceOptions};
+pub use options::{MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions};
 pub use persistent::PouncePersistent;
 
 /// The POUNCE interior-point backend: a pure-Rust IPOPT port.

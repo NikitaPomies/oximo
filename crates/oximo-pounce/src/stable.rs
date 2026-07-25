@@ -130,6 +130,9 @@ fn run_builder(
     if let Some(s) = opts.mu_strategy {
         nlp = nlp.option_str("mu_strategy", mu_strategy_str(s));
     }
+    if let Some(algorithm) = opts.algorithm {
+        nlp = nlp.option_str("algorithm", algorithm.as_str());
+    }
     for &(name, v) in opts.num_opts() {
         nlp = nlp.option_num(name, v);
     }
@@ -151,25 +154,26 @@ fn run_builder(
         };
     }
 
-    // TODO: Add iterations to the builder path once POUNCE exposes them.
     let sol = nlp.solve();
 
     let termination = map_status(sol.status);
-    let raw_log =
-        (opts.universal.verbose == Some(true)).then(|| format!("EXIT: {:?}\n", sol.status));
+    let raw_log = (opts.universal.verbose == Some(true))
+        .then(|| crate::tnlp::format_raw_log(&sol.stats, sol.status));
+    let iterations = u64::try_from(sol.stats.iteration_count.max(0)).unwrap_or(0);
+    let reduced = sol.z_l.iter().zip(&sol.z_u).map(|(&zl, &zu)| zl - zu).collect();
     let warm = sol.success.then(|| WarmStart {
         x: sol.x.clone(),
-        z_l: Vec::new(),
-        z_u: Vec::new(),
+        z_l: sol.z_l.clone(),
+        z_u: sol.z_u.clone(),
         lambda: sol.multipliers.clone(),
     });
     Ok(Outcome {
         termination,
         x: sol.x,
         lambda: sol.multipliers,
-        reduced: None,
+        reduced: Some(reduced),
         objective: Some(sol.objective),
-        iterations: 0,
+        iterations,
         warm,
         raw_log,
     })

@@ -3,7 +3,7 @@
 //! With `--features enzyme` the same models are solved with exact derivatives.
 
 use oximo_core::prelude::*;
-use oximo_pounce::{MuStrategy, Pounce, PounceOptions};
+use oximo_pounce::{MuStrategy, Pounce, PounceAlgorithm, PounceOptions};
 use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus};
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
@@ -38,6 +38,8 @@ fn hs071() {
     assert_close(res.value_of(x2).unwrap(), 4.743, 1e-3, "x2");
     assert_close(res.value_of(x4).unwrap(), 1.379_408, 1e-3, "x4");
     assert_close(res.objective().unwrap(), 17.014, 1e-2, "objective");
+    assert!(res.iterations > 0, "builder path reports iterations");
+    assert_eq!(res.reduced_costs.len(), 4, "builder returns bound multipliers");
 }
 
 #[test]
@@ -265,6 +267,33 @@ fn verbose_builder_path_logs_exit_status() {
     let res = Pounce.solve(&m, &opts).unwrap();
     let log = res.raw_log.expect("verbose solve should capture a log");
     assert!(log.contains("EXIT:"), "log has the exit status: {log}");
+}
+
+#[test]
+fn active_set_sqp_solves_a_qp() {
+    let m = Model::new("active_set_qp");
+    variable!(m, 0.0 <= x <= 5.0, initial = 0.0);
+    variable!(m, 0.0 <= y <= 5.0, initial = 0.0);
+    constraint!(m, balance, x + y == 3.0);
+    objective!(m, Min, (x - 1.0).powi(2) + (y - 2.0).powi(2));
+
+    let opts = PounceOptions::default().algorithm(PounceAlgorithm::ActiveSetSqp);
+    let res = Pounce.solve(&m, &opts).unwrap();
+    assert!(res.has_solution(), "active-set SQP failed: {:?}", res.termination);
+    assert!(res.iterations > 0);
+    assert_close(res.value_of(x).unwrap(), 1.0, 1e-4, "x");
+    assert_close(res.value_of(y).unwrap(), 2.0, 1e-4, "y");
+}
+
+#[test]
+fn cli_only_algorithm_selectors_are_rejected() {
+    let m = Model::new("cli_only_selector");
+    variable!(m, x >= 0.0);
+    objective!(m, Min, x);
+
+    let err = Pounce.solve(&m, &PounceOptions::default().set("solver_selection", "qp-ipm"))
+        .unwrap_err();
+    assert!(matches!(err, SolverError::Backend(message) if message.contains("CLI")));
 }
 
 #[test]

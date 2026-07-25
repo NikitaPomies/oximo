@@ -11,7 +11,7 @@ use pounce_rs::ApplicationReturnStatus;
 use pounce_rs::pounce_common::options_list::OptionsList;
 use rustc_hash::FxHashMap;
 
-use crate::options::{PounceOptionValue, PounceOptions};
+use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions};
 
 #[cfg(feature = "enzyme")]
 use crate::exact as backend;
@@ -67,7 +67,7 @@ pub(crate) struct Outcome {
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
-    let prep = setup(model)?;
+    let prep = setup(model, opts)?;
     let started = Instant::now();
     let oracle = backend::build(model)?;
     let outcome = backend::run(&oracle, &prep, opts, None)?;
@@ -75,11 +75,12 @@ pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, Solver
 }
 
 /// Kind gate, objective declaration check, sign, and bound snapshot.
-pub(crate) fn setup(model: &Model) -> Result<Prepared, SolverError> {
+pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, SolverError> {
     let kind = model.kind();
     if !matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::NLP) {
         return Err(SolverError::UnsupportedKind(kind));
     }
+    validate_algorithm(kind, opts)?;
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let sign = match model.objective().as_ref().map(|o| o.sense) {
         Some(ObjectiveSense::Maximize) => -1.0,
@@ -106,6 +107,61 @@ pub(crate) fn setup(model: &Model) -> Result<Prepared, SolverError> {
     }
 
     Ok(Prepared { sign, x_l, x_u, g_l, g_u, x0 })
+}
+
+/// Resolve the backend algorithm after raw options (which apply last).
+///
+/// POUNCE's library exposes only its NLP interior-point and active-set SQP
+/// algorithms. Its specialized convex selectors need the CLI's structural
+/// extraction and cannot be used by `IpoptApplication`.
+pub(crate) fn selected_algorithm(opts: &PounceOptions) -> Result<PounceAlgorithm, SolverError> {
+    let mut algorithm = opts.algorithm.unwrap_or_default();
+    let mut solver_selection = None;
+    for (name, value) in &opts.extra {
+        match (name.as_str(), value) {
+            ("algorithm", PounceOptionValue::Str(value)) => {
+                algorithm = match value.as_str() {
+                    "interior-point" => PounceAlgorithm::InteriorPoint,
+                    "active-set-sqp" => PounceAlgorithm::ActiveSetSqp,
+                    other => {
+                        return Err(SolverError::Backend(format!(
+                            "pounce algorithm `{other}` is unsupported; use `interior-point` or `active-set-sqp`"
+                        )));
+                    }
+                };
+            }
+            ("algorithm", _) => {
+                return Err(SolverError::Backend(
+                    "pounce option `algorithm` must be a string".into(),
+                ));
+            }
+            ("solver_selection", PounceOptionValue::Str(value)) => solver_selection = Some(value),
+            ("solver_selection", _) => {
+                return Err(SolverError::Backend(
+                    "pounce option `solver_selection` must be a string".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    match solver_selection.map(String::as_str) {
+        Some("qp-active-set") => Ok(PounceAlgorithm::ActiveSetSqp),
+        Some("auto" | "nlp") | None => Ok(algorithm),
+        Some(value @ ("lp-ipm" | "qp-ipm" | "socp")) => Err(SolverError::Backend(format!(
+            "pounce solver_selection `{value}` is only available through POUNCE's CLI; use `algorithm` instead"
+        ))),
+        Some(value) => Err(SolverError::Backend(format!(
+            "pounce solver_selection `{value}` is unsupported by the Rust library"
+        ))),
+    }
+}
+
+pub(crate) fn validate_algorithm(
+    kind: ModelKind,
+    opts: &PounceOptions,
+) -> Result<PounceAlgorithm, SolverError> {
+    let algorithm = selected_algorithm(opts)?;
+    if algorithm.supports(kind) { Ok(algorithm) } else { Err(SolverError::UnsupportedKind(kind)) }
 }
 
 /// Midpoint of finite bounds, otherwise zero clipped into the bounds.
@@ -238,6 +294,9 @@ pub(crate) fn apply_options(
     }
     if let Some(s) = opts.mu_strategy {
         set_str(list, "mu_strategy", mu_strategy_str(s))?;
+    }
+    if let Some(algorithm) = opts.algorithm {
+        set_str(list, "algorithm", algorithm.as_str())?;
     }
     for &(name, v) in opts.num_opts() {
         set_num(list, name, v)?;

@@ -59,7 +59,7 @@ impl PouncePersistent {
         model: &Model,
         opts: &PounceOptions,
     ) -> Result<SolverResult, SolverError> {
-        let prep = setup(model)?;
+        let prep = setup(model, opts)?;
         let started = Instant::now();
 
         let state = match &mut self.state {
