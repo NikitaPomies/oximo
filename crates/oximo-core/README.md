@@ -8,14 +8,14 @@ Re-exports `oximo-expr` types (`Expr`, `ExprArena`, `ExprId`, `ExprNode`, `Param
 
 ```toml
 [dependencies]
-oximo-core = "0.4"
+oximo-core = "0.5.1"
 ```
 
 Or via the umbrella crate (recommended for end users):
 
 ```toml
 [dependencies]
-oximo = "0.4"
+oximo = "0.5.1"
 ```
 
 ## Quick example

@@ -1470,7 +1470,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oximo"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oximo-baron",
  "oximo-clarabel",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-autodiff"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-baron"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-clarabel"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clarabel",
  "oximo-core",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ndarray",
  "num-traits",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-expr"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "rustc-hash",
  "smallvec",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-gams"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-gurobi"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "grb",
  "oximo-core",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-highs"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "highs",
  "oximo-core",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-io"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-macros"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-mosek"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "mosek",
  "oximo-core",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-pounce"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oximo-autodiff",
  "oximo-core",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-solver"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oximo-core",
  "oximo-expr",

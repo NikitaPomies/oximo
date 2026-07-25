@@ -8,8 +8,8 @@ This crate defines the contract that backend crates implement. End users interac
 
 ```toml
 [dependencies]
-oximo-solver = "0.4"
-oximo-core   = "0.4"
+oximo-solver = "0.5.1"
+oximo-core   = "0.5.1"
 ```
 
 ## `Solver` trait

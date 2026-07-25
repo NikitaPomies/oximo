@@ -13,16 +13,16 @@ Enable the `clarabel` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = { version = "0.5", features = ["clarabel"] }
+oximo = { version = "0.5.1", features = ["clarabel"] }
 ```
 
 To use this crate directly:
 
 ```toml
 [dependencies]
-oximo-clarabel = "0.4"
-oximo-core     = "0.4"
-oximo-solver   = "0.4"
+oximo-clarabel = "0.5.1"
+oximo-core     = "0.5.1"
+oximo-solver   = "0.5.1"
 ```
 
 The optional `faer` feature adds the [faer](https://crates.io/crates/faer)
