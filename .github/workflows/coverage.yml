@@ -1,0 +1,70 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  coverage:
+    name: Cargo coverage (no licensed solvers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests and generate coverage
+        run: >-
+          cargo llvm-cov --workspace --exclude oximo-gurobi --exclude oximo-mosek
+          --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          flags: stable-no-licensed-solvers
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  enzyme:
+    name: Cargo coverage (nightly Enzyme)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-Zautodiff=Enable"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: enzyme, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run Enzyme coverage tests
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report -p oximo-autodiff --features enzyme --profile enzyme
+          cargo llvm-cov --no-report -p oximo-pounce --features enzyme --profile enzyme
+          cargo llvm-cov --no-report -p oximo --no-default-features --features pounce-enzyme --profile enzyme --test solve_pounce
+          cargo llvm-cov report --lcov --output-path lcov-enzyme.info
+      - name: Upload Enzyme coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov-enzyme.info
+          flags: nightly-enzyme
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
