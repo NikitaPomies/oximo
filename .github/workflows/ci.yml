@@ -34,7 +34,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --exclude oximo-gurobi --all-targets -- -D warnings
+      - run: cargo clippy --workspace --exclude oximo-gurobi --exclude oximo-mosek --all-targets -- -D warnings
 
   test:
     name: Cargo test
@@ -45,4 +45,4 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude oximo-gurobi
+      - run: cargo test --workspace --exclude oximo-gurobi --exclude oximo-mosek
