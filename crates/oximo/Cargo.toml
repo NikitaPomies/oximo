@@ -16,6 +16,7 @@ default = ["highs", "io"]
 highs = ["dep:oximo-highs"]
 io = ["dep:oximo-io"]
 gurobi = ["dep:oximo-gurobi"]
+mosek = ["dep:oximo-mosek"]
 gams = ["dep:oximo-gams"]
 baron = ["dep:oximo-baron"]
 clarabel = ["dep:oximo-clarabel"]
@@ -33,6 +34,7 @@ oximo-core.workspace = true
 oximo-solver.workspace = true
 oximo-highs = { workspace = true, optional = true }
 oximo-gurobi = { workspace = true, optional = true }
+oximo-mosek = { workspace = true, optional = true }
 oximo-gams = { workspace = true, optional = true }
 oximo-baron = { workspace = true, optional = true }
 oximo-clarabel = { workspace = true, optional = true }
