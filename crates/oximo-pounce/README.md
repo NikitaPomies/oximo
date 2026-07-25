@@ -62,10 +62,14 @@ A few options are managed by this backend and should not be set by hand:
 
 ## Solver type/routing
 
-oximo-pounce solves every continuous kind it accepts through POUNCE's NLP
-filter interior-point method (the `pounce-rs` `IpoptApplication`/`builder` API).
-POUNCE's specialised convex paths from the [LP/QP routing docs](https://kitchingroup.cheme.cmu.edu/pounce/lp-qp-routing.html)
-are features of the POUNCE command-line driver until pounce 0.9.0 is released.
+`PounceOptions::algorithm` selects either the default IPOPT-lineage
+`PounceAlgorithm::InteriorPoint` method or `PounceAlgorithm::ActiveSetSqp`.
+Both are valid for every continuous oximo kind POUNCE accepts: LP, QP, QCP,
+and NLP. The latter is a general NLP method despite solving QP subproblems.
+
+POUNCE's `lp-ipm`, `qp-ipm`, and `socp` selectors rely on its command-line
+driver's structural extraction and are not available from `pounce-rs`'s
+`IpoptApplication`.
 
 ## Licensing
 
