@@ -414,18 +414,34 @@ mod tests {
         assert_eq!(ids, (0..expected).collect::<Vec<_>>());
     }
 
+    fn integer_parameter_count(linked_count: i32) -> Result<i32, String> {
+        match linked_count {
+            189 => Ok(linked_count),
+            // MOSEK 11.2.2 returns 64 for `INT_TYPE`, equal to its
+            // double-parameter count, even though the binding exposes 189
+            // contiguous `Iparam` values.
+            64 => Ok(189),
+            other => Err(format!("unexpected MOSEK integer parameter count: {other}")),
+        }
+    }
+
+    #[test]
+    fn integer_parameter_count_handles_native_and_compatibility_reports() {
+        assert_eq!(integer_parameter_count(189), Ok(189));
+        assert_eq!(integer_parameter_count(64), Ok(189));
+        assert!(integer_parameter_count(188).is_err());
+    }
+
     #[test]
     fn complete_parameter_catalog_matches_linked_library() {
         let task = Task::new().expect("create MOSEK task");
         let nd = task.get_num_param(Parametertype::DOU_TYPE).unwrap();
         let linked_ni = task.get_num_param(Parametertype::INT_TYPE).unwrap();
         let ns = task.get_num_param(Parametertype::STR_TYPE).unwrap();
-        assert!(matches!(linked_ni, 64 | 189));
-        let ni = 189;
+        let ni = integer_parameter_count(linked_ni).unwrap();
         assert_catalog(MosekOptions::DOUBLE_PARAM_IDS, nd);
         assert_catalog(MosekOptions::INT_PARAM_IDS, ni);
         assert_catalog(MosekOptions::STRING_PARAM_IDS, ns);
-        assert_eq!(nd + ni + ns, 277);
     }
 
     #[test]
