@@ -4,13 +4,13 @@
 //! given hand position/orientation. The eight unknowns `x1..x8` are sines and
 //! cosines of joint angles, constrained by trigonometric identities
 //! (`xi^2 + xj^2 = 1`) and the kinematic loop equations (bilinear + linear).
-//! It is a pure feasibility system (`minimize 0`) with multiple real solutions
-//! (the BARON manual reports 14).
+//! It is a pure feasibility system with multiple real solutions.
 //!
 //! This is the `robot.bar` example from the BARON manual. The manual writes
-//! each equality as a pair of `<=` inequalities, here we use oximo's `.eq(..)`,
-//! which is mathematically identical and emits the same constraint set. The
-//! `num_sol(20)` option asks BARON to enumerate up to 20 distinct solutions.
+//! each equality as a pair of `<=` inequalities, here we use `==` in the
+//! constraint macro, which is mathematically identical and emits the same
+//! constraint set. The `num_sol(20)` option asks BARON to enumerate up to
+//! 20 distinct solutions.
 //!
 //! References:
 //!   N. Sahinidis, BARON User Manual, version 2026.4.12.
