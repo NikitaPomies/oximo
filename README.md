@@ -205,6 +205,7 @@ pub trait Solver {
 | `highs`         | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
 | `io`            | NL, MPS, and LP file writers                                 | yes     |
 | `gurobi`        | Gurobi solver (requires licensed install)                    | no      |
+| `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP solver                | no      |
 | `gams`          | GAMS bridge - solve type depends on the selected sub-solver  | no      |
 | `baron`         | BARON - Global non-convex solver (requires licensed install) | no      |
 | `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
@@ -261,6 +262,7 @@ for i in 0..result.result_count() {
 | `oximo-io`       | MPS, LP and NL writers                                    |
 | `oximo-highs`    | HiGHS backend                                             |
 | `oximo-gurobi`   | Gurobi backend                                            |
+| `oximo-mosek`    | MOSEK 11.2 backend                                       |
 | `oximo-gams`     | GAMS writer and backend                                   |
 | `oximo-baron`    | BARON writer and backend                                  |
 | `oximo-clarabel` | Clarabel backend                                          |
@@ -269,6 +271,7 @@ for i in 0..result.result_count() {
 ## Requirements
 
 - Gurobi feature: Gurobi, `GUROBI_HOME` set, valid license
+- MOSEK feature: MOSEK 11.2, `MOSEK_BINDIR_112` if needed, valid license
 - GAMS feature: GAMS on `PATH`, valid license
 - BARON feature: BARON on `PATH`, valid license
 
