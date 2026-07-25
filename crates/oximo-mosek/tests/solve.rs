@@ -1,6 +1,6 @@
 use oximo_core::prelude::*;
 use oximo_mosek::{Mosek, MosekOptions, solve};
-use oximo_solver::{Solver, SolverError, TerminationStatus};
+use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus};
 
 fn close(actual: f64, expected: f64) {
     assert!((actual - expected).abs() < 1e-6, "actual={actual}, expected={expected}");
@@ -213,4 +213,41 @@ fn branch_limit_keeps_constructed_incumbent() {
     assert!(result.has_solution());
     assert!(result.best_bound.is_some());
     assert!(result.gap.is_some());
+}
+
+#[test]
+fn persistent_updates_linear_objective_and_bounds() {
+    let model = Model::new("persistent_lp");
+    param!(model, price = 1.0);
+    variable!(model, 0.0 <= x <= 10.0);
+    objective!(model, Max, price * x);
+
+    let mut solver = Mosek.persistent();
+    for (coefficient, upper) in [(1.0, 10.0), (3.0, 4.0), (2.0, 7.0)] {
+        price.set_param_value(coefficient);
+        model.unfix_var(x.var_id().unwrap(), 0.0, upper);
+        let resident = solver.solve(&model, &MosekOptions::default()).unwrap();
+        let cold = Mosek.solve(&model, &MosekOptions::default()).unwrap();
+        assert_eq!(resident.termination, TerminationStatus::Optimal);
+        close(resident.value_of(x).unwrap(), cold.value_of(x).unwrap());
+        close(resident.objective().unwrap(), cold.objective().unwrap());
+    }
+}
+
+#[test]
+fn persistent_rebuilds_after_linear_row_change() {
+    let model = Model::new("persistent_rebuild");
+    param!(model, capacity = 5.0);
+    variable!(model, x >= 0.0);
+    constraint!(model, cap, x <= capacity);
+    objective!(model, Max, x);
+
+    let mut solver = Mosek.persistent();
+    for bound in [5.0, 2.0, 9.0] {
+        capacity.set_param_value(bound);
+        let resident = solver.solve(&model, &MosekOptions::default()).unwrap();
+        let cold = Mosek.solve(&model, &MosekOptions::default()).unwrap();
+        close(resident.value_of(x).unwrap(), cold.value_of(x).unwrap());
+        close(resident.objective().unwrap(), cold.objective().unwrap());
+    }
 }
