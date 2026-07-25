@@ -1098,6 +1098,15 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1c173a5686ce8bfa551b3563d0c2170bf24ca44da99c7ca4bfdab5418c3fe57"
@@ -1139,9 +1148,9 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libloading"
@@ -1201,6 +1210,16 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "mosek"
+version = "11.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90447bbb12bd401e76c8ee36c6b7ece0de373141ea0156b2eae610b23074ec84"
+dependencies = [
+ "itertools 0.10.5",
+ "libc",
+]
 
 [[package]]
 name = "nano-gemm"
@@ -1461,6 +1480,7 @@ dependencies = [
  "oximo-gurobi",
  "oximo-highs",
  "oximo-io",
+ "oximo-mosek",
  "oximo-pounce",
  "oximo-solver",
 ]
@@ -1578,6 +1598,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.0",
+]
+
+[[package]]
+name = "oximo-mosek"
+version = "0.5.0"
+dependencies = [
+ "mosek",
+ "oximo-core",
+ "oximo-expr",
+ "oximo-solver",
+ "rustc-hash",
 ]
 
 [[package]]
