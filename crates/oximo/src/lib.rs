@@ -26,6 +26,10 @@ pub use oximo_highs::{HighsMethod, HighsOptions, HighsPresolve};
 #[cfg_attr(docsrs, doc(cfg(feature = "gurobi")))]
 pub use oximo_gurobi::{GurobiOptions, GurobiPersistent, GurobiPresolve};
 
+#[cfg(feature = "mosek")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mosek")))]
+pub use oximo_mosek::{MosekOptions, MosekPersistent};
+
 #[cfg(feature = "gams")]
 #[cfg_attr(docsrs, doc(cfg(feature = "gams")))]
 pub use oximo_gams::{GamsOptions, GamsSolver};
@@ -70,6 +74,10 @@ pub mod prelude {
     #[cfg_attr(docsrs, doc(cfg(feature = "gurobi")))]
     pub use oximo_gurobi::{GurobiOptions, GurobiPersistent, GurobiPresolve};
 
+    #[cfg(feature = "mosek")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "mosek")))]
+    pub use oximo_mosek::{MosekOptions, MosekPersistent};
+
     #[cfg(feature = "gams")]
     #[cfg_attr(docsrs, doc(cfg(feature = "gams")))]
     pub use oximo_gams::{GamsOptions, GamsSolver};
@@ -97,6 +105,10 @@ pub mod solvers {
     #[cfg(feature = "gurobi")]
     #[cfg_attr(docsrs, doc(cfg(feature = "gurobi")))]
     pub use oximo_gurobi::Gurobi;
+
+    #[cfg(feature = "mosek")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "mosek")))]
+    pub use oximo_mosek::Mosek;
 
     #[cfg(feature = "gams")]
     #[cfg_attr(docsrs, doc(cfg(feature = "gams")))]
