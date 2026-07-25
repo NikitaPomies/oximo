@@ -17,9 +17,7 @@ use pounce_rs::{
 };
 
 use crate::options::PounceOptions;
-use crate::translate::{
-    Outcome, Prepared, WarmStart, apply_options, map_status, set_str,
-};
+use crate::translate::{Outcome, Prepared, WarmStart, apply_options, map_status, set_str};
 
 /// A derivative source for [`OximoTnlp`].
 ///

@@ -291,8 +291,8 @@ fn cli_only_algorithm_selectors_are_rejected() {
     variable!(m, x >= 0.0);
     objective!(m, Min, x);
 
-    let err = Pounce.solve(&m, &PounceOptions::default().set("solver_selection", "qp-ipm"))
-        .unwrap_err();
+    let err =
+        Pounce.solve(&m, &PounceOptions::default().set("solver_selection", "qp-ipm")).unwrap_err();
     assert!(matches!(err, SolverError::Backend(message) if message.contains("CLI")));
 }
 
