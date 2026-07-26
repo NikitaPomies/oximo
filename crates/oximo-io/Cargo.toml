@@ -9,9 +9,13 @@ authors.workspace = true
 description = "Model I/O (MPS, LP, NLP writers) for oximo"
 readme = "README.md"
 
+[features]
+benchmark-support = []
+
 [dependencies]
 oximo-expr.workspace = true
 oximo-core.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true
 

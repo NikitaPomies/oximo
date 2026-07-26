@@ -207,3 +207,52 @@ fn collect_vars(arena: &ExprArena, id: ExprId, out: &mut FxHashSet<VarId>) -> Re
         }
     }
 }
+
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::Model;
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const THRESHOLD: usize = PAR_ANALYZE_THRESHOLD;
+
+    pub fn model(rows: usize, degree: usize) -> Model {
+        let model = Model::new("analysis_bench");
+        let x = model.__var("x").lb(-5.0).ub(5.0).build();
+        let y = model.__var("y").lb(-5.0).ub(5.0).build();
+        let z = model.__var("z").lb(-5.0).ub(5.0).build();
+        model.__minimize(x + y + z);
+        for i in 0..rows {
+            let lhs = match degree {
+                1 => x + 2.0 * y - z,
+                2 => x.powi(2) + y * z,
+                _ => x * y * z + x.sin(),
+            };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model
+    }
+
+    pub fn analyze(model: &Model, parallel: bool) -> Result<usize, IoError> {
+        let arena = model.arena();
+        let vars = model.variables();
+        let constraints = model.constraints();
+        let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
+        let analysis = Analysis::build_with_parallel(
+            &arena,
+            &vars,
+            &constraints,
+            &objective,
+            false,
+            Some(parallel),
+        )?;
+        Ok(analysis.cons.len()
+            + analysis.cons_vars.iter().map(Vec::len).sum::<usize>()
+            + analysis.obj_vars.len()
+            + analysis.nl_vars_c.len()
+            + analysis.nl_vars_o.len())
+    }
+}

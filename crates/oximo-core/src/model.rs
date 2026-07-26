@@ -981,6 +981,36 @@ pub fn display_index_key(key: &IndexKey) -> String {
     out
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use super::*;
+
+    pub const THRESHOLD: usize = PAR_KIND_THRESHOLD;
+
+    pub fn model(rows: usize, degree: usize) -> Model {
+        let model = Model::new("kind_bench");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        let z = model.__var("z").build();
+        model.__minimize(x + y + z);
+        for i in 0..rows {
+            let lhs = match degree {
+                1 => x + 2.0 * y - z,
+                2 => x.powi(2) + y,
+                _ => x * y * z,
+            };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model
+    }
+
+    pub fn infer(model: &Model, parallel: bool) -> ModelKind {
+        model.infer_kind(parallel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use oximo_expr::extract_linear;

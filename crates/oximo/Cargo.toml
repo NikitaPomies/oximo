@@ -23,6 +23,34 @@ clarabel = ["dep:oximo-clarabel"]
 clarabel-faer = ["clarabel", "oximo-clarabel/faer"]
 pounce = ["dep:oximo-pounce"]
 pounce-enzyme = ["pounce", "oximo-pounce/enzyme"]
+_benchmark-support = [
+    "highs",
+    "io",
+    "gams",
+    "baron",
+    "clarabel",
+    "pounce",
+    "oximo-core/benchmark-support",
+    "oximo-highs/benchmark-support",
+    "oximo-io/benchmark-support",
+    "oximo-gams/benchmark-support",
+    "oximo-baron/benchmark-support",
+    "oximo-clarabel/benchmark-support",
+    "oximo-pounce/benchmark-support",
+]
+_benchmark-proprietary = [
+    "_benchmark-support",
+    "gurobi",
+    "mosek",
+    "oximo-gurobi/benchmark-support",
+    "oximo-mosek/benchmark-support",
+]
+_benchmark-enzyme = [
+    "_benchmark-support",
+    "dep:oximo-autodiff",
+    "oximo-autodiff/benchmark-support",
+    "oximo-autodiff/enzyme",
+]
 
 [package.metadata.docs.rs]
 features = ["gams", "baron", "clarabel", "clarabel-faer", "pounce"]
@@ -40,6 +68,11 @@ oximo-baron = { workspace = true, optional = true }
 oximo-clarabel = { workspace = true, optional = true }
 oximo-pounce = { workspace = true, optional = true }
 oximo-io = { workspace = true, optional = true }
+oximo-autodiff = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true
