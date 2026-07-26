@@ -4,6 +4,9 @@
   <img alt="oximo logo" src="https://raw.githubusercontent.com/oximo-rs/oximo/main/media/logo-dark.svg">
 </picture>
 
+<a href="https://oximo.dev">
+    <img src="https://img.shields.io/badge/oximo-website-orange" alt = "Website">
+</a>
 <a href="https://github.com/oximo-rs/oximo/tree/main/crates/oximo/examples">
     <img src="https://img.shields.io/badge/oximo-examples-orange" alt = "Examples">
 </a>
@@ -13,8 +16,14 @@
 <a href="https://github.com/oximo-rs/oximo/actions/workflows/ci.yml">
     <img src="https://img.shields.io/github/actions/workflow/status/oximo-rs/oximo/ci.yml?branch=main&label=oximo%20CI&logo=github" alt="CI" />
 </a>
+<a href="https://docs.rs/oximo">
+    <img src="https://docs.rs/oximo/badge.svg" alt = "oximo Docs.rs Build Status">
+</a>
+<a href="https://codecov.io/gh/oximo-rs/oximo" > 
+	<img src="https://codecov.io/gh/oximo-rs/oximo/graph/badge.svg?token=ff0RIQTCA4"/> 
+</a>
 
-oximo is a Rust algebraic modeling library for mathematical optimization.
+oximo is a Rust algebraic modeling library for mathematical optimization. Learn more at [oximo.dev](https://oximo.dev).
 
 ```rust,no_run
 use oximo::prelude::*;
