@@ -19,7 +19,6 @@ criterion_group! {
         suite::model::bench,
         suite::io::bench,
         suite::pounce::bench,
-        suite::backends::bench,
         suite::enzyme::bench
 }
 criterion_main!(benches);

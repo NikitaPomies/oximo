@@ -20,5 +20,8 @@ pub use tape::Tape;
 
 #[cfg(feature = "enzyme")]
 pub use evaluator::NlpEvaluator;
+#[cfg(all(feature = "enzyme", feature = "benchmark-support"))]
+#[doc(hidden)]
+pub use evaluator::benchmark_support;
 #[cfg(feature = "enzyme")]
 pub use linearize::gradient_at;
