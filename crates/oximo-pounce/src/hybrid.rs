@@ -284,6 +284,82 @@ impl DerivativeOracle for HybridOracle {
     }
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const CLASSIFY_THRESHOLD: usize = PAR_CLASSIFY_THRESHOLD;
+    pub const VALUE_THRESHOLD: usize = PAR_VALUE_THRESHOLD;
+    pub const JACOBIAN_THRESHOLD: usize = PAR_JACOBIAN_THRESHOLD;
+
+    pub fn model(rows: usize, nonlinear: bool) -> Model {
+        let model = Model::new("pounce_bench");
+        let x = model.__var("x").lb(-5.0).ub(5.0).build();
+        let y = model.__var("y").lb(-5.0).ub(5.0).build();
+        let z = model.__var("z").lb(-5.0).ub(5.0).build();
+        model.__minimize(x.powi(2) + y + z);
+        for i in 0..rows {
+            let lhs = if nonlinear {
+                x * y * z + (i as f64 + 1.0) * x
+            } else if i % 2 == 0 {
+                x.powi(2) + y * z + (i as f64 + 1.0) * x
+            } else {
+                x + 2.0 * y - z
+            };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model
+    }
+
+    pub fn classify(model: &Model, parallel: bool) -> usize {
+        let arena = model.arena();
+        let exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
+        let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
+        classify_slots(&arena, &exprs, mode).iter().map(|slot| slot.support.len()).sum()
+    }
+
+    #[derive(Debug)]
+    pub struct Oracle {
+        inner: HybridOracle,
+        point: [f64; 3],
+        values: Vec<f64>,
+        sparse: Vec<f64>,
+        dense: Vec<f64>,
+    }
+
+    impl Oracle {
+        pub fn new(model: &Model) -> Self {
+            let inner = HybridOracle::new_with(model, Parallelism::Serial);
+            let values = vec![0.0; inner.cons.len()];
+            let sparse = vec![0.0; inner.jac_structure.len()];
+            let dense = vec![0.0; inner.cons.len() * inner.n_vars];
+            Self { inner, point: [0.7, -1.1, 0.4], values, sparse, dense }
+        }
+
+        pub fn values(&mut self, parallel: bool) -> f64 {
+            let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
+            self.inner.eval_constraints_with(&self.point, &mut self.values, mode);
+            self.values.iter().sum()
+        }
+
+        pub fn sparse_jacobian(&mut self, parallel: bool) -> f64 {
+            let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
+            self.inner.eval_constraint_jacobian_with(&self.point, &mut self.sparse, mode);
+            self.sparse.iter().sum()
+        }
+
+        pub fn dense_jacobian(&mut self, parallel: bool) -> f64 {
+            let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
+            assert!(self.inner.try_exact_dense_jacobian_with(&self.point, &mut self.dense, mode,));
+            self.dense.iter().sum()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use oximo_core::prelude::*;

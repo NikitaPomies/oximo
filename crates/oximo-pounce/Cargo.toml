@@ -10,6 +10,7 @@ description = "POUNCE (pure-Rust IPOPT) NLP backend for oximo. Finite difference
 readme = "README.md"
 
 [features]
+benchmark-support = []
 enzyme = ["oximo-autodiff/enzyme"]
 
 [dependencies]
