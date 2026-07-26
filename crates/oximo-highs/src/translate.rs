@@ -377,6 +377,44 @@ fn map_status(s: HighsModelStatus) -> TerminationStatus {
     }
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const ROW_THRESHOLD: usize = PAR_ROW_THRESHOLD;
+
+    pub fn row_model(rows: usize) -> Model {
+        let model = Model::new("highs_row_bench");
+        let x = model.__var("x").lb(-5.0).ub(5.0).build();
+        let y = model.__var("y").lb(-5.0).ub(5.0).build();
+        for i in 0..rows {
+            model.__add_constraint_auto((x + (i as f64 + 1.0) * y).le(i as f64 + 10.0));
+        }
+        model.__minimize(x + y);
+        model
+    }
+
+    pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
+        let arena = model.arena();
+        let vars = model.variables();
+        let constraints = model.constraints();
+        Ok(constraint_terms(&arena, &vars, &constraints, Some(parallel))?
+            .iter()
+            .map(|terms| terms.coeffs.len())
+            .sum())
+    }
+
+    pub fn solution_maps(values: &[f64], parallel: bool) -> usize {
+        let (primal, reduced_costs, dual) =
+            collect_solution_with(true, values, values, values, values.len(), parallel);
+        primal.len() + reduced_costs.len() + dual.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use oximo_core::prelude::*;
