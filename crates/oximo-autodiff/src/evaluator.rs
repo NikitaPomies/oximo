@@ -702,10 +702,12 @@ fn build_seeds(
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const THRESHOLD: usize = PAR_CLASSIFY_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const THRESHOLD: usize = 1_024;
 
     pub fn model(rows: usize, degree: usize) -> Model {
         let model = Model::new("enzyme_classification_bench");
@@ -725,12 +727,9 @@ pub mod benchmark_support {
     }
 
     pub fn classify(model: &Model, parallel: bool) -> usize {
-        let arena = model.arena();
+        let arena = model.arena().clone();
         let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
-        classify_constraints_with(&arena, &exprs, Some(parallel))
-            .iter()
-            .map(|slot| slot.support.len())
-            .sum()
+        classify(&arena, &exprs, parallel).iter().map(|slot| slot.support.len()).sum()
     }
 
     #[derive(Debug)]
@@ -741,17 +740,45 @@ pub mod benchmark_support {
 
     impl Refresh {
         pub fn new(model: &Model) -> Self {
-            let arena = model.arena();
+            let arena = model.arena().clone();
             let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
-            let slots = classify_constraints_with(&arena, &exprs, Some(false));
+            let slots = classify(&arena, &exprs, false);
             Self { slots, exprs }
         }
 
         pub fn run(&mut self, model: &Model, parallel: bool) -> usize {
-            let arena = model.arena();
-            self.slots =
-                reclassify_constraints_with(&arena, &self.slots, &self.exprs, Some(parallel));
+            let arena = model.arena().clone();
+            self.slots = reclassify(&arena, &self.slots, &self.exprs, parallel);
             self.slots.iter().map(|slot| slot.support.len()).sum()
+        }
+    }
+
+    fn classify(
+        arena: &oximo_expr::ExprArena,
+        exprs: &[ExprId],
+        parallel: bool,
+    ) -> Vec<FunctionSlot> {
+        if parallel {
+            exprs.par_iter().map(|&expr| FunctionSlot::classify(arena, expr)).collect()
+        } else {
+            exprs.iter().map(|&expr| FunctionSlot::classify(arena, expr)).collect()
+        }
+    }
+
+    fn reclassify(
+        arena: &oximo_expr::ExprArena,
+        slots: &[FunctionSlot],
+        exprs: &[ExprId],
+        parallel: bool,
+    ) -> Vec<FunctionSlot> {
+        if parallel {
+            slots
+                .par_iter()
+                .zip(exprs.par_iter())
+                .map(|(slot, &expr)| slot.reclassify(arena, expr))
+                .collect()
+        } else {
+            slots.iter().zip(exprs).map(|(slot, &expr)| slot.reclassify(arena, expr)).collect()
         }
     }
 }
