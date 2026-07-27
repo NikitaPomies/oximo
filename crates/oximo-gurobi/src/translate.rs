@@ -642,3 +642,40 @@ fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
         _ => TerminationStatus::Other(format!("Status: {status:?}")),
     })
 }
+
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const THRESHOLD: usize = PAR_LINEAR_EXTRACTION_THRESHOLD;
+
+    pub fn model(rows: usize, degree: usize) -> Model {
+        let model = Model::new("gurobi_extract_bench");
+        let x = model.__var("x").lb(-5.0).ub(5.0).build();
+        let y = model.__var("y").lb(-5.0).ub(5.0).build();
+        let z = model.__var("z").lb(-5.0).ub(5.0).build();
+        for i in 0..rows {
+            let lhs = match degree {
+                1 => x + 2.0 * y - z,
+                2 => x.powi(2) + y,
+                _ => x * y * z,
+            };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model.__minimize(x + y + z);
+        model
+    }
+
+    pub fn extract(model: &Model, parallel: bool) -> usize {
+        let arena = model.arena();
+        let constraints = model.constraints();
+        extract_linear_forms(&arena, &constraints, Some(parallel))
+            .iter()
+            .map(|terms| terms.as_ref().map_or(0, |terms| terms.coeffs.len() + 1))
+            .sum()
+    }
+}

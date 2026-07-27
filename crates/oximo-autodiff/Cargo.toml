@@ -10,6 +10,7 @@ description = "Automatic differentiation (gradients, sparse Jacobians and Hessia
 readme = "README.md"
 
 [features]
+benchmark-support = []
 # Enables the std::autodiff (Enzyme) derivative engine. Requires a nightly
 # toolchain with the `enzyme` component, RUSTFLAGS="-Zautodiff=Enable",
 # and a fat-LTO profile (the workspace provides `--profile enzyme`).

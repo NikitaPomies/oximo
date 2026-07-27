@@ -5,6 +5,10 @@ mod options;
 mod persistent;
 mod translate;
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+pub use translate::benchmark_support;
+
 pub use options::{ClarabelDirectSolve, ClarabelOptions};
 pub use persistent::ClarabelPersistent;
 pub use translate::solve;

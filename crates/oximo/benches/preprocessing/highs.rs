@@ -1,0 +1,28 @@
+use criterion::Criterion;
+use oximo_highs::benchmark_support;
+
+use super::common::{pair, sizes};
+
+#[expect(clippy::cast_precision_loss)]
+/// Measure HiGHS row extraction and its rejected result-map candidate.
+pub fn bench(criterion: &mut Criterion) {
+    // Measures ordered linear row extraction before building the native model.
+    let mut row_group = criterion.benchmark_group("preprocessing/highs_rows");
+    for (size, rows) in sizes(benchmark_support::ROW_THRESHOLD) {
+        let model = benchmark_support::row_model(rows);
+        pair(&mut row_group, &format!("{size}/{rows}"), rows, &model, |model, parallel| {
+            benchmark_support::rows(model, parallel).unwrap()
+        });
+    }
+    row_group.finish();
+
+    // Re-measures the parallel HashMap candidate rejected for result parsing.
+    let mut map_group = criterion.benchmark_group("preprocessing/highs_solution_maps_rejected");
+    for (size, rows) in sizes(2731) {
+        let values: Vec<f64> = (0..rows).map(|i| i as f64).collect();
+        pair(&mut map_group, &format!("{size}/{rows}"), rows * 3, &values, |values, parallel| {
+            benchmark_support::solution_maps(values, parallel)
+        });
+    }
+    map_group.finish();
+}

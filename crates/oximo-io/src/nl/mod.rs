@@ -35,6 +35,10 @@ mod permute;
 mod segments;
 mod writer;
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+pub use analyze::benchmark_support;
+
 pub use options::{
     Complementarity, DefinedVar, ImportedFunction, NlFormat, SuffixData, SuffixFlavour, SuffixKind,
     WriteOptions,

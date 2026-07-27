@@ -697,6 +697,65 @@ fn build_seeds(
     seeds
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const THRESHOLD: usize = PAR_CLASSIFY_THRESHOLD;
+
+    pub fn model(rows: usize, degree: usize) -> Model {
+        let model = Model::new("enzyme_classification_bench");
+        let x = model.__var("x").lb(-3.0).ub(3.0).build();
+        let y = model.__var("y").lb(-3.0).ub(3.0).build();
+        let z = model.__var("z").lb(-3.0).ub(3.0).build();
+        model.__minimize(x + y + z);
+        for i in 0..rows {
+            let lhs = match degree {
+                1 => x + 2.0 * y - z,
+                2 => x.powi(2) + y * z,
+                _ => x * y * z + x.sin(),
+            };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model
+    }
+
+    pub fn classify(model: &Model, parallel: bool) -> usize {
+        let arena = model.arena();
+        let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
+        classify_constraints_with(&arena, &exprs, Some(parallel))
+            .iter()
+            .map(|slot| slot.support.len())
+            .sum()
+    }
+
+    #[derive(Debug)]
+    pub struct Refresh {
+        slots: Vec<FunctionSlot>,
+        exprs: Vec<ExprId>,
+    }
+
+    impl Refresh {
+        pub fn new(model: &Model) -> Self {
+            let arena = model.arena();
+            let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
+            let slots = classify_constraints_with(&arena, &exprs, Some(false));
+            Self { slots, exprs }
+        }
+
+        pub fn run(&mut self, model: &Model, parallel: bool) -> usize {
+            let arena = model.arena();
+            self.slots =
+                reclassify_constraints_with(&arena, &self.slots, &self.exprs, Some(parallel));
+            self.slots.iter().map(|slot| slot.support.len()).sum()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Serial vs parallel equivalence of the threshold-gated derivative paths.

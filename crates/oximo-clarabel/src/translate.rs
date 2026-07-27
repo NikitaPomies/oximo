@@ -547,6 +547,53 @@ fn map_status(s: SolverStatus) -> TerminationStatus {
     }
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const ROW_THRESHOLD: usize = PAR_ROW_THRESHOLD;
+    pub const SOC_THRESHOLD: usize = PAR_SOC_THRESHOLD;
+
+    pub fn row_model(rows: usize, soc: bool) -> Model {
+        let model = Model::new("clarabel_row_bench");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        let t = model.__var("t").lb(0.0).build();
+        model.__minimize(t);
+        for i in 0..rows {
+            let lhs = if soc { x.powi(2) + y.powi(2) - t.powi(2) } else { x + 2.0 * y - t };
+            model.__add_constraint_auto(lhs.le(if soc { 0.0 } else { i as f64 + 10.0 }));
+        }
+        model
+    }
+
+    pub fn explicit_soc_model(count: usize) -> Model {
+        let model = Model::new("clarabel_explicit_soc_bench");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        let t = model.__var("t").lb(0.0).build();
+        for i in 0..count {
+            model.add_soc_constraint(format!("soc{i}"), [x, y], t);
+        }
+        model.__minimize(t);
+        model
+    }
+
+    pub fn classify(model: &Model, parallel: bool) -> Result<usize, SolverError> {
+        Ok(classify_rows_with(model, parallel)?.len())
+    }
+
+    pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
+        let arena = model.arena();
+        let socs = model.soc_constraints();
+        Ok(explicit_soc_forms(&arena, &socs, Some(parallel))?.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use oximo_core::prelude::*;

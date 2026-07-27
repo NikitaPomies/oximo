@@ -9,6 +9,9 @@ authors.workspace = true
 description = "HiGHS LP/MILP/QP backend for oximo"
 readme = "README.md"
 
+[features]
+benchmark-support = []
+
 [dependencies]
 oximo-expr.workspace = true
 oximo-core.workspace = true

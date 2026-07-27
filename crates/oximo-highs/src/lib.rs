@@ -5,6 +5,10 @@ mod options;
 mod persistent;
 mod translate;
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+pub use translate::benchmark_support;
+
 pub use options::{HighsMethod, HighsOptions, HighsPresolve};
 pub use persistent::HighsPersistent;
 pub use translate::solve;

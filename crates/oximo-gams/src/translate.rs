@@ -1021,6 +1021,43 @@ fn parse_gams_float(s: &str) -> Option<f64> {
     }
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const THRESHOLD: usize = PAR_RENDER_THRESHOLD;
+
+    pub fn model(rows: usize, degree: usize) -> Model {
+        let model = Model::new("gams_render_bench");
+        let x = model.__var("x").lb(-5.0).ub(5.0).build();
+        let y = model.__var("y").lb(-5.0).ub(5.0).build();
+        let z = model.__var("z").lb(-5.0).ub(5.0).build();
+        model.__minimize(x + y + z);
+        for i in 0..rows {
+            let lhs = match degree {
+                1 => x + 2.0 * y - z,
+                2 => x.powi(2) + y * z + x,
+                _ => x * y * z + x.sin(),
+            };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model
+    }
+
+    pub fn render_equations(model: &Model, parallel: bool) -> String {
+        let arena = model.arena();
+        let constraints = model.constraints();
+        let socs = model.soc_constraints();
+        let mut out = String::new();
+        write_equations_with(&mut out, &arena, &constraints, &socs, None, Some(parallel));
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

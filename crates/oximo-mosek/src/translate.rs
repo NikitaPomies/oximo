@@ -500,6 +500,60 @@ fn backend(message: String) -> SolverError {
     SolverError::Backend(format!("MOSEK: {message}"))
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use oximo_core::constraint::Relate;
+
+    use super::*;
+
+    pub const ROW_THRESHOLD: usize = PAR_ROW_THRESHOLD;
+    pub const SOC_THRESHOLD: usize = PAR_SOC_THRESHOLD;
+
+    pub fn row_model(rows: usize, degree: usize) -> Model {
+        let model = Model::new("mosek_prepare_bench");
+        let x = model.__var("x").lb(-5.0).ub(5.0).build();
+        let y = model.__var("y").lb(-5.0).ub(5.0).build();
+        let t = model.__var("t").lb(0.0).build();
+        for i in 0..rows {
+            let (lhs, rhs) = match degree {
+                1 => (x + 2.0 * y - t, i as f64 + 10.0),
+                2 => (x.powi(2) + y, i as f64 + 10.0),
+                _ => (x.powi(2) + y.powi(2) - t.powi(2), 0.0),
+            };
+            model.__add_constraint_auto(lhs.le(rhs));
+        }
+        model.__minimize(t);
+        model
+    }
+
+    pub fn explicit_soc_model(count: usize) -> Model {
+        let model = Model::new("mosek_explicit_soc_bench");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        let t = model.__var("t").lb(0.0).build();
+        for i in 0..count {
+            model.add_soc_constraint(format!("soc{i}"), [x, y], t);
+        }
+        model.__minimize(t);
+        model
+    }
+
+    pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
+        let arena = model.arena();
+        let variables = model.variables();
+        let constraints = model.constraints();
+        Ok(prepare_rows(&arena, &variables, &constraints, Some(parallel))?.len())
+    }
+
+    pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
+        let arena = model.arena();
+        let socs = model.soc_constraints();
+        Ok(prepare_explicit_socs(&arena, &socs, Some(parallel))?.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,6 +9,9 @@ authors.workspace = true
 description = "Core modeling types (Variable, Set, Constraint, Model) for oximo"
 readme = "README.md"
 
+[features]
+benchmark-support = []
+
 [dependencies]
 oximo-expr.workspace = true
 oximo-macros.workspace = true

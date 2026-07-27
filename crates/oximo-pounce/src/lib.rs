@@ -13,6 +13,10 @@ mod hybrid;
 #[cfg(not(feature = "enzyme"))]
 mod stable;
 
+#[cfg(all(feature = "benchmark-support", not(feature = "enzyme")))]
+#[doc(hidden)]
+pub use hybrid::benchmark_support;
+
 pub use options::{MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions};
 pub use persistent::PouncePersistent;
 

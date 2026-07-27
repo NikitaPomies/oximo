@@ -2,6 +2,7 @@ use std::cell::{Cell, Ref, RefCell};
 use std::marker::PhantomData;
 
 use oximo_expr::{EvalError, Expr, ExprArena, ExprClass, ExprId, ParamId, VarId, classify};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
@@ -14,6 +15,8 @@ use crate::param::Parameter;
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::soc::{SocConstraint, SocConstraintId, detect_soc};
 use crate::var::{VarBuilder, Variable};
+
+const PAR_KIND_THRESHOLD: usize = 64;
 
 /// The kind of mathematical program a `Model` represents.
 ///
@@ -780,41 +783,53 @@ impl Model {
         if let Some(k) = self.cached_kind.get() {
             return k;
         }
-        let arena = self.arena.borrow();
-        let vars = self.variables.borrow();
-        let has_int = vars.iter().any(|v| v.domain.is_integer());
-        let obj_class = self
-            .objective
-            .borrow()
-            .as_ref()
-            .map_or(ExprClass::Linear, |o| classify(&arena, o.expr));
+        let k = self.infer_kind(false);
+        self.cached_kind.set(Some(k));
+        k
+    }
 
-        let mut any_nonlinear = obj_class == ExprClass::Nonlinear;
-        // A quadratic constraint that is not SOC-shaped.
-        let mut plain_quad_con = false;
-        let mut detected_soc = false;
-        if !any_nonlinear {
-            for c in self.constraints.borrow().iter() {
-                match classify(&arena, c.lhs) {
-                    ExprClass::Linear => {}
-                    ExprClass::Quadratic => {
-                        if detect_soc(&arena, &vars, c).is_some() {
-                            detected_soc = true;
-                        } else {
-                            plain_quad_con = true;
-                        }
-                    }
-                    ExprClass::Nonlinear => {
-                        any_nonlinear = true;
-                        break;
-                    }
+    /// Infer the model kind without reading or updating the kind cache.
+    ///
+    /// `parallel` only changes how constraint expressions are classified. This
+    /// is used by the benchmark harness to time fresh serial and parallel work.
+    fn infer_kind(&self, parallel: bool) -> ModelKind {
+        let arena_ref = self.arena.borrow();
+        let arena: &ExprArena = &arena_ref;
+        let vars_ref = self.variables.borrow();
+        let vars: &[Variable] = &vars_ref;
+        let has_int = vars.iter().any(|v| v.domain.is_integer());
+        let obj_class =
+            self.objective.borrow().as_ref().map_or(ExprClass::Linear, |o| classify(arena, o.expr));
+
+        let constraints_ref = self.constraints.borrow();
+        let constraints: &[Constraint] = &constraints_ref;
+        let summarize = |c: &Constraint| match classify(arena, c.lhs) {
+            ExprClass::Linear => (false, false, false),
+            ExprClass::Quadratic if detect_soc(arena, vars, c).is_some() => (false, false, true),
+            ExprClass::Quadratic => (false, true, false),
+            ExprClass::Nonlinear => (true, false, false),
+        };
+        let combine = |left: (bool, bool, bool), right: (bool, bool, bool)| {
+            (left.0 || right.0, left.1 || right.1, left.2 || right.2)
+        };
+        let (any_nonlinear, plain_quad_con, detected_soc) = if obj_class == ExprClass::Nonlinear {
+            (true, false, false)
+        } else if parallel && constraints.len() >= PAR_KIND_THRESHOLD {
+            constraints.par_iter().map(summarize).reduce(|| (false, false, false), combine)
+        } else {
+            let mut summary = (false, false, false);
+            for constraint in constraints {
+                summary = combine(summary, summarize(constraint));
+                if summary.0 {
+                    break;
                 }
             }
-        }
+            summary
+        };
         let has_soc = detected_soc || !self.soc_constraints.borrow().is_empty();
 
         let pick = |cont, int| if has_int { int } else { cont };
-        let k = if any_nonlinear {
+        if any_nonlinear {
             pick(ModelKind::NLP, ModelKind::MINLP)
         } else if plain_quad_con {
             pick(ModelKind::QCP, ModelKind::MIQCP)
@@ -824,9 +839,7 @@ impl Model {
             pick(ModelKind::QP, ModelKind::MIQP)
         } else {
             pick(ModelKind::LP, ModelKind::MILP)
-        };
-        self.cached_kind.set(Some(k));
-        k
+        }
     }
 }
 
@@ -981,6 +994,36 @@ pub fn display_index_key(key: &IndexKey) -> String {
     out
 }
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+pub mod benchmark_support {
+    use super::*;
+
+    pub const THRESHOLD: usize = PAR_KIND_THRESHOLD;
+
+    pub fn model(rows: usize, degree: usize) -> Model {
+        let model = Model::new("kind_bench");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        let z = model.__var("z").build();
+        model.__minimize(x + y + z);
+        for i in 0..rows {
+            let lhs = match degree {
+                1 => x + 2.0 * y - z,
+                2 => x.powi(2) + y,
+                _ => x * y * z,
+            };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model
+    }
+
+    pub fn infer(model: &Model, parallel: bool) -> ModelKind {
+        model.infer_kind(parallel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use oximo_expr::extract_linear;
@@ -1040,6 +1083,24 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::LP);
         m.set_param(p, 2.0);
         assert_eq!(m.kind(), ModelKind::LP);
+    }
+
+    #[test]
+    fn uncached_kind_inference_leaves_kind_cache_empty() {
+        let m = Model::new("uncached_kind");
+        let x = m.__var("x").build();
+        m.__minimize(x);
+        for _ in 0..PAR_KIND_THRESHOLD {
+            m.__add_constraint_auto(x.powi(2).le(1.0));
+        }
+
+        assert_eq!(m.infer_kind(false), ModelKind::QCP);
+        assert_eq!(m.cached_kind.get(), None);
+        assert_eq!(m.infer_kind(true), ModelKind::QCP);
+        assert_eq!(m.cached_kind.get(), None);
+
+        assert_eq!(m.kind(), ModelKind::QCP);
+        assert_eq!(m.cached_kind.get(), Some(ModelKind::QCP));
     }
 
     #[test]
