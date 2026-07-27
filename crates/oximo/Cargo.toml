@@ -24,6 +24,8 @@ clarabel-faer = ["clarabel", "oximo-clarabel/faer"]
 pounce = ["dep:oximo-pounce"]
 pounce-enzyme = ["pounce", "oximo-pounce/enzyme"]
 _benchmark-support = [
+    "dep:criterion",
+    "dep:rayon",
     "highs",
     "io",
     "gams",
@@ -69,10 +71,8 @@ oximo-clarabel = { workspace = true, optional = true }
 oximo-pounce = { workspace = true, optional = true }
 oximo-io = { workspace = true, optional = true }
 oximo-autodiff = { workspace = true, optional = true }
-
-[dev-dependencies]
-criterion.workspace = true
-rayon.workspace = true
+criterion = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 
 [lints]
 workspace = true
