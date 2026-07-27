@@ -9,6 +9,9 @@ authors.workspace = true
 description = "MOSEK backend for oximo"
 readme = "README.md"
 
+[features]
+benchmark-support = []
+
 [dependencies]
 mosek.workspace = true
 oximo-expr.workspace = true

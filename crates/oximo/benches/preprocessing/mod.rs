@@ -7,4 +7,5 @@ pub mod gurobi;
 pub mod highs;
 pub mod io;
 pub mod model;
+pub mod mosek;
 pub mod pounce;
