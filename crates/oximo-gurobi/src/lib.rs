@@ -6,6 +6,10 @@ mod options;
 mod persistent;
 mod translate;
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+pub use translate::benchmark_support;
+
 pub use options::{GurobiOptions, GurobiPresolve};
 pub use persistent::GurobiPersistent;
 pub use translate::solve;
