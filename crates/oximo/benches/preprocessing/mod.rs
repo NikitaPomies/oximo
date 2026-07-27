@@ -1,3 +1,4 @@
+pub mod clarabel;
 pub mod common;
 pub mod enzyme;
 pub mod highs;

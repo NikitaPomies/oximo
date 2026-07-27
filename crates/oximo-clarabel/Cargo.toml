@@ -10,6 +10,7 @@ description = "Clarabel LP/QP/SOCP conic backend for oximo"
 readme = "README.md"
 
 [features]
+benchmark-support = []
 faer = ["clarabel/faer-sparse"]
 
 [package.metadata.docs.rs]
