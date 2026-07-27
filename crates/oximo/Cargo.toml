@@ -77,6 +77,11 @@ rayon.workspace = true
 [lints]
 workspace = true
 
+[[bench]]
+name = "preprocessing"
+harness = false
+required-features = ["_benchmark-support"]
+
 [[example]]
 name = "baron_robot"
 doc-scrape-examples = false
