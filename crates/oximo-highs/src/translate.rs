@@ -385,7 +385,8 @@ pub mod benchmark_support {
 
     use super::*;
 
-    pub const ROW_THRESHOLD: usize = PAR_ROW_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const ROW_THRESHOLD: usize = 1_024;
 
     pub fn row_model(rows: usize) -> Model {
         let model = Model::new("highs_row_bench");
@@ -399,19 +400,56 @@ pub mod benchmark_support {
     }
 
     pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
-        let vars = model.variables();
-        let constraints = model.constraints();
-        Ok(constraint_terms(&arena, &vars, &constraints, Some(parallel))?
-            .iter()
-            .map(|terms| terms.coeffs.len())
-            .sum())
+        let arena = model.arena().clone();
+        let vars = model.variables().clone();
+        let constraints = model.constraints().clone();
+        let terms = if parallel {
+            constraints
+                .par_iter()
+                .map(|c| extract(&arena, &vars, c))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            constraints.iter().map(|c| extract(&arena, &vars, c)).collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(terms.iter().map(|terms| terms.coeffs.len()).sum())
     }
 
     pub fn solution_maps(values: &[f64], parallel: bool) -> usize {
-        let (primal, reduced_costs, dual) =
-            collect_solution_with(true, values, values, values, values.len(), parallel);
+        let make = |i: usize, value: f64| (VarId(u32::try_from(i).unwrap()), value);
+        let primal: FxHashMap<VarId, f64> = if parallel {
+            values.par_iter().copied().enumerate().map(|(i, value)| make(i, value)).collect()
+        } else {
+            values.iter().copied().enumerate().map(|(i, value)| make(i, value)).collect()
+        };
+        let reduced_costs = primal.clone();
+        let dual: FxHashMap<ConstraintId, f64> = if parallel {
+            values
+                .par_iter()
+                .copied()
+                .enumerate()
+                .map(|(i, value)| (ConstraintId(u32::try_from(i).unwrap()), value))
+                .collect()
+        } else {
+            values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, value)| (ConstraintId(u32::try_from(i).unwrap()), value))
+                .collect()
+        };
         primal.len() + reduced_costs.len() + dual.len()
+    }
+
+    fn extract(
+        arena: &ExprArena,
+        vars: &[Variable],
+        c: &oximo_core::Constraint,
+    ) -> Result<LinearTerms, SolverError> {
+        extract_linear(arena, c.lhs).ok_or_else(|| SolverError::Nonlinear {
+            location: format!("constraint {:?}", c.name),
+            term: describe_nonlinear_term(arena, c.lhs, &|v| var_name(vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })
     }
 }
 

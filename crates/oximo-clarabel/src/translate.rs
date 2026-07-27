@@ -552,11 +552,14 @@ fn map_status(s: SolverStatus) -> TerminationStatus {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const ROW_THRESHOLD: usize = PAR_ROW_THRESHOLD;
-    pub const SOC_THRESHOLD: usize = PAR_SOC_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const ROW_THRESHOLD: usize = 1_024;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const SOC_THRESHOLD: usize = 1_024;
 
     pub fn row_model(rows: usize, soc: bool) -> Model {
         let model = Model::new("clarabel_row_bench");
@@ -584,13 +587,44 @@ pub mod benchmark_support {
     }
 
     pub fn classify(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        Ok(classify_rows_with(model, parallel)?.len())
+        let arena = model.arena().clone();
+        let vars = model.variables().clone();
+        let constraints = model.constraints().clone();
+        let classify = |c: &oximo_core::Constraint| match extract_linear(&arena, c.lhs) {
+            Some(t) => Ok(Row::Lin(t)),
+            None => {
+                detect_soc(&arena, &vars, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
+                    location: format!("constraint {:?}", c.name),
+                    term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
+                        .unwrap_or_else(|| "<nonlinear>".into()),
+                })
+            }
+        };
+        let rows = if parallel {
+            constraints.par_iter().map(classify).collect::<Result<Vec<_>, _>>()?
+        } else {
+            constraints.iter().map(classify).collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(rows.len())
     }
 
     pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
+        let arena = model.arena().clone();
         let socs = model.soc_constraints();
-        Ok(explicit_soc_forms(&arena, &socs, Some(parallel))?.len())
+        let form = |s: &oximo_core::SocConstraint| {
+            explicit_soc_form(&arena, s).ok_or_else(|| {
+                SolverError::Backend(format!(
+                    "SOC constraint '{}' has a member outside this model's arena",
+                    s.name
+                ))
+            })
+        };
+        let forms = if parallel {
+            socs.par_iter().map(form).collect::<Result<Vec<_>, _>>()?
+        } else {
+            socs.iter().map(form).collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(forms.len())
     }
 }
 

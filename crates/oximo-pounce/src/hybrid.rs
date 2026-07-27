@@ -289,12 +289,16 @@ impl DerivativeOracle for HybridOracle {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const CLASSIFY_THRESHOLD: usize = PAR_CLASSIFY_THRESHOLD;
-    pub const VALUE_THRESHOLD: usize = PAR_VALUE_THRESHOLD;
-    pub const JACOBIAN_THRESHOLD: usize = PAR_JACOBIAN_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const CLASSIFY_THRESHOLD: usize = 1_024;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const VALUE_THRESHOLD: usize = 1_024;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const JACOBIAN_THRESHOLD: usize = 1_024;
 
     pub fn model(rows: usize, nonlinear: bool) -> Model {
         let model = Model::new("pounce_bench");
@@ -316,13 +320,15 @@ pub mod benchmark_support {
     }
 
     pub fn classify(model: &Model, parallel: bool) -> usize {
-        let arena = model.arena();
+        let arena = model.arena().clone();
         let exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
-        let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
-        classify_slots(&arena, &exprs, mode).iter().map(|slot| slot.support.len()).sum()
+        if parallel {
+            exprs.par_iter().map(|&e| FunctionSlot::classify(&arena, e).support.len()).sum()
+        } else {
+            exprs.iter().map(|&e| FunctionSlot::classify(&arena, e).support.len()).sum()
+        }
     }
 
-    #[derive(Debug)]
     pub struct Oracle {
         inner: HybridOracle,
         point: [f64; 3],
@@ -331,9 +337,15 @@ pub mod benchmark_support {
         dense: Vec<f64>,
     }
 
+    impl std::fmt::Debug for Oracle {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Oracle").field("constraints", &self.values.len()).finish()
+        }
+    }
+
     impl Oracle {
         pub fn new(model: &Model) -> Self {
-            let inner = HybridOracle::new_with(model, Parallelism::Serial);
+            let inner = HybridOracle::new(model);
             let values = vec![0.0; inner.cons.len()];
             let sparse = vec![0.0; inner.jac_structure.len()];
             let dense = vec![0.0; inner.cons.len() * inner.n_vars];
@@ -341,20 +353,52 @@ pub mod benchmark_support {
         }
 
         pub fn values(&mut self, parallel: bool) -> f64 {
-            let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
-            self.inner.eval_constraints_with(&self.point, &mut self.values, mode);
+            if parallel {
+                self.values.par_iter_mut().zip(self.inner.cons.par_iter()).for_each(
+                    |(out, slot)| {
+                        let mut regs = vec![0.0; self.inner.regs.len()];
+                        *out = slot_value(slot, &self.point, &self.inner.params, &mut regs);
+                    },
+                );
+            } else {
+                self.inner.eval_constraints(&self.point, &mut self.values);
+            }
             self.values.iter().sum()
         }
 
         pub fn sparse_jacobian(&mut self, parallel: bool) -> f64 {
-            let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
-            self.inner.eval_constraint_jacobian_with(&self.point, &mut self.sparse, mode);
+            if parallel {
+                let rows: Vec<Vec<f64>> = self
+                    .inner
+                    .cons
+                    .par_iter()
+                    .map(|slot| {
+                        let mut scratch = vec![0.0; self.inner.n_vars];
+                        slot_gradient_add(slot, &self.point, &mut scratch);
+                        slot.support.iter().map(|&j| scratch[j as usize]).collect()
+                    })
+                    .collect();
+                self.sparse.clear();
+                self.sparse.extend(rows.into_iter().flatten());
+            } else {
+                self.inner.eval_constraint_jacobian(&self.point, &mut self.sparse);
+            }
             self.sparse.iter().sum()
         }
 
         pub fn dense_jacobian(&mut self, parallel: bool) -> f64 {
-            let mode = if parallel { Parallelism::Parallel } else { Parallelism::Serial };
-            assert!(self.inner.try_exact_dense_jacobian_with(&self.point, &mut self.dense, mode,));
+            if parallel {
+                assert!(!self.inner.cons.iter().any(FunctionSlot::is_nonlinear));
+                self.dense
+                    .par_chunks_mut(self.inner.n_vars)
+                    .zip(self.inner.cons.par_iter())
+                    .for_each(|(row, slot)| {
+                        row.fill(0.0);
+                        slot_gradient_add(slot, &self.point, row);
+                    });
+            } else {
+                assert!(self.inner.try_exact_dense_jacobian(&self.point, &mut self.dense));
+            }
             self.dense.iter().sum()
         }
     }
