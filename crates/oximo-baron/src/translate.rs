@@ -1140,10 +1140,12 @@ fn parse_baron_float(s: &str) -> Option<f64> {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const THRESHOLD: usize = PAR_RENDER_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const THRESHOLD: usize = 1_024;
 
     pub fn model(rows: usize, degree: usize) -> Model {
         let model = Model::new("baron_render_bench");
@@ -1163,12 +1165,83 @@ pub mod benchmark_support {
     }
 
     pub fn render_equations(model: &Model, parallel: bool) -> Result<String, SolverError> {
-        let arena = model.arena();
-        let constraints = model.constraints();
-        let socs = model.soc_constraints();
+        let arena = model.arena().clone();
+        let constraints = model.constraints().clone();
+        let socs = model.soc_constraints().clone();
         let mut out = String::new();
-        let map = write_equations_with(&mut out, &arena, &constraints, &socs, Some(parallel))?;
+        let map = if parallel {
+            render_parallel(&mut out, &arena, &constraints, &socs)?
+        } else {
+            write_equations(&mut out, &arena, &constraints, &socs)?
+        };
         std::hint::black_box(map);
+        Ok(out)
+    }
+
+    fn render_parallel(
+        out: &mut String,
+        arena: &ExprArena,
+        constraints: &[Constraint],
+        socs: &[SocConstraint],
+    ) -> Result<Vec<ConstraintId>, SolverError> {
+        let mut emit_map = Vec::with_capacity(constraints.len());
+        if constraints.is_empty() && socs.is_empty() {
+            return Ok(emit_map);
+        }
+        let mut names = Vec::with_capacity(constraints.len() + 2 * socs.len());
+        for (i, c) in constraints.iter().enumerate() {
+            let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
+            if c.is_range() {
+                names.extend([format!("c{i}_lo"), format!("c{i}_hi")]);
+                emit_map.extend([id, id]);
+            } else {
+                names.push(format!("c{i}"));
+                emit_map.push(id);
+            }
+        }
+        for i in 0..socs.len() {
+            names.extend([format!("soc{i}"), format!("soc{i}_sign")]);
+        }
+        writeln!(out, "EQUATIONS {};", names.join(", ")).unwrap();
+        let fragments: Vec<String> = constraints
+            .par_iter()
+            .enumerate()
+            .map(|(i, c)| constraint_fragment(arena, i, c))
+            .collect::<Result<_, _>>()?;
+        for fragment in fragments {
+            out.push_str(&fragment);
+        }
+        write_soc_rows(out, arena, socs);
+        writeln!(out).unwrap();
+        Ok(emit_map)
+    }
+
+    fn constraint_fragment(
+        arena: &ExprArena,
+        index: usize,
+        c: &Constraint,
+    ) -> Result<String, SolverError> {
+        if !expr_has_var(arena, c.lhs) {
+            return Err(SolverError::Backend(format!(
+                "constraint '{}' has no variables (its left-hand side is constant); BARON requires every constraint to contain at least one variable",
+                c.name
+            )));
+        }
+        let mut out = String::new();
+        if let Some((sense, rhs)) = c.as_single() {
+            let op = match sense {
+                Sense::Le => "<=",
+                Sense::Ge => ">=",
+                Sense::Eq => "==",
+            };
+            write!(out, "c{index}: ").unwrap();
+            write_constraint_body(&mut out, arena, c.lhs, op, rhs)?;
+        } else {
+            write!(out, "c{index}_lo: ").unwrap();
+            write_constraint_body(&mut out, arena, c.lhs, ">=", c.lower)?;
+            write!(out, "c{index}_hi: ").unwrap();
+            write_constraint_body(&mut out, arena, c.lhs, "<=", c.upper)?;
+        }
         Ok(out)
     }
 }

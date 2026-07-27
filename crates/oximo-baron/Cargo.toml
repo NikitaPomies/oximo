@@ -10,13 +10,14 @@ description = "BARON writer and backend for oximo"
 readme = "README.md"
 
 [features]
-benchmark-support = []
+benchmark-support = ["dep:rayon"]
 
 [dependencies]
 oximo-expr.workspace = true
 oximo-core.workspace = true
 oximo-solver.workspace = true
 rustc-hash.workspace = true
+rayon = { workspace = true, optional = true }
 
 [lints]
 workspace = true

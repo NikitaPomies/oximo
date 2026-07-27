@@ -1620,6 +1620,7 @@ dependencies = [
  "oximo-core",
  "oximo-expr",
  "oximo-solver",
+ "rayon",
  "rustc-hash",
 ]
 
@@ -1632,6 +1633,7 @@ dependencies = [
  "oximo-expr",
  "oximo-highs",
  "oximo-solver",
+ "rayon",
  "rustc-hash",
 ]
 
@@ -1679,6 +1681,7 @@ dependencies = [
  "oximo-core",
  "oximo-expr",
  "oximo-solver",
+ "rayon",
  "rustc-hash",
  "thiserror 2.0.18",
 ]
@@ -1726,6 +1729,7 @@ dependencies = [
  "oximo-core",
  "oximo-expr",
  "oximo-solver",
+ "rayon",
  "rustc-hash",
 ]
 
@@ -1738,6 +1742,7 @@ dependencies = [
  "oximo-expr",
  "oximo-solver",
  "pounce-rs",
+ "rayon",
  "rustc-hash",
  "thiserror 2.0.18",
 ]

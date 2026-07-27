@@ -214,10 +214,12 @@ fn collect_vars(arena: &ExprArena, id: ExprId, out: &mut FxHashSet<VarId>) -> Re
 pub mod benchmark_support {
     use oximo_core::Model;
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const THRESHOLD: usize = PAR_ANALYZE_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const THRESHOLD: usize = 1_024;
 
     pub fn model(rows: usize, degree: usize) -> Model {
         let model = Model::new("analysis_bench");
@@ -237,22 +239,72 @@ pub mod benchmark_support {
     }
 
     pub fn analyze(model: &Model, parallel: bool) -> Result<usize, IoError> {
-        let arena = model.arena();
+        let arena = model.arena().clone();
         let vars = model.variables();
         let constraints = model.constraints();
         let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
-        let analysis = Analysis::build_with_parallel(
-            &arena,
-            &vars,
-            &constraints,
-            &objective,
-            false,
-            Some(parallel),
-        )?;
+        let analysis = build(&arena, &vars, &constraints, &objective, parallel)?;
         Ok(analysis.cons.len()
             + analysis.cons_vars.iter().map(Vec::len).sum::<usize>()
             + analysis.obj_vars.len()
             + analysis.nl_vars_c.len()
             + analysis.nl_vars_o.len())
+    }
+
+    fn row(
+        arena: &ExprArena,
+        c: &Constraint,
+    ) -> Result<(Row, Vec<VarId>, FxHashSet<VarId>), IoError> {
+        let (linear, residual) = split_linear(arena, c.lhs);
+        let mut all: FxHashSet<VarId> = linear.coeffs.iter().map(|(v, _)| *v).collect();
+        let mut nonlinear = FxHashSet::default();
+        for r in &residual {
+            validate(arena, r.id, false)?;
+            collect_vars(arena, r.id, &mut nonlinear)?;
+        }
+        all.extend(nonlinear.iter().copied());
+        Ok((Row { linear, residual }, sorted(all), nonlinear))
+    }
+
+    fn build(
+        arena: &ExprArena,
+        vars: &[Variable],
+        constraints: &[Constraint],
+        objective: &Objective,
+        parallel: bool,
+    ) -> Result<Analysis, IoError> {
+        for v in vars {
+            if matches!(v.domain, Domain::SemiContinuous { .. }) {
+                return Err(IoError::UnsupportedDomain("SemiContinuous"));
+            }
+            if matches!(v.domain, Domain::SemiInteger { .. }) {
+                return Err(IoError::UnsupportedDomain("SemiInteger"));
+            }
+        }
+        let rows = if parallel {
+            constraints.par_iter().map(|c| row(arena, c)).collect::<Result<Vec<_>, _>>()?
+        } else {
+            constraints.iter().map(|c| row(arena, c)).collect::<Result<Vec<_>, _>>()?
+        };
+        let (cons, cons_vars, nl_vars_c) = rows.into_iter().fold(
+            (Vec::new(), Vec::new(), FxHashSet::default()),
+            |(mut rows, mut vars, mut nonlinear), (row, support, used)| {
+                rows.push(row);
+                vars.push(support);
+                nonlinear.extend(used);
+                (rows, vars, nonlinear)
+            },
+        );
+        let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
+        let mut obj_all: FxHashSet<VarId> = obj_linear.coeffs.iter().map(|(v, _)| *v).collect();
+        let mut nl_vars_o = FxHashSet::default();
+        for residual in &obj_residual {
+            validate(arena, residual.id, false)?;
+            collect_vars(arena, residual.id, &mut nl_vars_o)?;
+        }
+        obj_all.extend(nl_vars_o.iter().copied());
+        let obj = Row { linear: obj_linear, residual: obj_residual };
+        let obj_vars = sorted(obj_all);
+        Ok(Analysis { cons, obj, cons_vars, obj_vars, nl_vars_c, nl_vars_o })
     }
 }

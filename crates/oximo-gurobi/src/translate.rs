@@ -648,10 +648,12 @@ fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const THRESHOLD: usize = PAR_LINEAR_EXTRACTION_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const THRESHOLD: usize = 1_024;
 
     pub fn model(rows: usize, degree: usize) -> Model {
         let model = Model::new("gurobi_extract_bench");
@@ -671,11 +673,13 @@ pub mod benchmark_support {
     }
 
     pub fn extract(model: &Model, parallel: bool) -> usize {
-        let arena = model.arena();
-        let constraints = model.constraints();
-        extract_linear_forms(&arena, &constraints, Some(parallel))
-            .iter()
-            .map(|terms| terms.as_ref().map_or(0, |terms| terms.coeffs.len() + 1))
-            .sum()
+        let arena = model.arena().clone();
+        let constraints = model.constraints().clone();
+        let forms = if parallel {
+            constraints.par_iter().map(|c| extract_linear(&arena, c.lhs)).collect::<Vec<_>>()
+        } else {
+            constraints.iter().map(|c| extract_linear(&arena, c.lhs)).collect::<Vec<_>>()
+        };
+        forms.iter().map(|terms| terms.as_ref().map_or(0, |terms| terms.coeffs.len() + 1)).sum()
     }
 }
