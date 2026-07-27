@@ -5,6 +5,10 @@ mod options;
 mod solver_options;
 mod translate;
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+pub use translate::benchmark_support;
+
 pub use options::{GamsOptions, GamsSolver};
 
 // The per-solver `Gams<Name>Options` structs and `GamsSolverConfig` are generated
