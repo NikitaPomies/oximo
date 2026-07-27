@@ -829,7 +829,7 @@ impl Model {
         let has_soc = detected_soc || !self.soc_constraints.borrow().is_empty();
 
         let pick = |cont, int| if has_int { int } else { cont };
-        let k = if any_nonlinear {
+        if any_nonlinear {
             pick(ModelKind::NLP, ModelKind::MINLP)
         } else if plain_quad_con {
             pick(ModelKind::QCP, ModelKind::MIQCP)
@@ -839,8 +839,7 @@ impl Model {
             pick(ModelKind::QP, ModelKind::MIQP)
         } else {
             pick(ModelKind::LP, ModelKind::MILP)
-        };
-        k
+        }
     }
 }
 
@@ -1091,8 +1090,8 @@ mod tests {
         let m = Model::new("uncached_kind");
         let x = m.__var("x").build();
         m.__minimize(x);
-        for i in 0..PAR_KIND_THRESHOLD {
-            m.__add_constraint_auto(x.powi(2).le(i as f64 + 1.0));
+        for _ in 0..PAR_KIND_THRESHOLD {
+            m.__add_constraint_auto(x.powi(2).le(1.0));
         }
 
         assert_eq!(m.infer_kind(false), ModelKind::QCP);

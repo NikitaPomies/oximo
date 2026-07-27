@@ -217,7 +217,7 @@ fn computed_name_range_collapses_to_one_row() {
     let m = Model::new("crange");
     variable!(m, x >= 0.0);
     let tag = "band";
-    constraint!(m, name = format!("{tag}"), 1.0 <= x <= 2.0);
+    constraint!(m, name = tag.to_string(), 1.0 <= x <= 2.0);
     assert_eq!(m.num_constraints(), 1);
     let c = &m.constraints()[m.constraint_id("band").expect("range row").index()];
     assert!(c.is_range());
