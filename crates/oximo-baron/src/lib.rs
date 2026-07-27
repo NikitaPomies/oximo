@@ -8,6 +8,10 @@
 mod options;
 mod translate;
 
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+pub use translate::benchmark_support;
+
 pub use options::BaronOptions;
 pub use translate::solve;
 

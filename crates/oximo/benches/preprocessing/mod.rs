@@ -1,3 +1,4 @@
+pub mod baron;
 pub mod clarabel;
 pub mod common;
 pub mod enzyme;
