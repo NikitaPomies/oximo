@@ -19,6 +19,12 @@ criterion_group! {
         suite::model::bench,
         suite::io::bench,
         suite::pounce::bench,
+        suite::clarabel::bench,
+        suite::highs::bench,
+        suite::gams::bench,
+        suite::baron::bench,
+        suite::gurobi::bench,
+        suite::mosek::bench,
         suite::enzyme::bench
 }
 criterion_main!(benches);
