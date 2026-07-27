@@ -505,11 +505,14 @@ fn backend(message: String) -> SolverError {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const ROW_THRESHOLD: usize = PAR_ROW_THRESHOLD;
-    pub const SOC_THRESHOLD: usize = PAR_SOC_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const ROW_THRESHOLD: usize = 1_024;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const SOC_THRESHOLD: usize = 1_024;
 
     pub fn row_model(rows: usize, degree: usize) -> Model {
         let model = Model::new("mosek_prepare_bench");
@@ -541,16 +544,46 @@ pub mod benchmark_support {
     }
 
     pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
-        let variables = model.variables();
-        let constraints = model.constraints();
-        Ok(prepare_rows(&arena, &variables, &constraints, Some(parallel))?.len())
+        let arena = model.arena().clone();
+        let variables = model.variables().clone();
+        let constraints = model.constraints().clone();
+        let row = |c: &oximo_core::Constraint| {
+            extract_quadratic(&arena, c.lhs)
+                .ok_or_else(|| SolverError::Nonlinear {
+                    location: format!("constraint {:?}", c.name),
+                    term: "<nonlinear>".into(),
+                })
+                .map(|q| {
+                    usize::from(detect_soc(&arena, &variables, c).is_some())
+                        + q.linear.len()
+                        + q.hessian.len()
+                })
+        };
+        let rows = if parallel {
+            constraints.par_iter().map(row).collect::<Result<Vec<_>, _>>()?
+        } else {
+            constraints.iter().map(row).collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(rows.into_iter().sum())
     }
 
     pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
-        let socs = model.soc_constraints();
-        Ok(prepare_explicit_socs(&arena, &socs, Some(parallel))?.len())
+        let arena = model.arena().clone();
+        let socs = model.soc_constraints().clone();
+        let form = |s: &oximo_core::SocConstraint| {
+            explicit_soc_form(&arena, s).ok_or_else(|| {
+                SolverError::Backend(format!(
+                    "SOC constraint '{}' has a member outside this model's arena",
+                    s.name
+                ))
+            })
+        };
+        let forms = if parallel {
+            socs.par_iter().map(form).collect::<Result<Vec<_>, _>>()?
+        } else {
+            socs.iter().map(form).collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(forms.len())
     }
 }
 

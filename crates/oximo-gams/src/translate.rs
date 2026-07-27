@@ -1026,10 +1026,12 @@ fn parse_gams_float(s: &str) -> Option<f64> {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
-    pub const THRESHOLD: usize = PAR_RENDER_THRESHOLD;
+    /// Crossover candidate used only to size the preprocessing benchmark cases.
+    pub const THRESHOLD: usize = 1_024;
 
     pub fn model(rows: usize, degree: usize) -> Model {
         let model = Model::new("gams_render_bench");
@@ -1049,11 +1051,88 @@ pub mod benchmark_support {
     }
 
     pub fn render_equations(model: &Model, parallel: bool) -> String {
-        let arena = model.arena();
-        let constraints = model.constraints();
-        let socs = model.soc_constraints();
+        let arena = model.arena().clone();
+        let constraints = model.constraints().clone();
+        let socs = model.soc_constraints().clone();
         let mut out = String::new();
-        write_equations_with(&mut out, &arena, &constraints, &socs, None, Some(parallel));
+        if parallel {
+            write_parallel(&mut out, &arena, &constraints, &socs);
+        } else {
+            write_equations(&mut out, &arena, &constraints, &socs, None);
+        }
+        out
+    }
+
+    fn write_parallel(
+        out: &mut String,
+        arena: &ExprArena,
+        constraints: &[Constraint],
+        socs: &[SocConstraint],
+    ) {
+        write!(out, "Equations\n    eq_obj").unwrap();
+        for (i, c) in constraints.iter().enumerate() {
+            if c.as_single().is_some() {
+                write!(out, ", eq_c{i}").unwrap();
+            } else {
+                write!(out, ", eq_c{i}_lo, eq_c{i}_hi").unwrap();
+            }
+        }
+        for i in 0..socs.len() {
+            write!(out, ", eq_soc{i}, eq_soc{i}_sign").unwrap();
+        }
+        writeln!(out, ";\n").unwrap();
+        writeln!(out, "eq_obj..  v_obj =e= 0;").unwrap();
+        let fragments: Vec<String> = constraints
+            .par_iter()
+            .enumerate()
+            .map(|(i, c)| constraint_fragment(arena, i, c))
+            .collect();
+        for fragment in fragments {
+            out.push_str(&fragment);
+        }
+        write_soc_equations(out, arena, socs);
+        writeln!(out).unwrap();
+    }
+
+    fn constraint_fragment(arena: &ExprArena, index: usize, c: &Constraint) -> String {
+        let mut out = String::new();
+        if let Some((sense, rhs)) = c.as_single() {
+            let sense = match sense {
+                Sense::Le => "=l=",
+                Sense::Ge => "=g=",
+                Sense::Eq => "=e=",
+            };
+            write!(out, "eq_c{index}..").unwrap();
+            match ExprForm::from(arena, c.lhs) {
+                ExprForm::Linear(terms) => {
+                    write_linear(&mut out, &terms, false);
+                    writeln!(out, " {sense} {};", fmt(rhs - terms.constant)).unwrap();
+                }
+                ExprForm::Nonlinear(id) => {
+                    write_gams_expr(&mut out, arena, id, true);
+                    writeln!(out, " {sense} {};", fmt(rhs)).unwrap();
+                }
+            }
+        } else {
+            match ExprForm::from(arena, c.lhs) {
+                ExprForm::Linear(terms) => {
+                    write!(out, "eq_c{index}_lo..").unwrap();
+                    write_linear(&mut out, &terms, false);
+                    writeln!(out, " =g= {};", fmt(c.lower - terms.constant)).unwrap();
+                    write!(out, "eq_c{index}_hi..").unwrap();
+                    write_linear(&mut out, &terms, false);
+                    writeln!(out, " =l= {};", fmt(c.upper - terms.constant)).unwrap();
+                }
+                ExprForm::Nonlinear(id) => {
+                    write!(out, "eq_c{index}_lo..").unwrap();
+                    write_gams_expr(&mut out, arena, id, true);
+                    writeln!(out, " =g= {};", fmt(c.lower)).unwrap();
+                    write!(out, "eq_c{index}_hi..").unwrap();
+                    write_gams_expr(&mut out, arena, id, true);
+                    writeln!(out, " =l= {};", fmt(c.upper)).unwrap();
+                }
+            }
+        }
         out
     }
 }

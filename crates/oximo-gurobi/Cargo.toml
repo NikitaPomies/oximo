@@ -10,7 +10,7 @@ description = "Gurobi backend for oximo"
 readme = "README.md"
 
 [features]
-benchmark-support = []
+benchmark-support = ["dep:rayon"]
 
 [dependencies]
 oximo-expr.workspace = true
@@ -19,6 +19,7 @@ oximo-solver.workspace = true
 grb = { workspace = true, features = ["gurobi12"] }
 rustc-hash.workspace = true
 thiserror.workspace = true
+rayon = { workspace = true, optional = true }
 
 [lints]
 workspace = true
