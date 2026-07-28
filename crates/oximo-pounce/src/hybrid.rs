@@ -327,6 +327,8 @@ pub mod benchmark_support {
     pub const VALUE_THRESHOLD: usize = 1_024;
     /// Crossover candidate used only to size the preprocessing benchmark cases.
     pub const JACOBIAN_THRESHOLD: usize = 1_024;
+    // Keep each task large enough to amortize its register buffer.
+    const VALUE_MIN_LEN: usize = 64;
 
     pub fn model(rows: usize, nonlinear: bool) -> Model {
         let model = Model::new("pounce_bench");
@@ -385,13 +387,10 @@ pub mod benchmark_support {
                 self.values
                     .par_iter_mut()
                     .zip(self.inner.cons.par_iter())
-                    .map_init(
-                        || vec![0.0; self.inner.regs.len()],
-                        |regs, (out, slot)| {
-                            *out = slot_value(slot, &self.point, &self.inner.params, regs);
-                        },
-                    )
-                    .for_each(drop);
+                    .with_min_len(VALUE_MIN_LEN)
+                    .for_each_with(vec![0.0; self.inner.regs.len()], |regs, (out, slot)| {
+                        *out = slot_value(slot, &self.point, &self.inner.params, regs);
+                    });
             } else {
                 self.inner.eval_constraints(&self.point, &mut self.values);
             }
@@ -445,7 +444,7 @@ pub mod benchmark_support {
         use super::*;
 
         #[test]
-        fn worker_scratch_reuse_matches_serial_results() {
+        fn parallel_scratch_matches_serial_results() {
             let model = super::model(33, false);
             let mut serial = Oracle::new(&model);
             let mut parallel = Oracle::new(&model);
