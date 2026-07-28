@@ -12,7 +12,6 @@ use oximo_expr::{
     extract_quadratic,
 };
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
-use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::HighsOptions;
@@ -127,7 +126,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     let arena_ref: &ExprArena = &arena;
     let vars_ref: &[Variable] = &vars;
     let con_terms: Vec<LinearTerms> = constraints
-        .par_iter()
+        .iter()
         .map(|c| {
             extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
                 location: format!("constraint {:?}", c.name),
@@ -135,7 +134,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
                     .unwrap_or_else(|| "<nonlinear>".into()),
             })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<_, _>>()?;
 
     for (c, t) in constraints.iter().zip(&con_terms) {
         let lower = c.lower - t.constant;
@@ -303,37 +302,21 @@ fn collect_solution(
     }
     let drows = &drows_full[..num_constraints.min(drows_full.len())];
 
-    // Below this, rayon's HashMap collect overhead exceeds the gain.
-    // TODO: benchmark and tune this threshold.
-    const PAR_THRESHOLD: usize = 8192;
-    if cols.len() + dcols.len() + drows.len() < PAR_THRESHOLD {
-        let mut primal: FxHashMap<VarId, f64> =
-            FxHashMap::with_capacity_and_hasher(cols.len(), FxBuildHasher);
-        let mut reduced_costs: FxHashMap<VarId, f64> =
-            FxHashMap::with_capacity_and_hasher(dcols.len(), FxBuildHasher);
-        let mut dual: FxHashMap<ConstraintId, f64> =
-            FxHashMap::with_capacity_and_hasher(drows.len(), FxBuildHasher);
-        for (i, val) in cols.iter().enumerate() {
-            primal.insert(VarId(u32::try_from(i).unwrap()), *val);
-        }
-        for (i, val) in dcols.iter().enumerate() {
-            reduced_costs.insert(VarId(u32::try_from(i).unwrap()), *val);
-        }
-        for (i, val) in drows.iter().enumerate() {
-            dual.insert(ConstraintId(u32::try_from(i).unwrap()), *val);
-        }
-        return (primal, reduced_costs, dual);
+    let mut primal: FxHashMap<VarId, f64> =
+        FxHashMap::with_capacity_and_hasher(cols.len(), FxBuildHasher);
+    let mut reduced_costs: FxHashMap<VarId, f64> =
+        FxHashMap::with_capacity_and_hasher(dcols.len(), FxBuildHasher);
+    let mut dual: FxHashMap<ConstraintId, f64> =
+        FxHashMap::with_capacity_and_hasher(drows.len(), FxBuildHasher);
+    for (i, val) in cols.iter().enumerate() {
+        primal.insert(VarId(u32::try_from(i).unwrap()), *val);
     }
-
-    let primal: FxHashMap<VarId, f64> =
-        cols.par_iter().enumerate().map(|(i, v)| (VarId(u32::try_from(i).unwrap()), *v)).collect();
-    let reduced_costs: FxHashMap<VarId, f64> =
-        dcols.par_iter().enumerate().map(|(i, v)| (VarId(u32::try_from(i).unwrap()), *v)).collect();
-    let dual: FxHashMap<ConstraintId, f64> = drows
-        .par_iter()
-        .enumerate()
-        .map(|(i, v)| (ConstraintId(u32::try_from(i).unwrap()), *v))
-        .collect();
+    for (i, val) in dcols.iter().enumerate() {
+        reduced_costs.insert(VarId(u32::try_from(i).unwrap()), *val);
+    }
+    for (i, val) in drows.iter().enumerate() {
+        dual.insert(ConstraintId(u32::try_from(i).unwrap()), *val);
+    }
     (primal, reduced_costs, dual)
 }
 
@@ -382,6 +365,7 @@ fn map_status(s: HighsModelStatus) -> TerminationStatus {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
     use super::*;
 
