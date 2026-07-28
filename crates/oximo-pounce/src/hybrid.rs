@@ -16,13 +16,36 @@ use oximo_autodiff::slot::{
 use oximo_autodiff::sparsity::{hessian_lagrangian_structure, jacobian_structure};
 use oximo_autodiff::tape::params_snapshot;
 use oximo_autodiff::{FunctionSlot, SlotKind};
-use oximo_core::Model;
+use oximo_core::{Model, ModelKind};
 use oximo_expr::ExprId;
+use rayon::prelude::*;
 
 use crate::tnlp::DerivativeOracle;
 
+// Large NLP slot classification benefits from Rayon at every measured size.
+// QCP classification does not.
+// All refresh/value/Jacobian work remains serial.
+const PAR_CLASSIFY_THRESHOLD: usize = 32;
+
+fn should_parallelize_nlp_classification(kind: ModelKind, len: usize) -> bool {
+    kind == ModelKind::NLP && len >= PAR_CLASSIFY_THRESHOLD && rayon::current_num_threads() > 1
+}
+
+fn classify_slots(
+    arena: &oximo_expr::ExprArena,
+    exprs: &[ExprId],
+    parallel: bool,
+) -> Vec<FunctionSlot> {
+    if parallel {
+        exprs.par_iter().map(|&e| FunctionSlot::classify(arena, e)).collect()
+    } else {
+        exprs.iter().map(|&e| FunctionSlot::classify(arena, e)).collect()
+    }
+}
+
 /// Classified objective/constraint slots plus the precomputed sparsity and
 /// scratch space to serve [`DerivativeOracle`] on stable Rust.
+#[derive(Debug)]
 pub(crate) struct HybridOracle {
     obj: FunctionSlot,
     cons: Vec<FunctionSlot>,
@@ -49,12 +72,18 @@ pub(crate) struct HybridOracle {
 
 impl HybridOracle {
     pub(crate) fn new(model: &Model) -> Self {
+        let parallel =
+            should_parallelize_nlp_classification(model.kind(), model.constraints().len());
+        Self::new_with(model, parallel)
+    }
+
+    fn new_with(model: &Model, parallel: bool) -> Self {
         let arena = model.arena();
         let obj_expr = model.objective().as_ref().map(|o| o.expr);
         let obj = obj_expr.map_or_else(FunctionSlot::zero, |e| FunctionSlot::classify(&arena, e));
         let con_exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
-        let cons: Vec<FunctionSlot> =
-            con_exprs.iter().map(|&e| FunctionSlot::classify(&arena, e)).collect();
+        let arena_ref = &*arena;
+        let cons = classify_slots(arena_ref, &con_exprs, parallel);
         let params = params_snapshot(&arena);
         let mut oracle = Self {
             obj,
@@ -289,7 +318,6 @@ impl DerivativeOracle for HybridOracle {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
-    use rayon::prelude::*;
 
     use super::*;
 
@@ -354,12 +382,16 @@ pub mod benchmark_support {
 
         pub fn values(&mut self, parallel: bool) -> f64 {
             if parallel {
-                self.values.par_iter_mut().zip(self.inner.cons.par_iter()).for_each(
-                    |(out, slot)| {
-                        let mut regs = vec![0.0; self.inner.regs.len()];
-                        *out = slot_value(slot, &self.point, &self.inner.params, &mut regs);
-                    },
-                );
+                self.values
+                    .par_iter_mut()
+                    .zip(self.inner.cons.par_iter())
+                    .map_init(
+                        || vec![0.0; self.inner.regs.len()],
+                        |regs, (out, slot)| {
+                            *out = slot_value(slot, &self.point, &self.inner.params, regs);
+                        },
+                    )
+                    .for_each(drop);
             } else {
                 self.inner.eval_constraints(&self.point, &mut self.values);
             }
@@ -372,11 +404,16 @@ pub mod benchmark_support {
                     .inner
                     .cons
                     .par_iter()
-                    .map(|slot| {
-                        let mut scratch = vec![0.0; self.inner.n_vars];
-                        slot_gradient_add(slot, &self.point, &mut scratch);
-                        slot.support.iter().map(|&j| scratch[j as usize]).collect()
-                    })
+                    .map_init(
+                        || vec![0.0; self.inner.n_vars],
+                        |scratch, slot| {
+                            for &j in &slot.support {
+                                scratch[j as usize] = 0.0;
+                            }
+                            slot_gradient_add(slot, &self.point, scratch);
+                            slot.support.iter().map(|&j| scratch[j as usize]).collect()
+                        },
+                    )
                     .collect();
                 self.sparse.clear();
                 self.sparse.extend(rows.into_iter().flatten());
@@ -402,11 +439,30 @@ pub mod benchmark_support {
             self.dense.iter().sum()
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn worker_scratch_reuse_matches_serial_results() {
+            let model = super::model(33, false);
+            let mut serial = Oracle::new(&model);
+            let mut parallel = Oracle::new(&model);
+
+            assert_eq!(serial.values(false), parallel.values(true));
+            assert_eq!(serial.values(false), parallel.values(true));
+            assert_eq!(serial.sparse_jacobian(false), parallel.sparse_jacobian(true));
+            assert_eq!(serial.sparse_jacobian(false), parallel.sparse_jacobian(true));
+        }
+    }
 }
 
 #[cfg(test)]
+#[expect(clippy::cast_precision_loss)]
 mod tests {
     use oximo_core::prelude::*;
+    use rayon::ThreadPoolBuilder;
 
     use super::*;
 
@@ -580,5 +636,51 @@ mod tests {
         let mut jac = vec![0.0; o.jac_structure.len()];
         o.eval_constraint_jacobian(&[1.0], &mut jac);
         assert_close(jac[0], 3.0, 1e-12, "constraint coefficient after refresh");
+    }
+
+    fn repeated_model(rows: usize, nonlinear: bool) -> Model {
+        let m = Model::new("repeated");
+        variable!(m, -5.0 <= x <= 5.0);
+        variable!(m, -5.0 <= y <= 5.0);
+        variable!(m, -5.0 <= z <= 5.0);
+        objective!(m, Min, x.powi(2) + y + z);
+        for i in 0..rows {
+            let lhs = if nonlinear {
+                x * y * z + (i as f64 + 1.0) * x
+            } else if i % 2 == 0 {
+                x.powi(2) + y * z + (i as f64 + 1.0) * x
+            } else {
+                x + 2.0 * y - z
+            };
+            m.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        m
+    }
+
+    #[test]
+    fn forced_serial_and_parallel_nlp_classification_are_identical() {
+        let m = repeated_model(PAR_CLASSIFY_THRESHOLD + 3, true);
+        let serial = HybridOracle::new_with(&m, false);
+        let parallel = HybridOracle::new_with(&m, true);
+        assert_eq!(serial.jac_structure, parallel.jac_structure);
+        assert_eq!(serial.hess_structure, parallel.hess_structure);
+        assert_eq!(serial.exact_hessian, parallel.exact_hessian);
+    }
+
+    #[test]
+    fn automatic_nlp_classification_respects_the_pool_and_threshold() {
+        let one = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        one.install(|| {
+            assert!(!should_parallelize_nlp_classification(ModelKind::NLP, PAR_CLASSIFY_THRESHOLD));
+        });
+        let many = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        many.install(|| {
+            assert!(!should_parallelize_nlp_classification(
+                ModelKind::NLP,
+                PAR_CLASSIFY_THRESHOLD - 1
+            ));
+            assert!(should_parallelize_nlp_classification(ModelKind::NLP, PAR_CLASSIFY_THRESHOLD));
+            assert!(!should_parallelize_nlp_classification(ModelKind::QCP, PAR_CLASSIFY_THRESHOLD));
+        });
     }
 }
