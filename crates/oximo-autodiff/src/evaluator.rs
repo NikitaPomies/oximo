@@ -373,7 +373,7 @@ impl NlpEvaluator {
     pub fn eval_constraint(&self, x: &[f64], g: &mut [f64]) {
         assert_eq!(x.len(), self.n_vars, "point dimension");
         assert_eq!(g.len(), self.constraints.len(), "constraint dimension");
-        if self.constraints.len() < PAR_CONSTRAINT_THRESHOLD {
+        if self.constraints.len() < PAR_CONSTRAINT_THRESHOLD || rayon::current_num_threads() == 1 {
             self.eval_constraint_serial(x, g);
         } else {
             self.eval_constraint_parallel(x, g);
@@ -414,7 +414,7 @@ impl NlpEvaluator {
     pub fn eval_constraint_jacobian(&self, x: &[f64], vals: &mut [f64]) {
         assert_eq!(x.len(), self.n_vars, "point dimension");
         assert_eq!(vals.len(), self.jac_structure.len(), "jacobian nnz");
-        if self.constraints.len() < PAR_CONSTRAINT_THRESHOLD {
+        if self.constraints.len() < PAR_CONSTRAINT_THRESHOLD || rayon::current_num_threads() == 1 {
             self.eval_constraint_jacobian_serial(x, vals);
         } else {
             self.eval_constraint_jacobian_parallel(x, vals);
@@ -523,7 +523,7 @@ impl NlpEvaluator {
             return;
         }
 
-        if self.seeds.len() < PAR_SEED_THRESHOLD {
+        if self.seeds.len() < PAR_SEED_THRESHOLD || rayon::current_num_threads() == 1 {
             self.hessian_seeds_serial(x, obj_factor, lambda, vals);
         } else {
             self.hessian_seeds_parallel(x, obj_factor, lambda, vals);
@@ -702,7 +702,6 @@ fn build_seeds(
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
-    use rayon::prelude::*;
 
     use super::*;
 
@@ -729,7 +728,7 @@ pub mod benchmark_support {
     pub fn classify(model: &Model, parallel: bool) -> usize {
         let arena = model.arena().clone();
         let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
-        classify(&arena, &exprs, parallel).iter().map(|slot| slot.support.len()).sum()
+        classify_slots(&arena, &exprs, parallel).iter().map(|slot| slot.support.len()).sum()
     }
 
     #[derive(Debug)]
@@ -742,7 +741,7 @@ pub mod benchmark_support {
         pub fn new(model: &Model) -> Self {
             let arena = model.arena().clone();
             let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
-            let slots = classify(&arena, &exprs, false);
+            let slots = classify_slots(&arena, &exprs, false);
             Self { slots, exprs }
         }
 
@@ -753,7 +752,7 @@ pub mod benchmark_support {
         }
     }
 
-    fn classify(
+    fn classify_slots(
         arena: &oximo_expr::ExprArena,
         exprs: &[ExprId],
         parallel: bool,
@@ -784,6 +783,7 @@ pub mod benchmark_support {
 }
 
 #[cfg(test)]
+#[expect(clippy::cast_precision_loss)]
 mod tests {
     //! Serial vs parallel equivalence of the threshold-gated derivative paths.
     //!
