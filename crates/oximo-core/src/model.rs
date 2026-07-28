@@ -16,7 +16,7 @@ use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::soc::{SocConstraint, SocConstraintId, detect_soc};
 use crate::var::{VarBuilder, Variable};
 
-const PAR_KIND_THRESHOLD: usize = 64;
+const PAR_KIND_THRESHOLD: usize = 1024;
 
 /// The kind of mathematical program a `Model` represents.
 ///
@@ -783,49 +783,77 @@ impl Model {
         if let Some(k) = self.cached_kind.get() {
             return k;
         }
-        let k = self.infer_kind(false);
+        let k = self.infer_kind_with(None);
         self.cached_kind.set(Some(k));
         k
     }
 
     /// Infer the model kind without reading or updating the kind cache.
     ///
-    /// `parallel` only changes how constraint expressions are classified. This
-    /// is used by the benchmark harness to time fresh serial and parallel work.
-    fn infer_kind(&self, parallel: bool) -> ModelKind {
-        let arena_ref = self.arena.borrow();
-        let arena: &ExprArena = &arena_ref;
-        let vars_ref = self.variables.borrow();
-        let vars: &[Variable] = &vars_ref;
-        let has_int = vars.iter().any(|v| v.domain.is_integer());
-        let obj_class =
-            self.objective.borrow().as_ref().map_or(ExprClass::Linear, |o| classify(arena, o.expr));
+    /// Automatic inference keeps the initial classification scan serial, then
+    /// parallelizes only a large set of already-known quadratic candidates for
+    /// SOC recognition. This keeps LP/NLP models off the Rayon path.
+    fn infer_kind_with(&self, parallel: Option<bool>) -> ModelKind {
+        self.infer_kind_impl(parallel)
+    }
 
-        let constraints_ref = self.constraints.borrow();
-        let constraints: &[Constraint] = &constraints_ref;
-        let summarize = |c: &Constraint| match classify(arena, c.lhs) {
-            ExprClass::Linear => (false, false, false),
-            ExprClass::Quadratic if detect_soc(arena, vars, c).is_some() => (false, false, true),
-            ExprClass::Quadratic => (false, true, false),
-            ExprClass::Nonlinear => (true, false, false),
-        };
-        let combine = |left: (bool, bool, bool), right: (bool, bool, bool)| {
-            (left.0 || right.0, left.1 || right.1, left.2 || right.2)
-        };
-        let (any_nonlinear, plain_quad_con, detected_soc) = if obj_class == ExprClass::Nonlinear {
-            (true, false, false)
-        } else if parallel && constraints.len() >= PAR_KIND_THRESHOLD {
-            constraints.par_iter().map(summarize).reduce(|| (false, false, false), combine)
-        } else {
-            let mut summary = (false, false, false);
-            for constraint in constraints {
-                summary = combine(summary, summarize(constraint));
-                if summary.0 {
-                    break;
+    /// Infer the kind with a forced serial or parallel SOC-recognition pass.
+    /// This is used by benchmarks and parity tests.
+    #[cfg(any(test, feature = "benchmark-support"))]
+    fn infer_kind(&self, parallel: bool) -> ModelKind {
+        self.infer_kind_impl(Some(parallel))
+    }
+
+    fn infer_kind_impl(&self, parallel: Option<bool>) -> ModelKind {
+        let arena = self.arena.borrow();
+        let vars = self.variables.borrow();
+        let has_int = vars.iter().any(|v| v.domain.is_integer());
+        let obj_class = self
+            .objective
+            .borrow()
+            .as_ref()
+            .map_or(ExprClass::Linear, |o| classify(&arena, o.expr));
+
+        let mut any_nonlinear = obj_class == ExprClass::Nonlinear;
+        let mut plain_quad_con = false;
+        let mut detected_soc = false;
+        if !any_nonlinear {
+            let constraints = self.constraints.borrow();
+            let arena_ref = &*arena;
+            let vars_ref = &*vars;
+            let mut quadratic = Vec::new();
+            for c in constraints.iter() {
+                match classify(arena_ref, c.lhs) {
+                    ExprClass::Linear => {}
+                    ExprClass::Quadratic => quadratic.push(c),
+                    ExprClass::Nonlinear => {
+                        any_nonlinear = true;
+                        break;
+                    }
                 }
             }
-            summary
-        };
+            if !any_nonlinear {
+                let use_parallel = parallel.unwrap_or(
+                    quadratic.len() >= PAR_KIND_THRESHOLD && rayon::current_num_threads() > 1,
+                );
+                if use_parallel {
+                    let cones: Vec<bool> = quadratic
+                        .par_iter()
+                        .map(|c| detect_soc(arena_ref, vars_ref, c).is_some())
+                        .collect();
+                    detected_soc = cones.iter().any(|&is_soc| is_soc);
+                    plain_quad_con = cones.iter().any(|&is_soc| !is_soc);
+                } else {
+                    for c in quadratic {
+                        if detect_soc(arena_ref, vars_ref, c).is_some() {
+                            detected_soc = true;
+                        } else {
+                            plain_quad_con = true;
+                        }
+                    }
+                }
+            }
+        }
         let has_soc = detected_soc || !self.soc_constraints.borrow().is_empty();
 
         let pick = |cont, int| if has_int { int } else { cont };
@@ -1025,6 +1053,7 @@ pub mod benchmark_support {
 }
 
 #[cfg(test)]
+#[expect(clippy::cast_precision_loss)]
 mod tests {
     use oximo_expr::extract_linear;
 
@@ -1160,5 +1189,41 @@ mod tests {
         assert!((m.param_value_idx(&price, "a").unwrap() - 1.5).abs() < f64::EPSILON);
         assert!((m.param_value_idx(&price, "b").unwrap() - 2.5).abs() < f64::EPSILON);
         assert!(m.param_value_idx(&price, "z").is_none());
+    }
+
+    #[test]
+    fn kind_forced_serial_and_parallel_classification_agree() {
+        let qcp = Model::new("qcp");
+        let x = qcp.__var("x").build();
+        let y = qcp.__var("y").build();
+        qcp.__minimize(x + y);
+        for i in 0..PAR_KIND_THRESHOLD + 3 {
+            qcp.__add_constraint_auto((x.powi(2) + y).le(i as f64 + 1.0));
+        }
+        assert_eq!(qcp.infer_kind(false), ModelKind::QCP);
+        assert_eq!(qcp.infer_kind(false), qcp.infer_kind(true));
+        assert_eq!(qcp.infer_kind(false), qcp.infer_kind_with(None));
+
+        let socp = Model::new("socp");
+        let x = socp.__var("x").build();
+        let t = socp.__var("t").lb(0.0).build();
+        socp.__minimize(t);
+        for _ in 0..PAR_KIND_THRESHOLD + 3 {
+            socp.__add_constraint_auto((x.powi(2) - t.powi(2)).le(0.0));
+        }
+        assert_eq!(socp.infer_kind(false), ModelKind::SOCP);
+        assert_eq!(socp.infer_kind(false), socp.infer_kind(true));
+        assert_eq!(socp.infer_kind(false), socp.infer_kind_with(None));
+
+        let nlp = Model::new("nlp");
+        let x = nlp.__var("x").build();
+        let y = nlp.__var("y").build();
+        let z = nlp.__var("z").build();
+        nlp.__minimize(x + y + z);
+        for _ in 0..PAR_KIND_THRESHOLD + 3 {
+            nlp.__add_constraint_auto((x * y * z).le(1.0));
+        }
+        assert_eq!(nlp.infer_kind(false), ModelKind::NLP);
+        assert_eq!(nlp.infer_kind(false), nlp.infer_kind(true));
     }
 }
