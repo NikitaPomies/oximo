@@ -29,11 +29,15 @@ use oximo_core::{
 };
 use oximo_expr::{LinearTerms, VarId, describe_nonlinear_term, extract_linear, extract_quadratic};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::{ClarabelDirectSolve, ClarabelOptions};
 
+const PAR_ROW_THRESHOLD: usize = 1024;
+
 /// The linear-or-conic view of one algebraic constraint.
+#[derive(Debug)]
 enum Row {
     Lin(LinearTerms),
     Soc(SocForm),
@@ -161,6 +165,10 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
 ///
 /// Panics if variable or constraint indices overflow `u32`.
 pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
+    build_problem_with(model, None)
+}
+
+fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, SolverError> {
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {
@@ -171,9 +179,9 @@ pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
     let n = vars.len();
 
     let (sign, p_trip, q, obj_constant) = objective_data(model, n)?;
-    let rows = classify_rows(model)?;
+    let rows = classify_rows_with(model, parallel)?;
     let (mut acc, m_zero, m_nonneg) = linear_rows(model, &rows);
-    let (soc_sizes, soc_block_starts, n_explicit) = soc_blocks(model, &rows, &mut acc)?;
+    let (soc_sizes, soc_block_starts, n_explicit) = soc_blocks(model, &rows, &mut acc, parallel)?;
 
     let Rows { a_trip, b, row_duals } = acc;
     let m = b.len();
@@ -227,23 +235,42 @@ fn objective_data(model: &Model, n: usize) -> Result<(f64, Triplets, Vec<f64>, f
 /// Classify every algebraic constraint as linear or SOC. The kind gate
 /// guarantees a quadratic constraint detects as SOC, so a miss here is a
 /// genuine nonlinear.
-fn classify_rows(model: &Model) -> Result<Vec<Row>, SolverError> {
+fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<Vec<Row>, SolverError> {
     let arena = model.arena();
     let vars = model.variables();
-    model
-        .constraints()
-        .iter()
-        .map(|c| match extract_linear(&arena, c.lhs) {
-            Some(t) => Ok(Row::Lin(t)),
-            None => {
-                detect_soc(&arena, &vars, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
-                    location: format!("constraint {:?}", c.name),
-                    term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
-                        .unwrap_or_else(|| "<nonlinear>".into()),
-                })
-            }
+    let constraints = model.constraints();
+    let arena_ref = &*arena;
+    let vars_ref = &*vars;
+    let classify_non_linear = |c: &oximo_core::Constraint| {
+        detect_soc(arena_ref, vars_ref, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
+            location: format!("constraint {:?}", c.name),
+            term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
         })
-        .collect()
+    };
+
+    // Preserve the very cheap LP fast path by extracting affine rows serially
+    // and then fan out only a large set of quadratic/SOC candidates.
+    // This means LP rows never take the Rayon path.
+    let mut rows: Vec<Option<Row>> = (0..constraints.len()).map(|_| None).collect();
+    let mut pending = Vec::new();
+    for (index, constraint) in constraints.iter().enumerate() {
+        match extract_linear(arena_ref, constraint.lhs) {
+            Some(terms) => rows[index] = Some(Row::Lin(terms)),
+            None => pending.push((index, constraint)),
+        }
+    }
+    let use_parallel =
+        parallel.unwrap_or(pending.len() >= PAR_ROW_THRESHOLD && rayon::current_num_threads() > 1);
+    let detected: Vec<Result<Row, SolverError>> = if use_parallel {
+        pending.par_iter().map(|(_, c)| classify_non_linear(c)).collect()
+    } else {
+        pending.iter().map(|(_, c)| classify_non_linear(c)).collect()
+    };
+    for ((index, _), result) in pending.into_iter().zip(detected) {
+        rows[index] = Some(result?);
+    }
+    Ok(rows.into_iter().map(Option::unwrap).collect())
 }
 
 /// Lower the linear constraints and variable bounds into cone rows: the
@@ -317,20 +344,12 @@ fn soc_blocks(
     model: &Model,
     rows: &[Row],
     acc: &mut Rows,
+    parallel: Option<bool>,
 ) -> Result<(Vec<usize>, Vec<usize>, usize), SolverError> {
     let arena = model.arena();
     let socs = model.soc_constraints();
-    let explicit_forms = socs
-        .iter()
-        .map(|s| {
-            explicit_soc_form(&arena, s).ok_or_else(|| {
-                SolverError::Backend(format!(
-                    "SOC constraint '{}' has a member outside this model's arena",
-                    s.name
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let arena_ref = &*arena;
+    let explicit_forms = explicit_soc_forms(arena_ref, &socs, parallel)?;
     let detected_forms = rows.iter().filter_map(|r| match r {
         Row::Soc(f) => Some(f.clone()),
         Row::Lin(_) => None,
@@ -348,6 +367,28 @@ fn soc_blocks(
         soc_sizes.push(1 + form.terms.len());
     }
     Ok((soc_sizes, soc_block_starts, n_explicit))
+}
+
+fn explicit_soc_forms(
+    arena_ref: &oximo_expr::ExprArena,
+    socs: &[oximo_core::SocConstraint],
+    parallel: Option<bool>,
+) -> Result<Vec<SocForm>, SolverError> {
+    let extract = |s: &oximo_core::SocConstraint| {
+        explicit_soc_form(arena_ref, s).ok_or_else(|| {
+            SolverError::Backend(format!(
+                "SOC constraint '{}' has a member outside this model's arena",
+                s.name
+            ))
+        })
+    };
+    let use_parallel = parallel.unwrap_or(false);
+    let explicit_results: Vec<Result<SocForm, SolverError>> = if use_parallel {
+        socs.par_iter().map(extract).collect()
+    } else {
+        socs.iter().map(extract).collect()
+    };
+    explicit_results.into_iter().collect()
 }
 
 /// Assemble the cone list in row order: zero cone, nonnegative cone, then one
@@ -552,7 +593,6 @@ fn map_status(s: SolverStatus) -> TerminationStatus {
 #[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
-    use rayon::prelude::*;
 
     use super::*;
 
@@ -629,6 +669,7 @@ pub mod benchmark_support {
 }
 
 #[cfg(test)]
+#[expect(clippy::cast_precision_loss)]
 mod tests {
     use oximo_core::prelude::*;
     use oximo_solver::UniversalOptionsExt;
@@ -637,6 +678,90 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    #[test]
+    fn forced_serial_and_parallel_translation_are_identical() {
+        let m = Model::new("ordered");
+        variable!(m, x);
+        variable!(m, y);
+        variable!(m, t >= 0.0);
+        for i in 0..PAR_ROW_THRESHOLD + 3 {
+            if i % 2 == 0 {
+                m.__add_constraint_auto((x + (i as f64 + 1.0) * y).le(i as f64 + 10.0));
+            } else {
+                m.__add_constraint_auto((x.powi(2) + y.powi(2) - t.powi(2)).le(0.0));
+            }
+        }
+        for i in 0..PAR_ROW_THRESHOLD + 3 {
+            m.add_soc_constraint(format!("soc{i}"), [x, y], t);
+        }
+        objective!(m, Min, t);
+
+        let serial = build_problem_with(&m, Some(false)).unwrap();
+        let parallel = build_problem_with(&m, Some(true)).unwrap();
+        let automatic = build_problem(&m).unwrap();
+        assert_eq!(serial.p_mat.colptr, parallel.p_mat.colptr);
+        assert_eq!(serial.p_mat.rowval, parallel.p_mat.rowval);
+        assert_eq!(serial.p_mat.nzval, parallel.p_mat.nzval);
+        assert_eq!(serial.q, parallel.q);
+        assert_eq!(serial.a_mat.colptr, parallel.a_mat.colptr);
+        assert_eq!(serial.a_mat.rowval, parallel.a_mat.rowval);
+        assert_eq!(serial.a_mat.nzval, parallel.a_mat.nzval);
+        assert_eq!(serial.b, parallel.b);
+        assert_eq!(serial.cones, parallel.cones);
+        assert_eq!(serial.meta.row_duals, parallel.meta.row_duals);
+        assert_eq!(serial.meta.soc_block_starts, parallel.meta.soc_block_starts);
+        assert_eq!(serial.meta.n_explicit, parallel.meta.n_explicit);
+        assert_eq!(serial.a_mat.colptr, automatic.a_mat.colptr);
+        assert_eq!(serial.a_mat.rowval, automatic.a_mat.rowval);
+        assert_eq!(serial.a_mat.nzval, automatic.a_mat.nzval);
+        assert_eq!(serial.b, automatic.b);
+        assert_eq!(serial.cones, automatic.cones);
+        assert_eq!(serial.meta.row_duals, automatic.meta.row_duals);
+    }
+
+    #[test]
+    fn automatic_large_detected_soc_translation_matches_forced_paths() {
+        let m = Model::new("automatic_detected_soc");
+        variable!(m, x);
+        variable!(m, y);
+        variable!(m, t >= 0.0);
+        objective!(m, Min, t);
+        for _ in 0..PAR_ROW_THRESHOLD + 3 {
+            m.__add_constraint_auto((x.powi(2) + y.powi(2) - t.powi(2)).le(0.0));
+        }
+
+        let serial = build_problem_with(&m, Some(false)).unwrap();
+        let automatic = build_problem(&m).unwrap();
+        let parallel = build_problem_with(&m, Some(true)).unwrap();
+        assert_eq!(serial.a_mat.colptr, automatic.a_mat.colptr);
+        assert_eq!(serial.a_mat.rowval, automatic.a_mat.rowval);
+        assert_eq!(serial.a_mat.nzval, automatic.a_mat.nzval);
+        assert_eq!(serial.b, automatic.b);
+        assert_eq!(serial.cones, automatic.cones);
+        assert_eq!(automatic.a_mat.colptr, parallel.a_mat.colptr);
+        assert_eq!(automatic.a_mat.rowval, parallel.a_mat.rowval);
+        assert_eq!(automatic.a_mat.nzval, parallel.a_mat.nzval);
+        assert_eq!(automatic.b, parallel.b);
+        assert_eq!(automatic.cones, parallel.cones);
+    }
+
+    #[test]
+    fn parallel_row_classification_keeps_first_error_order() {
+        let m = Model::new("errors");
+        variable!(m, x);
+        variable!(m, y);
+        variable!(m, z);
+        m.__add_constraint("first", (x * y * z).le(1.0));
+        m.__add_constraint("second", x.exp().le(2.0));
+        objective!(m, Min, x);
+        let serial = classify_rows_with(&m, Some(false)).unwrap_err();
+        let automatic = classify_rows_with(&m, None).unwrap_err();
+        let parallel = classify_rows_with(&m, Some(true)).unwrap_err();
+        assert_eq!(serial.to_string(), parallel.to_string());
+        assert_eq!(serial.to_string(), automatic.to_string());
+        assert!(serial.to_string().contains("first"));
     }
 
     #[test]

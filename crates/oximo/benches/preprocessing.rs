@@ -7,7 +7,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 
 fn configure() -> Criterion {
     Criterion::default()
-        .warm_up_time(Duration::from_secs(3))
+        .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(5))
         .sample_size(30)
 }

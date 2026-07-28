@@ -10,7 +10,7 @@ description = "POUNCE (pure-Rust IPOPT) NLP backend for oximo. Finite difference
 readme = "README.md"
 
 [features]
-benchmark-support = ["dep:rayon"]
+benchmark-support = []
 enzyme = ["oximo-autodiff/enzyme"]
 
 [dependencies]
@@ -19,9 +19,9 @@ oximo-core.workspace = true
 oximo-solver.workspace = true
 oximo-autodiff.workspace = true
 pounce-rs.workspace = true
+rayon.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true
-rayon = { workspace = true, optional = true }
 
 [lints]
 workspace = true

@@ -10,7 +10,7 @@ description = "Clarabel LP/QP/SOCP conic backend for oximo"
 readme = "README.md"
 
 [features]
-benchmark-support = ["dep:rayon"]
+benchmark-support = []
 faer = ["clarabel/faer-sparse"]
 
 [package.metadata.docs.rs]
@@ -22,8 +22,8 @@ oximo-expr.workspace = true
 oximo-core.workspace = true
 oximo-solver.workspace = true
 clarabel.workspace = true
+rayon.workspace = true
 rustc-hash.workspace = true
-rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 oximo-highs.workspace = true
