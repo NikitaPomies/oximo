@@ -449,10 +449,19 @@ pub mod benchmark_support {
             let mut serial = Oracle::new(&model);
             let mut parallel = Oracle::new(&model);
 
-            assert_eq!(serial.values(false), parallel.values(true));
-            assert_eq!(serial.values(false), parallel.values(true));
-            assert_eq!(serial.sparse_jacobian(false), parallel.sparse_jacobian(true));
-            assert_eq!(serial.sparse_jacobian(false), parallel.sparse_jacobian(true));
+            serial.values(false);
+            parallel.values(true);
+            assert_eq!(serial.values, parallel.values);
+            serial.values(false);
+            parallel.values(true);
+            assert_eq!(serial.values, parallel.values);
+
+            serial.sparse_jacobian(false);
+            parallel.sparse_jacobian(true);
+            assert_eq!(serial.sparse, parallel.sparse);
+            serial.sparse_jacobian(false);
+            parallel.sparse_jacobian(true);
+            assert_eq!(serial.sparse, parallel.sparse);
         }
     }
 }
