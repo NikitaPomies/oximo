@@ -11,6 +11,11 @@ pub fn sizes(threshold: usize) -> [(&'static str, usize); 3] {
     [("small", SMALL), ("threshold", threshold), ("large", LARGE)]
 }
 
+/// Sizes surrounding the automatic parallelism crossover.
+pub const fn crossover_sizes() -> [usize; 4] {
+    [256, 512, 1_024, 2_048]
+}
+
 /// Report the size of the active Rayon pool in parallel benchmark identifiers.
 pub fn threads() -> usize {
     rayon::current_num_threads()
