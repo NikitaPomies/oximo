@@ -8,8 +8,7 @@ use oximo_core::{
     ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable, var_name,
 };
 use oximo_expr::{
-    ExprArena, ExprId, LinearTerms, QuadraticTerms, describe_nonlinear_term, extract_linear,
-    extract_quadratic,
+    ExprArena, ExprId, QuadraticTerms, describe_nonlinear_term, extract_linear, extract_quadratic,
 };
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rustc_hash::{FxBuildHasher, FxHashMap};
