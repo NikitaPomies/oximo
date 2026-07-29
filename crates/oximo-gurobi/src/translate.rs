@@ -277,7 +277,7 @@ fn add_variables(
     vars: &[Variable],
 ) -> Result<Vec<grb::Var>, SolverError> {
     let mut gurobi_vars = Vec::with_capacity(vars.len());
-    for (i, v) in vars.iter().enumerate() {
+    for v in vars {
         let vtype = match v.domain {
             Domain::Real => VarType::Continuous,
             Domain::Integer => VarType::Integer,
@@ -290,7 +290,7 @@ fn add_variables(
         let floor = v.domain.semi_threshold().unwrap_or(v.lb);
         // `add_var!` expands the f64 bounds with an `as f64` cast.
         #[expect(clippy::unnecessary_cast)]
-        let gvar = add_var!(grb_model, vtype, bounds: floor..v.ub, name: &format!("x{i}"))
+        let gvar = add_var!(grb_model, vtype, bounds: floor..v.ub, name: v.name.as_str())
             .map_err(map_grb_err)?;
         gurobi_vars.push(gvar);
         if let Some(val) = v.initial {
@@ -321,8 +321,8 @@ fn add_constraints(
     // `ConstraintId`, which `collect_solution` relies on to key duals. A
     // two-sided range becomes a single native `add_range` row.
     let mut gurobi_constrs: Vec<GrbRow> = Vec::with_capacity(constraints.len());
-    for (c_id, c) in constraints.iter().enumerate() {
-        let name = format!("c{c_id}");
+    for c in constraints {
+        let name = c.name.as_str();
         if let Some((sense, rhs)) = c.as_single() {
             if let Some(t) = extract_linear(arena, c.lhs) {
                 let adjusted_rhs = rhs - t.constant;
@@ -331,9 +331,9 @@ fn add_constraints(
                     expr.add_term(co, gurobi_vars[v.index()]);
                 }
                 let constr = match sense {
-                    Sense::Le => grb_model.add_constr(&name, c!(expr <= adjusted_rhs)),
-                    Sense::Ge => grb_model.add_constr(&name, c!(expr >= adjusted_rhs)),
-                    Sense::Eq => grb_model.add_constr(&name, c!(expr == adjusted_rhs)),
+                    Sense::Le => grb_model.add_constr(name, c!(expr <= adjusted_rhs)),
+                    Sense::Ge => grb_model.add_constr(name, c!(expr >= adjusted_rhs)),
+                    Sense::Eq => grb_model.add_constr(name, c!(expr == adjusted_rhs)),
                 }
                 .map_err(map_grb_err)?;
                 gurobi_constrs.push(GrbRow::Lin(constr));
@@ -343,7 +343,7 @@ fn add_constraints(
                     c.lhs,
                     sense,
                     rhs,
-                    c_id,
+                    name,
                     grb_model,
                     gurobi_vars,
                     aux_counter,
@@ -366,7 +366,7 @@ fn add_constraints(
             }
             #[expect(clippy::unnecessary_cast)]
             let (_slack, constr) =
-                grb_model.add_range(&name, c!(expr in lower..upper)).map_err(map_grb_err)?;
+                grb_model.add_range(name, c!(expr in lower..upper)).map_err(map_grb_err)?;
             gurobi_constrs.push(GrbRow::Lin(constr));
         }
     }
@@ -404,13 +404,14 @@ fn add_soc_rows(
                 .unwrap_or_else(|| "<nonlinear>".into()),
         })?;
         add_squared_affine(&mut q, &b, -1.0, gurobi_vars);
-        let qrow = grb_model.add_qconstr(&format!("soc{i}"), c!(q <= 0.0)).map_err(map_grb_err)?;
+        let qrow = grb_model.add_qconstr(s.name.as_str(), c!(q <= 0.0)).map_err(map_grb_err)?;
 
         let mut e = LinExpr::new();
         for &(v, co) in &b.coeffs {
             e.add_term(co, gurobi_vars[v.index()]);
         }
-        grb_model.add_constr(&format!("soc{i}_sign"), c!(e >= -b.constant)).map_err(map_grb_err)?;
+        let sign_name = format!("{}_sign", s.name);
+        grb_model.add_constr(&sign_name, c!(e >= -b.constant)).map_err(map_grb_err)?;
         rows.push((qrow, b));
     }
     Ok(rows)
@@ -438,7 +439,7 @@ fn add_nonlinear_constraint(
     lhs: ExprId,
     sense: Sense,
     rhs: f64,
-    c_id: usize,
+    name: &str,
     grb_model: &mut grb::Model,
     gurobi_vars: &[grb::Var],
     aux_counter: &mut u32,
@@ -446,29 +447,28 @@ fn add_nonlinear_constraint(
     let mut ctx = LoweringCtx { model: grb_model, gurobi_vars, aux_counter: *aux_counter };
     let lowered = lower(arena, lhs, &mut ctx)?;
     *aux_counter = ctx.aux_counter;
-    let name = format!("c{c_id}");
     let row = match lowered {
         LoweredExpr::Linear(e) => GrbRow::Lin(
             match sense {
-                Sense::Le => grb_model.add_constr(&name, c!(e <= rhs)),
-                Sense::Ge => grb_model.add_constr(&name, c!(e >= rhs)),
-                Sense::Eq => grb_model.add_constr(&name, c!(e == rhs)),
+                Sense::Le => grb_model.add_constr(name, c!(e <= rhs)),
+                Sense::Ge => grb_model.add_constr(name, c!(e >= rhs)),
+                Sense::Eq => grb_model.add_constr(name, c!(e == rhs)),
             }
             .map_err(map_grb_err)?,
         ),
         LoweredExpr::Quadratic(e) => GrbRow::Quad(
             match sense {
-                Sense::Le => grb_model.add_qconstr(&name, c!(e <= rhs)),
-                Sense::Ge => grb_model.add_qconstr(&name, c!(e >= rhs)),
-                Sense::Eq => grb_model.add_qconstr(&name, c!(e == rhs)),
+                Sense::Le => grb_model.add_qconstr(name, c!(e <= rhs)),
+                Sense::Ge => grb_model.add_qconstr(name, c!(e >= rhs)),
+                Sense::Eq => grb_model.add_qconstr(name, c!(e == rhs)),
             }
             .map_err(map_grb_err)?,
         ),
         LoweredExpr::Var(v) => GrbRow::Lin(
             match sense {
-                Sense::Le => grb_model.add_constr(&name, c!(v <= rhs)),
-                Sense::Ge => grb_model.add_constr(&name, c!(v >= rhs)),
-                Sense::Eq => grb_model.add_constr(&name, c!(v == rhs)),
+                Sense::Le => grb_model.add_constr(name, c!(v <= rhs)),
+                Sense::Ge => grb_model.add_constr(name, c!(v >= rhs)),
+                Sense::Eq => grb_model.add_constr(name, c!(v == rhs)),
             }
             .map_err(map_grb_err)?,
         ),
@@ -556,6 +556,7 @@ fn collect_solution(
         .unwrap_or_default();
 
     let mut dual = FxHashMap::default();
+    dual.reserve(constrs.len());
     for (i, row) in constrs.iter().enumerate() {
         let pi = match row {
             GrbRow::Lin(c) => model.get_obj_attr(attr::Pi, c),
@@ -570,6 +571,7 @@ fn collect_solution(
     // bound multiplier `z0 = 2 * bound_value * |QCPi|`.
     // Available only under `QCPDual=1`.
     let mut soc_dual = FxHashMap::default();
+    soc_dual.reserve(soc_rows.len());
     let primal = &solutions[0].primal;
     for (i, (qrow, bound)) in soc_rows.iter().enumerate() {
         if let Ok(pi) = model.get_obj_attr(attr::QCPi, qrow) {
@@ -622,7 +624,12 @@ fn collect_pool(
 
 /// Map a dense per-variable value array (in `VarId` order) to a sparse map.
 fn index_map(vals: &[f64]) -> FxHashMap<VarId, f64> {
-    vals.iter().enumerate().map(|(i, &val)| (VarId(u32::try_from(i).unwrap()), val)).collect()
+    let mut map = FxHashMap::default();
+    map.reserve(vals.len());
+    for (index, &value) in vals.iter().enumerate() {
+        map.insert(VarId(u32::try_from(index).unwrap()), value);
+    }
+    map
 }
 
 fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
@@ -645,7 +652,8 @@ fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
     use rayon::prelude::*;
@@ -673,13 +681,27 @@ pub mod benchmark_support {
     }
 
     pub fn extract(model: &Model, parallel: bool) -> usize {
-        let arena = model.arena().clone();
-        let constraints = model.constraints().clone();
-        let forms = if parallel {
-            constraints.par_iter().map(|c| extract_linear(&arena, c.lhs)).collect::<Vec<_>>()
-        } else {
-            constraints.iter().map(|c| extract_linear(&arena, c.lhs)).collect::<Vec<_>>()
+        let arena = model.arena();
+        let constraints = model.constraints();
+        let arena_ref = &*arena;
+        let count = |constraint: &Constraint| {
+            extract_linear(arena_ref, constraint.lhs).map_or(0, |terms| terms.coeffs.len() + 1)
         };
-        forms.iter().map(|terms| terms.as_ref().map_or(0, |terms| terms.coeffs.len() + 1)).sum()
+        if parallel {
+            constraints.par_iter().map(count).sum()
+        } else {
+            constraints.iter().map(count).sum()
+        }
+    }
+
+    /// Create a Gurobi environment once for repeated translation benchmarks.
+    pub fn environment() -> Result<Env, SolverError> {
+        default_env()
+    }
+
+    /// Translate into a fresh native Gurobi model without optimizing it.
+    pub fn translate(model: &Model, env: &Env) -> Result<usize, SolverError> {
+        let built = build(model, &GurobiOptions::default(), env)?;
+        Ok(built.vars.len() + built.constrs.len() + built.soc_rows.len())
     }
 }
