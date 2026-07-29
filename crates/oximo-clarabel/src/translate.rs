@@ -34,7 +34,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{ClarabelDirectSolve, ClarabelOptions};
 
-const PAR_ROW_THRESHOLD: usize = 1024;
+const PAR_ROW_THRESHOLD: usize = 256;
 
 /// The linear-or-conic view of one algebraic constraint.
 #[derive(Debug)]
@@ -56,6 +56,14 @@ struct Rows {
 }
 
 impl Rows {
+    fn with_capacity(rows: usize, nonzeros: usize) -> Self {
+        Self {
+            a_trip: Vec::with_capacity(nonzeros),
+            b: Vec::with_capacity(rows),
+            row_duals: Vec::with_capacity(rows),
+        }
+    }
+
     /// Append one `A` row `scale * t.coeffs` with right-hand side `rhs`, carrying
     /// no dual. The caller attaches one with `set_last_dual` when the row maps
     /// back to a constraint.
@@ -180,8 +188,15 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
 
     let (sign, p_trip, q, obj_constant) = objective_data(model, n)?;
     let rows = classify_rows_with(model, parallel)?;
-    let (mut acc, m_zero, m_nonneg) = linear_rows(model, &rows);
-    let (soc_sizes, soc_block_starts, n_explicit) = soc_blocks(model, &rows, &mut acc, parallel)?;
+    let arena = model.arena();
+    let socs = model.soc_constraints();
+    let explicit_forms = explicit_soc_forms(&arena, &socs, parallel)?;
+    let (row_capacity, nonzero_capacity, soc_capacity) =
+        translation_capacities(model, &rows, &explicit_forms);
+    let acc = Rows::with_capacity(row_capacity, nonzero_capacity);
+    let (mut acc, m_zero, m_nonneg) = linear_rows(model, &rows, acc);
+    let (soc_sizes, soc_block_starts, n_explicit) =
+        soc_blocks(&rows, &explicit_forms, &mut acc, soc_capacity);
 
     let Rows { a_trip, b, row_duals } = acc;
     let m = b.len();
@@ -262,27 +277,71 @@ fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<Vec<Row>,
     }
     let use_parallel =
         parallel.unwrap_or(pending.len() >= PAR_ROW_THRESHOLD && rayon::current_num_threads() > 1);
-    let detected: Vec<Result<Row, SolverError>> = if use_parallel {
-        pending.par_iter().map(|(_, c)| classify_non_linear(c)).collect()
+    if use_parallel {
+        let detected: Vec<Result<Row, SolverError>> =
+            pending.par_iter().map(|(_, c)| classify_non_linear(c)).collect();
+        for ((index, _), result) in pending.into_iter().zip(detected) {
+            rows[index] = Some(result?);
+        }
     } else {
-        pending.iter().map(|(_, c)| classify_non_linear(c)).collect()
-    };
-    for ((index, _), result) in pending.into_iter().zip(detected) {
-        rows[index] = Some(result?);
+        for (index, constraint) in pending {
+            rows[index] = Some(classify_non_linear(constraint)?);
+        }
     }
     Ok(rows.into_iter().map(Option::unwrap).collect())
+}
+
+/// Exact capacities for the final Clarabel row vectors and SOC metadata.
+fn translation_capacities(
+    model: &Model,
+    rows: &[Row],
+    explicit_forms: &[SocForm],
+) -> (usize, usize, usize) {
+    let vars = model.variables();
+    let constraints = model.constraints();
+    let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
+    let mut row_count = 0;
+    let mut nonzero_count = 0;
+
+    for (constraint, row) in constraints.iter().zip(rows) {
+        let Row::Lin(terms) = row else { continue };
+        let multiplicity =
+            usize::from(constraint.as_single().is_some()) + usize::from(constraint.is_range());
+        row_count += multiplicity;
+        nonzero_count += multiplicity * terms.coeffs.len();
+    }
+    for var in vars.iter() {
+        let multiplicity = if is_fixed(var) {
+            1
+        } else {
+            usize::from(var.ub.is_finite()) + usize::from(var.lb.is_finite())
+        };
+        row_count += multiplicity;
+        nonzero_count += multiplicity;
+    }
+
+    let detected_forms = rows.iter().filter_map(|row| match row {
+        Row::Soc(form) => Some(form),
+        Row::Lin(_) => None,
+    });
+    let mut soc_count = 0;
+    for form in explicit_forms.iter().chain(detected_forms) {
+        soc_count += 1;
+        row_count += 1 + form.terms.len();
+        nonzero_count += form.bound.coeffs.len()
+            + form.terms.iter().map(|term| term.coeffs.len()).sum::<usize>();
+    }
+    (row_count, nonzero_count, soc_count)
 }
 
 /// Lower the linear constraints and variable bounds into cone rows: the
 /// `ZeroCone` block (equalities, then fixed variables) followed by the
 /// `NonnegativeCone` block (inequalities/ranges, then finite bounds). Returns
 /// the accumulated [`Rows`] and the two block sizes.
-fn linear_rows(model: &Model, rows: &[Row]) -> (Rows, usize, usize) {
+fn linear_rows(model: &Model, rows: &[Row], mut acc: Rows) -> (Rows, usize, usize) {
     let vars = model.variables();
     let constraints = model.constraints();
     let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
-    let mut acc = Rows::default();
-
     // ZeroCone rows: equalities, then fixed variables.
     for (i, (con, row)) in constraints.iter().zip(rows).enumerate() {
         if let Row::Lin(lt) = row {
@@ -341,24 +400,20 @@ fn linear_rows(model: &Model, rows: &[Row]) -> (Rows, usize, usize) {
 /// back to the constraint, whereas `SocForm` normalizes away a detected cone's
 /// original quadratic scaling, so its `z0` cannot be mapped back.
 fn soc_blocks(
-    model: &Model,
     rows: &[Row],
+    explicit_forms: &[SocForm],
     acc: &mut Rows,
-    parallel: Option<bool>,
-) -> Result<(Vec<usize>, Vec<usize>, usize), SolverError> {
-    let arena = model.arena();
-    let socs = model.soc_constraints();
-    let arena_ref = &*arena;
-    let explicit_forms = explicit_soc_forms(arena_ref, &socs, parallel)?;
+    soc_capacity: usize,
+) -> (Vec<usize>, Vec<usize>, usize) {
     let detected_forms = rows.iter().filter_map(|r| match r {
-        Row::Soc(f) => Some(f.clone()),
+        Row::Soc(f) => Some(f),
         Row::Lin(_) => None,
     });
 
     let n_explicit = explicit_forms.len();
-    let mut soc_sizes: Vec<usize> = Vec::new();
-    let mut soc_block_starts: Vec<usize> = Vec::new();
-    for form in explicit_forms.into_iter().chain(detected_forms) {
+    let mut soc_sizes: Vec<usize> = Vec::with_capacity(soc_capacity);
+    let mut soc_block_starts: Vec<usize> = Vec::with_capacity(soc_capacity);
+    for form in explicit_forms.iter().chain(detected_forms) {
         soc_block_starts.push(acc.b.len());
         acc.push(&form.bound, -1.0, form.bound.constant);
         for term in &form.terms {
@@ -366,7 +421,7 @@ fn soc_blocks(
         }
         soc_sizes.push(1 + form.terms.len());
     }
-    Ok((soc_sizes, soc_block_starts, n_explicit))
+    (soc_sizes, soc_block_starts, n_explicit)
 }
 
 fn explicit_soc_forms(
@@ -394,7 +449,7 @@ fn explicit_soc_forms(
 /// Assemble the cone list in row order: zero cone, nonnegative cone, then one
 /// second-order cone per SOC block.
 fn build_cones(m_zero: usize, m_nonneg: usize, soc_sizes: &[usize]) -> Vec<SupportedConeT<f64>> {
-    let mut cones = Vec::new();
+    let mut cones = Vec::with_capacity(2 + soc_sizes.len());
     if m_zero > 0 {
         cones.push(SupportedConeT::ZeroConeT(m_zero));
     }
@@ -590,14 +645,15 @@ fn map_status(s: SolverStatus) -> TerminationStatus {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
 
     use super::*;
 
     /// Crossover candidate used only to size the preprocessing benchmark cases.
-    pub const ROW_THRESHOLD: usize = 1_024;
+    pub const ROW_THRESHOLD: usize = PAR_ROW_THRESHOLD;
     /// Crossover candidate used only to size the preprocessing benchmark cases.
     pub const SOC_THRESHOLD: usize = 1_024;
 
@@ -610,6 +666,17 @@ pub mod benchmark_support {
         for i in 0..rows {
             let lhs = if soc { x.powi(2) + y.powi(2) - t.powi(2) } else { x + 2.0 * y - t };
             model.__add_constraint_auto(lhs.le(if soc { 0.0 } else { i as f64 + 10.0 }));
+        }
+        model
+    }
+
+    pub fn qp_model(rows: usize) -> Model {
+        let model = Model::new("clarabel_qp_bench");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        model.__minimize(x.powi(2) + y.powi(2));
+        for i in 0..rows {
+            model.__add_constraint_auto((x + 2.0 * y).le(i as f64 + 10.0));
         }
         model
     }
@@ -627,44 +694,18 @@ pub mod benchmark_support {
     }
 
     pub fn classify(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena().clone();
-        let vars = model.variables().clone();
-        let constraints = model.constraints().clone();
-        let classify = |c: &oximo_core::Constraint| match extract_linear(&arena, c.lhs) {
-            Some(t) => Ok(Row::Lin(t)),
-            None => {
-                detect_soc(&arena, &vars, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
-                    location: format!("constraint {:?}", c.name),
-                    term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
-                        .unwrap_or_else(|| "<nonlinear>".into()),
-                })
-            }
-        };
-        let rows = if parallel {
-            constraints.par_iter().map(classify).collect::<Result<Vec<_>, _>>()?
-        } else {
-            constraints.iter().map(classify).collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(rows.len())
+        classify_rows_with(model, Some(parallel)).map(|rows| rows.len())
     }
 
     pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena().clone();
+        let arena = model.arena();
         let socs = model.soc_constraints();
-        let form = |s: &oximo_core::SocConstraint| {
-            explicit_soc_form(&arena, s).ok_or_else(|| {
-                SolverError::Backend(format!(
-                    "SOC constraint '{}' has a member outside this model's arena",
-                    s.name
-                ))
-            })
-        };
-        let forms = if parallel {
-            socs.par_iter().map(form).collect::<Result<Vec<_>, _>>()?
-        } else {
-            socs.iter().map(form).collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(forms.len())
+        explicit_soc_forms(&arena, &socs, Some(parallel)).map(|forms| forms.len())
+    }
+
+    pub fn translate(model: &Model) -> Result<(usize, usize, usize), SolverError> {
+        build_problem(model)
+            .map(|problem| (problem.a_mat.nzval.len(), problem.b.len(), problem.cones.len()))
     }
 }
 
