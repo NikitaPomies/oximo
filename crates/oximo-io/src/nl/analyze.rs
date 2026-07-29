@@ -37,13 +37,28 @@ impl Row {
 pub(crate) struct Analysis {
     pub(crate) cons: Vec<Row>,
     pub(crate) obj: Row,
-    pub(crate) cons_vars: Vec<Vec<VarId>>,
+    /// Concatenated sorted variable supports for all constraint rows.
+    cons_vars: Vec<VarId>,
+    /// Row starts into `cons_vars`.
+    cons_var_offsets: Vec<usize>,
     pub(crate) obj_vars: Vec<VarId>,
     pub(crate) nl_vars_c: FxHashSet<VarId>,
     pub(crate) nl_vars_o: FxHashSet<VarId>,
 }
 
 impl Analysis {
+    pub(crate) fn constraint_vars(&self, row: usize) -> &[VarId] {
+        &self.cons_vars[self.cons_var_offsets[row]..self.cons_var_offsets[row + 1]]
+    }
+
+    pub(crate) fn constraint_vars_iter(&self) -> impl Iterator<Item = &[VarId]> {
+        self.cons_var_offsets.windows(2).map(|range| &self.cons_vars[range[0]..range[1]])
+    }
+
+    pub(crate) fn jacobian_nnz(&self) -> usize {
+        self.cons_vars.len()
+    }
+
     pub(crate) fn build(
         arena: &ExprArena,
         vars: &[Variable],
@@ -66,7 +81,9 @@ impl Analysis {
         let mut nl_vars_c: FxHashSet<VarId> = FxHashSet::default();
         let mut nl_vars_o: FxHashSet<VarId> = FxHashSet::default();
         let mut cons: Vec<Row> = Vec::with_capacity(constraints.len());
-        let mut cons_vars: Vec<Vec<VarId>> = Vec::with_capacity(constraints.len());
+        let mut cons_vars = Vec::new();
+        let mut cons_var_offsets = Vec::with_capacity(constraints.len() + 1);
+        cons_var_offsets.push(0);
 
         for c in constraints {
             let (linear, residual) = split_linear(arena, c.lhs);
@@ -86,7 +103,10 @@ impl Analysis {
                 }
             }
             cons.push(Row { linear, residual });
-            cons_vars.push(sorted(all));
+            let start = cons_vars.len();
+            cons_vars.extend(all);
+            cons_vars[start..].sort_by_key(|v| v.0);
+            cons_var_offsets.push(cons_vars.len());
         }
 
         let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
@@ -107,7 +127,15 @@ impl Analysis {
         }
         let obj = Row { linear: obj_linear, residual: obj_residual };
 
-        Ok(Self { cons, obj, cons_vars, obj_vars: sorted(obj_all), nl_vars_c, nl_vars_o })
+        Ok(Self {
+            cons,
+            obj,
+            cons_vars,
+            cons_var_offsets,
+            obj_vars: sorted(obj_all),
+            nl_vars_c,
+            nl_vars_o,
+        })
     }
 }
 
@@ -210,7 +238,8 @@ fn collect_vars(arena: &ExprArena, id: ExprId, out: &mut FxHashSet<VarId>) -> Re
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::Model;
     use oximo_core::constraint::Relate;
@@ -239,13 +268,14 @@ pub mod benchmark_support {
     }
 
     pub fn analyze(model: &Model, parallel: bool) -> Result<usize, IoError> {
-        let arena = model.arena().clone();
+        let arena = model.arena();
         let vars = model.variables();
         let constraints = model.constraints();
         let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
-        let analysis = build(&arena, &vars, &constraints, &objective, parallel)?;
+        let arena_ref = &*arena;
+        let analysis = build(arena_ref, &vars, &constraints, &objective, parallel)?;
         Ok(analysis.cons.len()
-            + analysis.cons_vars.iter().map(Vec::len).sum::<usize>()
+            + analysis.jacobian_nnz()
             + analysis.obj_vars.len()
             + analysis.nl_vars_c.len()
             + analysis.nl_vars_o.len())
@@ -286,15 +316,17 @@ pub mod benchmark_support {
         } else {
             constraints.iter().map(|c| row(arena, c)).collect::<Result<Vec<_>, _>>()?
         };
-        let (cons, cons_vars, nl_vars_c) = rows.into_iter().fold(
-            (Vec::new(), Vec::new(), FxHashSet::default()),
-            |(mut rows, mut vars, mut nonlinear), (row, support, used)| {
-                rows.push(row);
-                vars.push(support);
-                nonlinear.extend(used);
-                (rows, vars, nonlinear)
-            },
-        );
+        let mut cons = Vec::with_capacity(rows.len());
+        let mut cons_vars = Vec::new();
+        let mut cons_var_offsets = Vec::with_capacity(rows.len() + 1);
+        let mut nl_vars_c = FxHashSet::default();
+        cons_var_offsets.push(0);
+        for (row, support, used) in rows {
+            cons.push(row);
+            cons_vars.extend(support);
+            cons_var_offsets.push(cons_vars.len());
+            nl_vars_c.extend(used);
+        }
         let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
         let mut obj_all: FxHashSet<VarId> = obj_linear.coeffs.iter().map(|(v, _)| *v).collect();
         let mut nl_vars_o = FxHashSet::default();
@@ -305,6 +337,6 @@ pub mod benchmark_support {
         obj_all.extend(nl_vars_o.iter().copied());
         let obj = Row { linear: obj_linear, residual: obj_residual };
         let obj_vars = sorted(obj_all);
-        Ok(Analysis { cons, obj, cons_vars, obj_vars, nl_vars_c, nl_vars_o })
+        Ok(Analysis { cons, obj, cons_vars, cons_var_offsets, obj_vars, nl_vars_c, nl_vars_o })
     }
 }

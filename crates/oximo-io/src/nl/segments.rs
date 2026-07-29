@@ -331,7 +331,7 @@ fn write_k_segment<W: Write>(
         return Ok(());
     }
     let mut col_counts = vec![0usize; n_var];
-    for row_vars in &analysis.cons_vars {
+    for row_vars in analysis.constraint_vars_iter() {
         for v in row_vars {
             let nl_col = perm.var_index[v] as usize;
             col_counts[nl_col] += 1;
@@ -353,7 +353,7 @@ fn write_j_segments<W: Write>(
     analysis: &Analysis,
 ) -> Result<(), IoError> {
     for (nl_idx, &orig_idx) in perm.con_order.iter().enumerate() {
-        let row_vars = &analysis.cons_vars[orig_idx];
+        let row_vars = analysis.constraint_vars(orig_idx);
         if row_vars.is_empty() {
             continue;
         }
