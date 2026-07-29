@@ -71,10 +71,9 @@ fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<Line
             })
         }
         ExprNode::Add(children) => {
-            let children: smallvec::SmallVec<[ExprId; 4]> = children.iter().copied().collect();
             let mut acc = CoeffAccum::with_capacity(children.len() * 4);
             let mut constant = 0.0;
-            for child in children {
+            for &child in children {
                 let t = as_linear(arena, child, resolve_params)?;
                 acc.extend(t.coeffs);
                 constant += t.constant;
@@ -83,10 +82,9 @@ fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<Line
         }
         ExprNode::Mul(children) => {
             // Linear if and only if exactly one non-const child is linear and the rest are constants.
-            let children: smallvec::SmallVec<[ExprId; 4]> = children.iter().copied().collect();
             let mut scalar = 1.0;
             let mut linear: Option<LinearTerms> = None;
-            for child in children {
+            for &child in children {
                 match arena.get(child) {
                     ExprNode::Const(c) => scalar *= c,
                     ExprNode::Param(p) if resolve_params => scalar *= arena.param_value(*p),

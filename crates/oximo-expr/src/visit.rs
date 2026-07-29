@@ -12,8 +12,7 @@ pub fn walk<V: Visitor>(arena: &ExprArena, id: ExprId, visitor: &mut V) {
     visitor.visit(arena, id, node);
     match node {
         ExprNode::Add(children) | ExprNode::Mul(children) => {
-            let kids: Vec<ExprId> = children.iter().copied().collect();
-            for child in kids {
+            for &child in children {
                 walk(arena, child, visitor);
             }
         }
