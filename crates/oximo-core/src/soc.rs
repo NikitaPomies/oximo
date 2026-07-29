@@ -1,4 +1,6 @@
-use oximo_expr::{ExprArena, ExprId, LinearTerms, VarId, extract_linear, extract_quadratic};
+use oximo_expr::{
+    ExprArena, ExprId, LinearTerms, QuadraticTerms, VarId, extract_linear, extract_quadratic,
+};
 use smol_str::SmolStr;
 
 use crate::constraint::{Constraint, Sense};
@@ -40,6 +42,54 @@ pub struct SocForm {
     pub bound: LinearTerms,
 }
 
+/// Extract and validate the diagonal quadratic form shared by SOC recognition
+/// and model-kind inference.
+fn soc_quadratic(
+    arena: &ExprArena,
+    vars: &[Variable],
+    c: &Constraint,
+) -> Option<(QuadraticTerms, VarId, f64)> {
+    let (sense, rhs) = c.as_single()?;
+    if sense != Sense::Le {
+        return None;
+    }
+    let q = extract_quadratic(arena, c.lhs)?;
+    if !q.linear.is_empty() || q.constant - rhs != 0.0 {
+        return None;
+    }
+
+    let mut positives = 0;
+    let mut negative: Option<(VarId, f64)> = None;
+    for &(row, col, h) in &q.hessian {
+        if row != col {
+            return None;
+        }
+        let coef = h / 2.0;
+        if coef > 0.0 {
+            positives += 1;
+        } else if coef < 0.0 {
+            if negative.is_some() {
+                return None;
+            }
+            negative = Some((row, -coef));
+        }
+    }
+    let (t, n) = negative?;
+    if positives == 0 || vars[t.index()].lb < 0.0 {
+        return None;
+    }
+    Some((q, t, n))
+}
+
+/// Whether an algebraic constraint has the supported detected-SOC shape.
+///
+/// Unlike [`detect_soc`], this does not materialize a [`SocForm`]. Model-kind
+/// inference only needs this predicate and can avoid allocating one
+/// `LinearTerms` coefficient vector per cone member.
+pub(crate) fn is_detected_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> bool {
+    soc_quadratic(arena, vars, c).is_some()
+}
+
 // TODO: Here we are deliberately conservative and purely structural
 
 /// Recognize an algebraic quadratic constraint as second-order-cone shaped.
@@ -56,39 +106,15 @@ pub struct SocForm {
 /// `|| sqrt(p_i/n) x_i ||_2 <= t`. Cross-term (Cholesky-factorized) quadratic
 /// forms are not detected, they classify as QCP instead.
 pub fn detect_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> Option<SocForm> {
-    let (sense, rhs) = c.as_single()?;
-    if sense != Sense::Le {
-        return None;
-    }
-    let q = extract_quadratic(arena, c.lhs)?;
-    if !q.linear.is_empty() || q.constant - rhs != 0.0 {
-        return None;
-    }
-
-    let mut positives: Vec<(VarId, f64)> = Vec::new();
-    let mut negative: Option<(VarId, f64)> = None;
-    for &(row, col, h) in &q.hessian {
-        if row != col {
-            return None;
-        }
-        let coef = h / 2.0;
-        if coef > 0.0 {
-            positives.push((row, coef));
-        } else if coef < 0.0 {
-            if negative.is_some() {
-                return None;
-            }
-            negative = Some((row, -coef));
-        }
-    }
-    let (t, n) = negative?;
-    if positives.is_empty() || vars[t.index()].lb < 0.0 {
-        return None;
-    }
-
-    let terms = positives
+    let (q, t, n) = soc_quadratic(arena, vars, c)?;
+    let terms = q
+        .hessian
         .into_iter()
-        .map(|(x, p)| LinearTerms { coeffs: vec![(x, (p / n).sqrt())], constant: 0.0 })
+        .filter_map(|(row, _, h)| {
+            let coef = h / 2.0;
+            (coef > 0.0)
+                .then(|| LinearTerms { coeffs: vec![(row, (coef / n).sqrt())], constant: 0.0 })
+        })
         .collect();
     let bound = LinearTerms { coeffs: vec![(t, 1.0)], constant: 0.0 };
     Some(SocForm { terms, bound })

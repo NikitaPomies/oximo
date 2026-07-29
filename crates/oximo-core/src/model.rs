@@ -13,10 +13,10 @@ use crate::indexed::{IndexedFamily, IndexedParam, IndexedVar, build_storage};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
-use crate::soc::{SocConstraint, SocConstraintId, detect_soc};
+use crate::soc::{SocConstraint, SocConstraintId, is_detected_soc};
 use crate::var::{VarBuilder, Variable};
 
-const PAR_KIND_THRESHOLD: usize = 1024;
+const PAR_KIND_THRESHOLD: usize = 256;
 
 /// The kind of mathematical program a `Model` represents.
 ///
@@ -837,15 +837,21 @@ impl Model {
                     quadratic.len() >= PAR_KIND_THRESHOLD && rayon::current_num_threads() > 1,
                 );
                 if use_parallel {
-                    let cones: Vec<bool> = quadratic
+                    let (has_cone, has_plain) = quadratic
                         .par_iter()
-                        .map(|c| detect_soc(arena_ref, vars_ref, c).is_some())
-                        .collect();
-                    detected_soc = cones.iter().any(|&is_soc| is_soc);
-                    plain_quad_con = cones.iter().any(|&is_soc| !is_soc);
+                        .map(|c| {
+                            let is_soc = is_detected_soc(arena_ref, vars_ref, c);
+                            (is_soc, !is_soc)
+                        })
+                        .reduce(
+                            || (false, false),
+                            |left, right| (left.0 || right.0, left.1 || right.1),
+                        );
+                    detected_soc = has_cone;
+                    plain_quad_con = has_plain;
                 } else {
                     for c in quadratic {
-                        if detect_soc(arena_ref, vars_ref, c).is_some() {
+                        if is_detected_soc(arena_ref, vars_ref, c) {
                             detected_soc = true;
                         } else {
                             plain_quad_con = true;
@@ -1024,7 +1030,8 @@ pub fn display_index_key(key: &IndexKey) -> String {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use super::*;
 
@@ -1043,6 +1050,18 @@ pub mod benchmark_support {
                 _ => x * y * z,
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
+        }
+        model
+    }
+
+    pub fn soc_model(rows: usize) -> Model {
+        let model = Model::new("kind_soc_bench");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        let t = model.__var("t").lb(0.0).build();
+        model.__minimize(t);
+        for _ in 0..rows {
+            model.__add_constraint_auto((x.powi(2) + y.powi(2) - t.powi(2)).le(0.0));
         }
         model
     }
