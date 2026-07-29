@@ -125,18 +125,15 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
 
     let arena_ref: &ExprArena = &arena;
     let vars_ref: &[Variable] = &vars;
-    let con_terms: Vec<LinearTerms> = constraints
-        .iter()
-        .map(|c| {
-            extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
-                location: format!("constraint {:?}", c.name),
-                term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
-                    .unwrap_or_else(|| "<nonlinear>".into()),
-            })
-        })
-        .collect::<Result<_, _>>()?;
 
-    for (c, t) in constraints.iter().zip(&con_terms) {
+    // RowProblem receives rows sequentially, so lower and upload each row in
+    // one pass.
+    for c in constraints.iter() {
+        let t = extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
+            location: format!("constraint {:?}", c.name),
+            term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
         let lower = c.lower - t.constant;
         let upper = c.upper - t.constant;
         let factors = t.coeffs.iter().map(|(v, co)| (cols[v.index()], *co));
@@ -362,7 +359,8 @@ fn map_status(s: HighsModelStatus) -> TerminationStatus {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
     use rayon::prelude::*;
@@ -384,18 +382,27 @@ pub mod benchmark_support {
     }
 
     pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena().clone();
-        let vars = model.variables().clone();
-        let constraints = model.constraints().clone();
-        let terms = if parallel {
-            constraints
-                .par_iter()
-                .map(|c| extract(&arena, &vars, c))
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            constraints.iter().map(|c| extract(&arena, &vars, c)).collect::<Result<Vec<_>, _>>()?
+        let arena = model.arena();
+        let vars = model.variables();
+        let constraints = model.constraints();
+        let arena_ref = &*arena;
+        let vars_ref = &*vars;
+        let row_nnz = |constraint: &oximo_core::Constraint| {
+            extract(arena_ref, vars_ref, constraint).map(|terms| terms.coeffs.len())
         };
-        Ok(terms.iter().map(|terms| terms.coeffs.len()).sum())
+        if parallel {
+            constraints.par_iter().map(row_nnz).try_reduce(|| 0, |left, right| Ok(left + right))
+        } else {
+            constraints
+                .iter()
+                .try_fold(0, |sum, constraint| row_nnz(constraint).map(|nnz| sum + nnz))
+        }
+    }
+
+    /// Translate into a fresh HiGHS row problem without solving it.
+    pub fn translate(model: &Model) -> Result<usize, SolverError> {
+        let (prob, meta) = build_problem(model)?;
+        Ok(meta.cols.len() + meta.num_constraints + prob.hessian_cols.len())
     }
 
     pub fn solution_maps(values: &[f64], parallel: bool) -> usize {
