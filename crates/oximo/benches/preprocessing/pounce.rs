@@ -8,6 +8,7 @@ use super::common::{pair, sizes, threads};
 /// Run stable POUNCE classification, value, and rejected Jacobian candidates.
 pub fn bench(criterion: &mut Criterion) {
     classification(criterion);
+    initialization(criterion);
     values(criterion);
     jacobians(criterion);
 }
@@ -16,7 +17,17 @@ pub fn bench(criterion: &mut Criterion) {
 fn classification(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("preprocessing/pounce_classification");
     for (kind, nonlinear) in [("qcp", false), ("nlp", true)] {
-        for (size, rows) in sizes(benchmark_support::CLASSIFY_THRESHOLD) {
+        let threshold = if nonlinear {
+            benchmark_support::CLASSIFY_THRESHOLD
+        } else {
+            benchmark_support::QCP_CLASSIFY_THRESHOLD
+        };
+        for (size, rows) in [
+            ("below", threshold / 2),
+            ("threshold", threshold),
+            ("above", threshold * 2),
+            ("large", 1_024),
+        ] {
             let model = benchmark_support::model(rows, nonlinear);
             pair(
                 &mut group,
@@ -26,6 +37,32 @@ fn classification(criterion: &mut Criterion) {
                 benchmark_support::classify,
             );
         }
+    }
+    group.finish();
+}
+
+/// Measure complete stable-oracle construction, including sparsity and scatter maps.
+fn initialization(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("preprocessing/pounce_oracle_initialization");
+    for rows in [64, 128, 256, 512, 1_024] {
+        let model = benchmark_support::model(rows, false);
+        pair(
+            &mut group,
+            &format!("qcp/crossover/{rows}"),
+            rows,
+            &model,
+            benchmark_support::initialize,
+        );
+    }
+    for rows in [16, 32, 64, 1_024] {
+        let model = benchmark_support::model(rows, true);
+        pair(
+            &mut group,
+            &format!("nlp/crossover/{rows}"),
+            rows,
+            &model,
+            benchmark_support::initialize,
+        );
     }
     group.finish();
 }
@@ -86,4 +123,25 @@ fn jacobians(criterion: &mut Criterion) {
         }
         group.finish();
     }
+
+    let mut group = criterion.benchmark_group("preprocessing/pounce_sparse_jacobian_width");
+    for n_vars in [256, 2_048] {
+        for (size, rows) in sizes(benchmark_support::JACOBIAN_THRESHOLD) {
+            let model = benchmark_support::jacobian_model(rows, n_vars);
+            let mut serial = benchmark_support::Oracle::new(&model);
+            let mut parallel = benchmark_support::Oracle::new(&model);
+            group.throughput(Throughput::Elements(rows as u64));
+            let case = format!("{n_vars}v/{size}/{rows}");
+            group.bench_function(BenchmarkId::new(&case, "serial"), |bencher| {
+                bencher.iter(|| black_box(serial.sparse_jacobian(false)));
+            });
+            group.bench_function(
+                BenchmarkId::new(&case, format!("parallel-{}t", threads())),
+                |bencher| {
+                    bencher.iter(|| black_box(parallel.sparse_jacobian(true)));
+                },
+            );
+        }
+    }
+    group.finish();
 }

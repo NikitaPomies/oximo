@@ -13,7 +13,7 @@
 use oximo_autodiff::slot::{
     linear_gradient_add, linear_value, quadratic_gradient_add, quadratic_value,
 };
-use oximo_autodiff::sparsity::{hessian_lagrangian_structure, jacobian_structure};
+use oximo_autodiff::sparsity::hessian_lagrangian_structure;
 use oximo_autodiff::tape::params_snapshot;
 use oximo_autodiff::{FunctionSlot, SlotKind};
 use oximo_core::{Model, ModelKind};
@@ -22,13 +22,19 @@ use rayon::prelude::*;
 
 use crate::tnlp::DerivativeOracle;
 
-// Large NLP slot classification benefits from Rayon at every measured size.
-// QCP classification does not.
+// Full-oracle initialization benefits from parallel slot classification for
+// NLP at 32 rows and QCP at 128 rows. Other classes remain serial.
 // All refresh/value/Jacobian work remains serial.
 const PAR_CLASSIFY_THRESHOLD: usize = 32;
+const PAR_QCP_CLASSIFY_THRESHOLD: usize = 128;
 
-fn should_parallelize_nlp_classification(kind: ModelKind, len: usize) -> bool {
-    kind == ModelKind::NLP && len >= PAR_CLASSIFY_THRESHOLD && rayon::current_num_threads() > 1
+fn should_parallelize_classification(kind: ModelKind, len: usize) -> bool {
+    let large_enough = match kind {
+        ModelKind::NLP => len >= PAR_CLASSIFY_THRESHOLD,
+        ModelKind::QCP => len >= PAR_QCP_CLASSIFY_THRESHOLD,
+        _ => false,
+    };
+    large_enough && rayon::current_num_threads() > 1
 }
 
 fn classify_slots(
@@ -43,6 +49,53 @@ fn classify_slots(
     }
 }
 
+struct JacobianMetadata {
+    structure: Vec<(usize, usize)>,
+    linear_scatter: Vec<usize>,
+    hessian_scatter: Vec<(usize, usize)>,
+}
+
+fn jacobian_metadata(slots: &[FunctionSlot]) -> JacobianMetadata {
+    let nnz = slots.iter().map(|slot| slot.support.len()).sum();
+    let mut structure = Vec::with_capacity(nnz);
+    let linear_count = slots
+        .iter()
+        .map(|slot| match &slot.kind {
+            SlotKind::Linear(terms) => terms.coeffs.len(),
+            SlotKind::Quadratic(terms) => terms.linear.len(),
+            SlotKind::Nonlinear(_) => 0,
+        })
+        .sum();
+    let hessian_count = slots
+        .iter()
+        .map(|slot| match &slot.kind {
+            SlotKind::Quadratic(terms) => terms.hessian.len(),
+            SlotKind::Linear(_) | SlotKind::Nonlinear(_) => 0,
+        })
+        .sum();
+    let mut linear_scatter = Vec::with_capacity(linear_count);
+    let mut hessian_scatter = Vec::with_capacity(hessian_count);
+    for (row, slot) in slots.iter().enumerate() {
+        structure.extend(slot.support.iter().map(|&var| (row, var as usize)));
+        let position = |var: u32| {
+            slot.support.binary_search(&var).expect("slot term missing from its Jacobian support")
+        };
+        match &slot.kind {
+            SlotKind::Linear(terms) => {
+                linear_scatter.extend(terms.coeffs.iter().map(|(var, _)| position(var.0)));
+            }
+            SlotKind::Quadratic(terms) => {
+                linear_scatter.extend(terms.linear.iter().map(|(var, _)| position(var.0)));
+                hessian_scatter.extend(
+                    terms.hessian.iter().map(|(row, col, _)| (position(row.0), position(col.0))),
+                );
+            }
+            SlotKind::Nonlinear(_) => {}
+        }
+    }
+    JacobianMetadata { structure, linear_scatter, hessian_scatter }
+}
+
 /// Classified objective/constraint slots plus the precomputed sparsity and
 /// scratch space to serve [`DerivativeOracle`] on stable Rust.
 #[derive(Debug)]
@@ -55,6 +108,10 @@ pub(crate) struct HybridOracle {
     con_exprs: Vec<ExprId>,
     /// Row-major `(constraint, variable)` pattern; row `i` is `cons[i].support`.
     jac_structure: Vec<(usize, usize)>,
+    /// Linear-term positions in compact Jacobian rows, concatenated in slot order.
+    jac_linear_scatter: Vec<usize>,
+    /// Hessian endpoint positions in compact Jacobian rows, concatenated in slot order.
+    jac_hessian_scatter: Vec<(usize, usize)>,
     /// Sorted lower-triangle Lagrangian-Hessian pattern; empty unless
     /// `exact_hessian` (and for a pure LP, where it is genuinely empty).
     hess_structure: Vec<(usize, usize)>,
@@ -66,14 +123,11 @@ pub(crate) struct HybridOracle {
     con_hess_pos: Vec<Vec<usize>>,
     /// Tape evaluation registers (max `n_regs` over all nonlinear slots).
     regs: Vec<f64>,
-    /// Dense row buffer for gathering per-constraint gradients.
-    row_scratch: Vec<f64>,
 }
 
 impl HybridOracle {
     pub(crate) fn new(model: &Model) -> Self {
-        let parallel =
-            should_parallelize_nlp_classification(model.kind(), model.constraints().len());
+        let parallel = should_parallelize_classification(model.kind(), model.constraints().len());
         Self::new_with(model, parallel)
     }
 
@@ -93,12 +147,13 @@ impl HybridOracle {
             obj_expr,
             con_exprs,
             jac_structure: Vec::new(),
+            jac_linear_scatter: Vec::new(),
+            jac_hessian_scatter: Vec::new(),
             hess_structure: Vec::new(),
             exact_hessian: false,
             obj_hess_pos: Vec::new(),
             con_hess_pos: Vec::new(),
             regs: Vec::new(),
-            row_scratch: Vec::new(),
         };
         oracle.rebuild_structures();
         oracle
@@ -133,7 +188,10 @@ impl HybridOracle {
     /// Recompute the sparsity patterns, Hessian scatter, and scratch sizes
     /// from the current slots.
     fn rebuild_structures(&mut self) {
-        self.jac_structure = jacobian_structure(&self.cons);
+        let metadata = jacobian_metadata(&self.cons);
+        self.jac_structure = metadata.structure;
+        self.jac_linear_scatter = metadata.linear_scatter;
+        self.jac_hessian_scatter = metadata.hessian_scatter;
         self.exact_hessian =
             !self.obj.is_nonlinear() && self.cons.iter().all(|s| !s.is_nonlinear());
         if self.exact_hessian {
@@ -156,7 +214,6 @@ impl HybridOracle {
             .max()
             .unwrap_or(0);
         self.regs = vec![0.0; n_regs];
-        self.row_scratch = vec![0.0; self.n_vars];
     }
 
     /// Whether every slot is closed-form (linear/quadratic).
@@ -276,17 +333,51 @@ impl DerivativeOracle for HybridOracle {
 
     fn eval_constraint_jacobian(&mut self, x: &[f64], vals: &mut [f64]) {
         let mut k = 0;
+        let mut linear_k = 0;
+        let mut hessian_k = 0;
         for slot in &self.cons {
-            for &j in &slot.support {
-                self.row_scratch[j as usize] = 0.0;
+            let row = &mut vals[k..k + slot.support.len()];
+            row.fill(0.0);
+            match &slot.kind {
+                SlotKind::Linear(terms) => {
+                    let positions =
+                        &self.jac_linear_scatter[linear_k..linear_k + terms.coeffs.len()];
+                    for (&position, &(_, coefficient)) in positions.iter().zip(&terms.coeffs) {
+                        row[position] += coefficient;
+                    }
+                    linear_k += terms.coeffs.len();
+                }
+                SlotKind::Quadratic(terms) => {
+                    let linear_positions =
+                        &self.jac_linear_scatter[linear_k..linear_k + terms.linear.len()];
+                    for (&position, &(_, coefficient)) in linear_positions.iter().zip(&terms.linear)
+                    {
+                        row[position] += coefficient;
+                    }
+                    linear_k += terms.linear.len();
+                    let hessian_positions =
+                        &self.jac_hessian_scatter[hessian_k..hessian_k + terms.hessian.len()];
+                    for (&(row_position, col_position), &(row_var, col_var, hessian)) in
+                        hessian_positions.iter().zip(&terms.hessian)
+                    {
+                        if row_var == col_var {
+                            row[row_position] += hessian * x[row_var.index()];
+                        } else {
+                            row[row_position] += hessian * x[col_var.index()];
+                            row[col_position] += hessian * x[row_var.index()];
+                        }
+                    }
+                    hessian_k += terms.hessian.len();
+                }
+                SlotKind::Nonlinear(_) => {
+                    unreachable!("nonlinear slots are finite-differenced by POUNCE's builder")
+                }
             }
-            slot_gradient_add(slot, x, &mut self.row_scratch);
-            for &j in &slot.support {
-                vals[k] = self.row_scratch[j as usize];
-                k += 1;
-            }
+            k += row.len();
         }
         debug_assert_eq!(k, vals.len(), "jacobian nnz");
+        debug_assert_eq!(linear_k, self.jac_linear_scatter.len(), "linear jacobian scatter");
+        debug_assert_eq!(hessian_k, self.jac_hessian_scatter.len(), "Hessian jacobian scatter");
     }
 
     /// Constant-Hessian scatter.
@@ -315,14 +406,17 @@ impl DerivativeOracle for HybridOracle {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
 
     use super::*;
 
     /// Crossover candidate used only to size the preprocessing benchmark cases.
-    pub const CLASSIFY_THRESHOLD: usize = 1_024;
+    pub const CLASSIFY_THRESHOLD: usize = PAR_CLASSIFY_THRESHOLD;
+    /// QCP full-oracle initialization crossover candidate.
+    pub const QCP_CLASSIFY_THRESHOLD: usize = PAR_QCP_CLASSIFY_THRESHOLD;
     /// Crossover candidate used only to size the preprocessing benchmark cases.
     pub const VALUE_THRESHOLD: usize = 1_024;
     /// Crossover candidate used only to size the preprocessing benchmark cases.
@@ -349,19 +443,41 @@ pub mod benchmark_support {
         model
     }
 
-    pub fn classify(model: &Model, parallel: bool) -> usize {
-        let arena = model.arena().clone();
-        let exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
-        if parallel {
-            exprs.par_iter().map(|&e| FunctionSlot::classify(&arena, e).support.len()).sum()
-        } else {
-            exprs.iter().map(|&e| FunctionSlot::classify(&arena, e).support.len()).sum()
+    pub fn jacobian_model(rows: usize, n_vars: usize) -> Model {
+        assert!(n_vars >= 3);
+        let model = Model::new("pounce_jacobian_bench");
+        let vars: Vec<_> =
+            (0..n_vars).map(|i| model.__var(format!("x{i}")).lb(-5.0).ub(5.0).build()).collect();
+        model.__minimize(vars[0].powi(2));
+        for i in 0..rows {
+            let x = vars[i % n_vars];
+            let y = vars[(i + 1) % n_vars];
+            let z = vars[(i + 2) % n_vars];
+            let lhs = if i % 2 == 0 { x.powi(2) + y * z } else { x + 2.0 * y - z };
+            model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
+        model
+    }
+
+    pub fn classify(model: &Model, parallel: bool) -> usize {
+        let arena = model.arena();
+        let exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
+        let arena_ref = &*arena;
+        if parallel {
+            exprs.par_iter().map(|&e| FunctionSlot::classify(arena_ref, e).support.len()).sum()
+        } else {
+            exprs.iter().map(|&e| FunctionSlot::classify(arena_ref, e).support.len()).sum()
+        }
+    }
+
+    pub fn initialize(model: &Model, parallel: bool) -> (usize, usize, bool) {
+        let oracle = HybridOracle::new_with(model, parallel);
+        (oracle.jac_structure.len(), oracle.hess_structure.len(), oracle.exact_hessian)
     }
 
     pub struct Oracle {
         inner: HybridOracle,
-        point: [f64; 3],
+        point: Vec<f64>,
         values: Vec<f64>,
         sparse: Vec<f64>,
         dense: Vec<f64>,
@@ -378,8 +494,15 @@ pub mod benchmark_support {
             let inner = HybridOracle::new(model);
             let values = vec![0.0; inner.cons.len()];
             let sparse = vec![0.0; inner.jac_structure.len()];
-            let dense = vec![0.0; inner.cons.len() * inner.n_vars];
-            Self { inner, point: [0.7, -1.1, 0.4], values, sparse, dense }
+            let dense = Vec::new();
+            let point = (0..inner.n_vars)
+                .map(|i| match i % 3 {
+                    0 => 0.7,
+                    1 => -1.1,
+                    _ => 0.4,
+                })
+                .collect();
+            Self { inner, point, values, sparse, dense }
         }
 
         pub fn values(&mut self, parallel: bool) -> f64 {
@@ -423,6 +546,7 @@ pub mod benchmark_support {
         }
 
         pub fn dense_jacobian(&mut self, parallel: bool) -> f64 {
+            self.dense.resize(self.inner.cons.len() * self.inner.n_vars, 0.0);
             if parallel {
                 assert!(!self.inner.cons.iter().any(FunctionSlot::is_nonlinear));
                 self.dense
@@ -646,6 +770,35 @@ mod tests {
         assert_close(jac[0], 3.0, 1e-12, "constraint coefficient after refresh");
     }
 
+    #[test]
+    fn refresh_rebuilds_jacobian_scatter_when_support_changes() {
+        let m = Model::new("scatter_refresh");
+        param!(m, w = 1.0);
+        variable!(m, -5.0 <= x <= 5.0);
+        objective!(m, Min, x);
+        constraint!(m, scaled_square, w * x.powi(2) <= 4.0);
+
+        let mut oracle = HybridOracle::new(&m);
+        assert_eq!(oracle.jac_structure, vec![(0, 0)]);
+        let mut jac = vec![0.0; oracle.jac_structure.len()];
+        oracle.eval_constraint_jacobian(&[3.0], &mut jac);
+        assert_eq!(jac, vec![6.0]);
+
+        w.set_param_value(0.0);
+        oracle.refresh(&m);
+        assert!(oracle.jac_structure.is_empty());
+        let mut jac = Vec::new();
+        oracle.eval_constraint_jacobian(&[3.0], &mut jac);
+        assert!(jac.is_empty());
+
+        w.set_param_value(2.0);
+        oracle.refresh(&m);
+        assert_eq!(oracle.jac_structure, vec![(0, 0)]);
+        let mut jac = vec![0.0; oracle.jac_structure.len()];
+        oracle.eval_constraint_jacobian(&[3.0], &mut jac);
+        assert_eq!(jac, vec![12.0]);
+    }
+
     fn repeated_model(rows: usize, nonlinear: bool) -> Model {
         let m = Model::new("repeated");
         variable!(m, -5.0 <= x <= 5.0);
@@ -666,29 +819,38 @@ mod tests {
     }
 
     #[test]
-    fn forced_serial_and_parallel_nlp_classification_are_identical() {
-        let m = repeated_model(PAR_CLASSIFY_THRESHOLD + 3, true);
-        let serial = HybridOracle::new_with(&m, false);
-        let parallel = HybridOracle::new_with(&m, true);
-        assert_eq!(serial.jac_structure, parallel.jac_structure);
-        assert_eq!(serial.hess_structure, parallel.hess_structure);
-        assert_eq!(serial.exact_hessian, parallel.exact_hessian);
+    fn forced_serial_and_parallel_classification_are_identical() {
+        for model in [
+            repeated_model(PAR_CLASSIFY_THRESHOLD + 3, true),
+            repeated_model(PAR_QCP_CLASSIFY_THRESHOLD + 3, false),
+        ] {
+            let serial = HybridOracle::new_with(&model, false);
+            let parallel = HybridOracle::new_with(&model, true);
+            assert_eq!(serial.jac_structure, parallel.jac_structure);
+            assert_eq!(serial.hess_structure, parallel.hess_structure);
+            assert_eq!(serial.exact_hessian, parallel.exact_hessian);
+            assert_eq!(serial.jac_linear_scatter, parallel.jac_linear_scatter);
+            assert_eq!(serial.jac_hessian_scatter, parallel.jac_hessian_scatter);
+        }
     }
 
     #[test]
-    fn automatic_nlp_classification_respects_the_pool_and_threshold() {
+    fn automatic_classification_respects_kind_pool_and_threshold() {
         let one = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         one.install(|| {
-            assert!(!should_parallelize_nlp_classification(ModelKind::NLP, PAR_CLASSIFY_THRESHOLD));
+            assert!(!should_parallelize_classification(ModelKind::NLP, PAR_CLASSIFY_THRESHOLD));
+            assert!(!should_parallelize_classification(ModelKind::QCP, PAR_QCP_CLASSIFY_THRESHOLD));
         });
         let many = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
         many.install(|| {
-            assert!(!should_parallelize_nlp_classification(
-                ModelKind::NLP,
-                PAR_CLASSIFY_THRESHOLD - 1
+            assert!(!should_parallelize_classification(ModelKind::NLP, PAR_CLASSIFY_THRESHOLD - 1));
+            assert!(should_parallelize_classification(ModelKind::NLP, PAR_CLASSIFY_THRESHOLD));
+            assert!(!should_parallelize_classification(
+                ModelKind::QCP,
+                PAR_QCP_CLASSIFY_THRESHOLD - 1
             ));
-            assert!(should_parallelize_nlp_classification(ModelKind::NLP, PAR_CLASSIFY_THRESHOLD));
-            assert!(!should_parallelize_nlp_classification(ModelKind::QCP, PAR_CLASSIFY_THRESHOLD));
+            assert!(should_parallelize_classification(ModelKind::QCP, PAR_QCP_CLASSIFY_THRESHOLD));
+            assert!(!should_parallelize_classification(ModelKind::QP, PAR_QCP_CLASSIFY_THRESHOLD));
         });
     }
 }
