@@ -21,6 +21,15 @@ pub(crate) struct Meta {
     explicit_accs: Vec<(SocConstraintId, i64, usize)>,
 }
 
+/// Reusable native upload buffers.
+#[derive(Default)]
+struct TaskScratch {
+    indices: Vec<i32>,
+    columns: Vec<i32>,
+    values: Vec<f64>,
+    acc_rhs: Vec<f64>,
+}
+
 /// Translate and solve an oximo model with a fresh MOSEK task.
 ///
 /// # Errors
@@ -117,7 +126,8 @@ fn build_base(model: &Model, task: &mut TaskCB) -> Result<(), SolverError> {
         task.put_c_j(index_i32(variable.index(), "variable")?, coefficient).map_err(backend)?;
     }
     task.put_cfix(quad.constant).map_err(backend)?;
-    put_q_objective(task, &quad)?;
+    let mut scratch = TaskScratch::default();
+    put_q_objective(task, &quad, &mut scratch)?;
     task.put_obj_sense(objective.as_ref().map_or(Objsense::MINIMIZE, |obj| match obj.sense {
         ObjectiveSense::Minimize => Objsense::MINIMIZE,
         ObjectiveSense::Maximize => Objsense::MAXIMIZE,
@@ -151,10 +161,11 @@ fn build_rows_and_cones(
     let constraints = model.constraints();
     let mut row_by_constraint = vec![None; constraints.len()];
     let mut detected = Vec::new();
+    let mut scratch = TaskScratch::default();
 
     for (id, constraint) in constraints.iter().enumerate() {
         if let Some(form) = detect_soc(&arena, &variables, constraint) {
-            detected.push((constraint.name.to_string(), form));
+            detected.push((id, form));
             continue;
         }
         let terms =
@@ -165,15 +176,11 @@ fn build_rows_and_cones(
         let row = task.get_num_con().map_err(backend)?;
         task.append_cons(1).map_err(backend)?;
         task.put_con_name(row, &constraint.name).map_err(backend)?;
-        put_linear_row(task, row, &terms.linear)?;
-        task.put_con_bound(
-            row,
-            bounds(constraint.lower - terms.constant, constraint.upper - terms.constant).0,
-            bounds(constraint.lower - terms.constant, constraint.upper - terms.constant).1,
-            bounds(constraint.lower - terms.constant, constraint.upper - terms.constant).2,
-        )
-        .map_err(backend)?;
-        put_q_constraint(task, row, &terms)?;
+        put_linear_row(task, row, &terms.linear, &mut scratch)?;
+        let (key, lower, upper) =
+            bounds(constraint.lower - terms.constant, constraint.upper - terms.constant);
+        task.put_con_bound(row, key, lower, upper).map_err(backend)?;
+        put_q_constraint(task, row, &terms, &mut scratch)?;
         row_by_constraint[id] = Some(row);
     }
 
@@ -188,7 +195,7 @@ fn build_rows_and_cones(
                 soc.name
             ))
         })?;
-        let dim = append_soc(task, &form, &mut next_afe)?;
+        let dim = append_soc(task, &form, &mut next_afe, &mut scratch)?;
         task.put_acc_name(next_acc, &soc.name).map_err(backend)?;
         explicit_accs.push((
             SocConstraintId(u32::try_from(id).map_err(|_| overflow("SOC constraint"))?),
@@ -197,9 +204,9 @@ fn build_rows_and_cones(
         ));
         next_acc += 1;
     }
-    for (name, form) in detected {
-        append_soc(task, &form, &mut next_afe)?;
-        task.put_acc_name(next_acc, &name).map_err(backend)?;
+    for (id, form) in detected {
+        append_soc(task, &form, &mut next_afe, &mut scratch)?;
+        task.put_acc_name(next_acc, &constraints[id].name).map_err(backend)?;
         next_acc += 1;
     }
 
@@ -210,84 +217,106 @@ fn append_soc(
     task: &mut TaskCB,
     form: &oximo_core::SocForm,
     next_afe: &mut i64,
+    scratch: &mut TaskScratch,
 ) -> Result<usize, SolverError> {
     let dim = 1 + form.terms.len();
     task.append_afes(i64::try_from(dim).map_err(|_| overflow("SOC dimension"))?)
         .map_err(backend)?;
     let first = *next_afe;
-    put_afe(task, first, &form.bound)?;
+    put_afe(task, first, &form.bound, scratch)?;
     for (offset, terms) in form.terms.iter().enumerate() {
         put_afe(
             task,
             first + i64::try_from(offset + 1).map_err(|_| overflow("AFE index"))?,
             terms,
+            scratch,
         )?;
     }
     let domain = task
         .append_quadratic_cone_domain(i64::try_from(dim).map_err(|_| overflow("SOC dimension"))?)
         .map_err(backend)?;
-    let afes: Vec<i64> =
-        (first..first + i64::try_from(dim).map_err(|_| overflow("SOC dimension"))?).collect();
-    task.append_acc(domain, &afes, &vec![0.0; dim]).map_err(backend)?;
+    scratch.acc_rhs.clear();
+    scratch.acc_rhs.resize(dim, 0.0);
+    task.append_acc_seq(domain, first, &scratch.acc_rhs).map_err(backend)?;
     *next_afe += i64::try_from(dim).map_err(|_| overflow("AFE count"))?;
     Ok(dim)
 }
 
-fn put_afe(task: &mut TaskCB, afe: i64, terms: &LinearTerms) -> Result<(), SolverError> {
-    let columns: Vec<i32> = terms
-        .coeffs
-        .iter()
-        .map(|(variable, _)| index_i32(variable.index(), "variable"))
-        .collect::<Result<_, _>>()?;
-    let values: Vec<f64> = terms.coeffs.iter().map(|(_, value)| *value).collect();
-    task.put_afe_f_row(afe, &columns, &values).map_err(backend)?;
+fn put_afe(
+    task: &mut TaskCB,
+    afe: i64,
+    terms: &LinearTerms,
+    scratch: &mut TaskScratch,
+) -> Result<(), SolverError> {
+    fill_linear_buffers(&terms.coeffs, scratch)?;
+    task.put_afe_f_row(afe, &scratch.indices, &scratch.values).map_err(backend)?;
     task.put_afe_g(afe, terms.constant).map_err(backend)
 }
 
-fn put_linear_row(task: &mut TaskCB, row: i32, terms: &[(VarId, f64)]) -> Result<(), SolverError> {
-    let columns: Vec<i32> = terms
-        .iter()
-        .map(|(variable, _)| index_i32(variable.index(), "variable"))
-        .collect::<Result<_, _>>()?;
-    let values: Vec<f64> = terms.iter().map(|(_, value)| *value).collect();
-    task.put_a_row(row, &columns, &values).map_err(backend)
+fn put_linear_row(
+    task: &mut TaskCB,
+    row: i32,
+    terms: &[(VarId, f64)],
+    scratch: &mut TaskScratch,
+) -> Result<(), SolverError> {
+    fill_linear_buffers(terms, scratch)?;
+    task.put_a_row(row, &scratch.indices, &scratch.values).map_err(backend)
 }
 
-fn put_q_objective(task: &mut TaskCB, terms: &QuadraticTerms) -> Result<(), SolverError> {
+fn fill_linear_buffers(
+    terms: &[(VarId, f64)],
+    scratch: &mut TaskScratch,
+) -> Result<(), SolverError> {
+    scratch.indices.clear();
+    scratch.values.clear();
+    scratch.indices.reserve(terms.len().saturating_sub(scratch.indices.capacity()));
+    scratch.values.reserve(terms.len().saturating_sub(scratch.values.capacity()));
+    for &(variable, value) in terms {
+        scratch.indices.push(index_i32(variable.index(), "variable")?);
+        scratch.values.push(value);
+    }
+    Ok(())
+}
+
+fn put_q_objective(
+    task: &mut TaskCB,
+    terms: &QuadraticTerms,
+    scratch: &mut TaskScratch,
+) -> Result<(), SolverError> {
     if terms.hessian.is_empty() {
         return Ok(());
     }
-    let (rows, columns, values) = q_triplets(terms)?;
-    task.put_q_obj(&rows, &columns, &values).map_err(backend)
+    fill_q_triplets(terms, scratch)?;
+    task.put_q_obj(&scratch.indices, &scratch.columns, &scratch.values).map_err(backend)
 }
 
 fn put_q_constraint(
     task: &mut TaskCB,
     row: i32,
     terms: &QuadraticTerms,
+    scratch: &mut TaskScratch,
 ) -> Result<(), SolverError> {
     if terms.hessian.is_empty() {
         return Ok(());
     }
-    let (rows, columns, values) = q_triplets(terms)?;
-    task.put_q_con_k(row, &rows, &columns, &values).map_err(backend)
+    fill_q_triplets(terms, scratch)?;
+    task.put_q_con_k(row, &scratch.indices, &scratch.columns, &scratch.values).map_err(backend)
 }
 
-type QTriplets = (Vec<i32>, Vec<i32>, Vec<f64>);
-
-fn q_triplets(terms: &QuadraticTerms) -> Result<QTriplets, SolverError> {
-    let rows = terms
-        .hessian
-        .iter()
-        .map(|(row, _, _)| index_i32(row.index(), "variable"))
-        .collect::<Result<_, _>>()?;
-    let columns = terms
-        .hessian
-        .iter()
-        .map(|(_, column, _)| index_i32(column.index(), "variable"))
-        .collect::<Result<_, _>>()?;
-    let values = terms.hessian.iter().map(|(_, _, value)| *value).collect();
-    Ok((rows, columns, values))
+fn fill_q_triplets(terms: &QuadraticTerms, scratch: &mut TaskScratch) -> Result<(), SolverError> {
+    scratch.indices.clear();
+    scratch.columns.clear();
+    scratch.values.clear();
+    let len = terms.hessian.len();
+    scratch.indices.reserve(len.saturating_sub(scratch.indices.capacity()));
+    scratch.columns.reserve(len.saturating_sub(scratch.columns.capacity()));
+    scratch.values.reserve(len.saturating_sub(scratch.values.capacity()));
+    for &(row, column, value) in &terms.hessian {
+        scratch.indices.push(index_i32(row.index(), "variable")?);
+        scratch.columns.push(index_i32(column.index(), "variable")?);
+        scratch.values.push(value);
+    }
+    Ok(())
 }
 
 fn extract_result(
@@ -502,7 +531,8 @@ fn backend(message: String) -> SolverError {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
     use rayon::prelude::*;
@@ -544,46 +574,52 @@ pub mod benchmark_support {
     }
 
     pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena().clone();
-        let variables = model.variables().clone();
-        let constraints = model.constraints().clone();
+        let arena = model.arena();
+        let variables = model.variables();
+        let constraints = model.constraints();
+        let arena_ref = &*arena;
+        let variables_ref = &*variables;
         let row = |c: &oximo_core::Constraint| {
-            extract_quadratic(&arena, c.lhs)
+            extract_quadratic(arena_ref, c.lhs)
                 .ok_or_else(|| SolverError::Nonlinear {
                     location: format!("constraint {:?}", c.name),
                     term: "<nonlinear>".into(),
                 })
                 .map(|q| {
-                    usize::from(detect_soc(&arena, &variables, c).is_some())
+                    usize::from(detect_soc(arena_ref, variables_ref, c).is_some())
                         + q.linear.len()
                         + q.hessian.len()
                 })
         };
-        let rows = if parallel {
-            constraints.par_iter().map(row).collect::<Result<Vec<_>, _>>()?
+        if parallel {
+            constraints.par_iter().map(row).try_reduce(|| 0, |left, right| Ok(left + right))
         } else {
-            constraints.iter().map(row).collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(rows.into_iter().sum())
+            constraints
+                .iter()
+                .try_fold(0, |sum, constraint| row(constraint).map(|count| sum + count))
+        }
     }
 
     pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena().clone();
-        let socs = model.soc_constraints().clone();
+        let arena = model.arena();
+        let socs = model.soc_constraints();
+        let arena_ref = &*arena;
         let form = |s: &oximo_core::SocConstraint| {
-            explicit_soc_form(&arena, s).ok_or_else(|| {
+            explicit_soc_form(arena_ref, s).ok_or_else(|| {
                 SolverError::Backend(format!(
                     "SOC constraint '{}' has a member outside this model's arena",
                     s.name
                 ))
             })
         };
-        let forms = if parallel {
-            socs.par_iter().map(form).collect::<Result<Vec<_>, _>>()?
+        if parallel {
+            socs.par_iter()
+                .map(form)
+                .try_fold(|| 0, |count, _| Ok(count + 1))
+                .try_reduce(|| 0, |left, right| Ok(left + right))
         } else {
-            socs.iter().map(form).collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(forms.len())
+            socs.iter().try_fold(0, |count, soc| form(soc).map(|_| count + 1))
+        }
     }
 }
 
