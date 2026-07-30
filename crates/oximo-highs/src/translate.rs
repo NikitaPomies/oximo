@@ -7,6 +7,8 @@ use highs::{
 use oximo_core::{
     ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable, var_name,
 };
+#[cfg(feature = "benchmark-support")]
+use oximo_expr::LinearTerms;
 use oximo_expr::{
     ExprArena, ExprId, QuadraticTerms, describe_nonlinear_term, extract_linear, extract_quadratic,
 };
