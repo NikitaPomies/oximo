@@ -125,7 +125,7 @@ fn range_constraint_with_const_bounds_collapses_to_one_row() {
 
     assert_eq!(m.num_constraints(), 1);
     let cons = m.constraints();
-    let band = &cons[m.constraint_id("band").expect("range row").index()];
+    let band = &cons.algebraic()[m.constraint_id("band").expect("range row").index()];
     assert!(band.is_range());
     assert!((band.lower - 1.0).abs() < f64::EPSILON);
     assert!((band.upper - 3.0).abs() < f64::EPSILON);
@@ -139,7 +139,7 @@ fn range_constraint_ge_form_is_equivalent() {
 
     assert_eq!(m.num_constraints(), 1);
     let cons = m.constraints();
-    let b = &cons[m.constraint_id("b").unwrap().index()];
+    let b = &cons.algebraic()[m.constraint_id("b").unwrap().index()];
     assert!(b.is_range());
     assert!((b.lower - 1.0).abs() < f64::EPSILON);
     assert!((b.upper - 3.0).abs() < f64::EPSILON);
@@ -155,8 +155,8 @@ fn range_constraint_with_expr_bounds_falls_back_to_two_rows() {
 
     assert_eq!(m.num_constraints(), 2);
     let cons = m.constraints();
-    let lo_row = &cons[m.constraint_id("band_lo").expect("lo row").index()];
-    let hi_row = &cons[m.constraint_id("band_hi").expect("hi row").index()];
+    let lo_row = &cons.algebraic()[m.constraint_id("band_lo").expect("lo row").index()];
+    let hi_row = &cons.algebraic()[m.constraint_id("band_hi").expect("hi row").index()];
     assert_eq!(lo_row.as_single().map(|(s, _)| s), Some(Sense::Ge));
     assert_eq!(hi_row.as_single().map(|(s, _)| s), Some(Sense::Le));
 }
@@ -167,7 +167,8 @@ fn anonymous_range_makes_one_auto_row() {
     variable!(m, x >= 0.0);
     constraint!(m, 0.0 <= x <= 5.0);
     assert_eq!(m.num_constraints(), 1);
-    let c = &m.constraints()[m.constraint_id("_c0").expect("auto row").index()];
+    let constraints = m.constraints();
+    let c = &constraints.algebraic()[m.constraint_id("_c0").expect("auto row").index()];
     assert!(c.is_range());
 }
 
@@ -181,7 +182,7 @@ fn family_range_const_bounds_makes_one_row_per_element() {
 
     assert_eq!(m.num_constraints(), 3);
     let cons = m.constraints();
-    let c = &cons[m.constraint_id("cap[1]").expect("range row").index()];
+    let c = &cons.algebraic()[m.constraint_id("cap[1]").expect("range row").index()];
     assert!(c.is_range());
     assert!((c.lower - 2.0).abs() < f64::EPSILON);
     assert!((c.upper - 5.0).abs() < f64::EPSILON);
@@ -193,7 +194,8 @@ fn inverted_range_stays_a_range_not_an_equality() {
     variable!(m, x);
     constraint!(m, c, 5.0 <= x <= 1.0);
     assert_eq!(m.num_constraints(), 1);
-    let c = &m.constraints()[m.constraint_id("c").unwrap().index()];
+    let constraints = m.constraints();
+    let c = &constraints.algebraic()[m.constraint_id("c").unwrap().index()];
     assert!(c.is_range());
     assert_eq!(c.as_single(), None);
 }
@@ -205,8 +207,8 @@ fn nonlinear_range_falls_back_to_two_rows() {
     constraint!(m, c, 1.0 <= x * x <= 4.0);
     assert_eq!(m.num_constraints(), 2);
     let cons = m.constraints();
-    let lo = &cons[m.constraint_id("c_lo").expect("lo row").index()];
-    let hi = &cons[m.constraint_id("c_hi").expect("hi row").index()];
+    let lo = &cons.algebraic()[m.constraint_id("c_lo").expect("lo row").index()];
+    let hi = &cons.algebraic()[m.constraint_id("c_hi").expect("hi row").index()];
     assert!(!lo.is_range());
     assert_eq!(lo.as_single().map(|(s, _)| s), Some(Sense::Ge));
     assert_eq!(hi.as_single().map(|(s, _)| s), Some(Sense::Le));
@@ -219,7 +221,8 @@ fn computed_name_range_collapses_to_one_row() {
     let tag = "band";
     constraint!(m, name = tag.to_string(), 1.0 <= x <= 2.0);
     assert_eq!(m.num_constraints(), 1);
-    let c = &m.constraints()[m.constraint_id("band").expect("range row").index()];
+    let constraints = m.constraints();
+    let c = &constraints.algebraic()[m.constraint_id("band").expect("range row").index()];
     assert!(c.is_range());
 }
 
@@ -690,7 +693,8 @@ fn soc_affine_terms_and_bound() {
     variable!(m, y);
     variable!(m, t >= 0.0);
     soc_constraint!(m, cone, [x - y, 2.0 * y + 1.0] <= t + 2.0);
-    let socs = m.soc_constraints();
+    let model_constraints = m.constraints();
+    let socs = model_constraints.second_order_cones();
     assert_eq!(socs[0].terms.len(), 2);
 }
 

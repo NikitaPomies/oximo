@@ -25,7 +25,9 @@ pub use display::{ConstraintDisplay, ExprDisplay, ObjectiveDisplay, SocDisplay};
 pub use domain::Domain;
 pub use error::{Error, Result};
 pub use indexed::{IndexedParam, IndexedVar};
-pub use model::{IndexedVarBuilder, Model, ModelKind, display_index_key};
+pub use model::{
+    ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
+};
 pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;
 pub use set::{Axis, FromIndexKey, IndexKey, IndexTuple, KeyCat, ScalarKey, Set, SetIter};

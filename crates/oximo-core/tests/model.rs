@@ -336,16 +336,55 @@ fn rhs_expr_folded_into_lhs() {
     // x <= y + 3   ↦  canonical: (x - y - 3) <= 0
     constraint!(m, c, x <= y + 3.0);
     let cs = m.constraints();
-    assert_eq!(cs.len(), 1);
-    assert_eq!(cs[0].as_single(), Some((Sense::Le, 0.0)));
+    let algebraic = cs.algebraic();
+    assert_eq!(algebraic.len(), 1);
+    assert_eq!(algebraic[0].as_single(), Some((Sense::Le, 0.0)));
 
     // Decode the LHS and confirm the original `y + 3` made it into the linear
     // form so `coeff*x - coeff*y - 3 <= 0` is what the solver will see.
     let arena = m.arena();
-    let terms = extract_linear(&arena, cs[0].lhs).expect("linear");
+    let terms = extract_linear(&arena, algebraic[0].lhs).expect("linear");
     assert_eq!(terms.constant, -3.0);
     let mut sorted = terms.coeffs.clone();
     sorted.sort_by_key(|(v, _)| v.0);
     assert_eq!(sorted[0].1, 1.0);
     assert_eq!(sorted[1].1, -1.0);
+}
+
+#[test]
+fn unified_constraints_preserve_typed_views_ids_and_order() {
+    let m = Model::new("mixed_constraints");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    constraint!(m, shared, x <= 1.0);
+    let soc_id = m.add_soc_constraint("shared", [x], t);
+
+    assert_eq!(m.num_constraints(), 2);
+    assert_eq!(m.constraints().algebraic().len(), 1);
+    assert_eq!(m.num_soc_constraints(), 1);
+    assert_eq!(m.constraint_id("shared"), Some(ConstraintId(0)));
+    assert_eq!(m.soc_constraint_id("shared"), Some(soc_id));
+
+    let constraints = m.constraints();
+    assert_eq!(constraints.len(), 2);
+    assert!(!constraints.is_empty());
+    assert_eq!(constraints.algebraic()[0].name, "shared");
+    assert_eq!(constraints.second_order_cones()[0].name, "shared");
+
+    let mut iter = constraints.iter();
+    match iter.next().expect("algebraic constraint") {
+        ConstraintRef::Algebraic { id, constraint } => {
+            assert_eq!(id, ConstraintId(0));
+            assert_eq!(constraint.name, "shared");
+        }
+        ConstraintRef::SecondOrderCone { .. } => panic!("algebraic constraints come first"),
+    }
+    match iter.next().expect("SOC constraint") {
+        ConstraintRef::SecondOrderCone { id, constraint } => {
+            assert_eq!(id, soc_id);
+            assert_eq!(constraint.name, "shared");
+        }
+        ConstraintRef::Algebraic { .. } => panic!("explicit cones come second"),
+    }
+    assert!(iter.next().is_none());
 }
