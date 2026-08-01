@@ -88,14 +88,15 @@ pub fn write_nl_with<W: Write>(
         return Err(IoError::Conic);
     }
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
     let arena = model.arena();
     let analysis =
-        analyze::Analysis::build(&arena, &vars, &constraints, &objective, opts.nonfinite_strings)?;
+        analyze::Analysis::build(&arena, &vars, constraints, &objective, opts.nonfinite_strings)?;
     let perm = permute::Permutation::build(&vars, &analysis);
-    let stats = header::Stats::build(&vars, &constraints, &analysis, &perm, opts);
+    let stats = header::Stats::build(&vars, constraints, &analysis, &perm, opts);
 
     let mut w = Writer::new(out, opts);
     header::write_header(&mut w, model, &stats, opts)?;
@@ -103,7 +104,7 @@ pub fn write_nl_with<W: Write>(
         &mut w,
         &arena,
         &vars,
-        &constraints,
+        constraints,
         &objective,
         &analysis,
         &perm,
@@ -157,12 +158,13 @@ pub fn write_nl_files(model: &Model, stub: &Path, opts: &WriteOptions) -> Result
 
 fn write_aux_files(model: &Model, stub: &Path, nonfinite_strings: bool) -> Result<(), IoError> {
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
     let arena = model.arena();
     let analysis =
-        analyze::Analysis::build(&arena, &vars, &constraints, &objective, nonfinite_strings)?;
+        analyze::Analysis::build(&arena, &vars, constraints, &objective, nonfinite_strings)?;
     let perm = permute::Permutation::build(&vars, &analysis);
 
     let row_path = stub.with_extension("row");

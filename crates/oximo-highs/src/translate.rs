@@ -91,7 +91,8 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
 
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
 
     let objective = model.objective();
     let obj = objective.as_ref();
@@ -129,7 +130,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
 
     // RowProblem receives rows sequentially, so lower and upload each row in
     // one pass.
-    for c in constraints.iter() {
+    for c in constraints {
         let t = extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
@@ -385,7 +386,8 @@ pub mod benchmark_support {
     pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
         let arena = model.arena();
         let vars = model.variables();
-        let constraints = model.constraints();
+        let model_constraints = model.constraints();
+        let constraints = model_constraints.algebraic();
         let arena_ref = &*arena;
         let vars_ref = &*vars;
         let row_nnz = |constraint: &oximo_core::Constraint| {

@@ -262,7 +262,8 @@ impl std::fmt::Display for ModelReport<'_> {
 
         // Constraint duals, only when the solver returned any
         if !r.dual.is_empty() {
-            let cons = m.constraints();
+            let model_constraints = m.constraints();
+            let cons = model_constraints.algebraic();
             writeln!(f, "\nconstraints ({})", cons.len())?;
             let width = cons.iter().map(|c| c.name.len()).max().unwrap_or(0);
             for (i, c) in cons.iter().enumerate() {

@@ -127,7 +127,7 @@ pub(crate) struct HybridOracle {
 
 impl HybridOracle {
     pub(crate) fn new(model: &Model) -> Self {
-        let parallel = should_parallelize_classification(model.kind(), model.constraints().len());
+        let parallel = should_parallelize_classification(model.kind(), model.constraints().algebraic().len());
         Self::new_with(model, parallel)
     }
 
@@ -135,7 +135,7 @@ impl HybridOracle {
         let arena = model.arena();
         let obj_expr = model.objective().as_ref().map(|o| o.expr);
         let obj = obj_expr.map_or_else(FunctionSlot::zero, |e| FunctionSlot::classify(&arena, e));
-        let con_exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
+        let con_exprs: Vec<ExprId> = model.constraints().algebraic().iter().map(|c| c.lhs).collect();
         let arena_ref = &*arena;
         let cons = classify_slots(arena_ref, &con_exprs, parallel);
         let params = params_snapshot(&arena);
@@ -162,10 +162,12 @@ impl HybridOracle {
     /// Whether `model` has the same variables and the same objective/constraint
     /// expressions this oracle was built from, so a [`Self::refresh`] suffices.
     pub(crate) fn matches(&self, model: &Model) -> bool {
+        let model_constraints = model.constraints();
+        let constraints = model_constraints.algebraic();
         self.n_vars == model.variables().len()
             && self.obj_expr == model.objective().as_ref().map(|o| o.expr)
-            && self.con_exprs.len() == model.constraints().len()
-            && model.constraints().iter().map(|c| c.lhs).eq(self.con_exprs.iter().copied())
+            && self.con_exprs.len() == constraints.len()
+            && constraints.iter().map(|c| c.lhs).eq(self.con_exprs.iter().copied())
     }
 
     /// Re-extract every slot at the current parameter values and re-snapshot
@@ -461,7 +463,7 @@ pub mod benchmark_support {
 
     pub fn classify(model: &Model, parallel: bool) -> usize {
         let arena = model.arena();
-        let exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
+        let exprs: Vec<ExprId> = model.constraints().algebraic().iter().map(|c| c.lhs).collect();
         let arena_ref = &*arena;
         if parallel {
             exprs.par_iter().map(|&e| FunctionSlot::classify(arena_ref, e).support.len()).sum()

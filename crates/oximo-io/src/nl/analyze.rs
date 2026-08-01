@@ -270,7 +270,8 @@ pub mod benchmark_support {
     pub fn analyze(model: &Model, parallel: bool) -> Result<usize, IoError> {
         let arena = model.arena();
         let vars = model.variables();
-        let constraints = model.constraints();
+        let model_constraints = model.constraints();
+        let constraints = model_constraints.algebraic();
         let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
         let arena_ref = &*arena;
         let analysis = build(arena_ref, &vars, &constraints, &objective, parallel)?;

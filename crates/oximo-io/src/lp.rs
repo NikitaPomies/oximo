@@ -47,7 +47,8 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     }
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
     let obj_terms = extract_linear(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
@@ -77,7 +78,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         constraints.iter().map(|c| c.name.to_string()).collect();
 
     writeln!(out, "Subject To")?;
-    for c in constraints.iter() {
+    for c in constraints {
         let t = extract_linear(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
