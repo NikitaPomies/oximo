@@ -278,7 +278,8 @@ impl NlpEvaluator {
         {
             return false;
         }
-        let con_exprs: Vec<ExprId> = model.constraints().algebraic().iter().map(|c| c.lhs).collect();
+        let con_exprs: Vec<ExprId> =
+            model.constraints().algebraic().iter().map(|c| c.lhs).collect();
         if con_exprs != self.constraint_exprs {
             return false;
         }

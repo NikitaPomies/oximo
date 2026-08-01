@@ -127,7 +127,8 @@ pub(crate) struct HybridOracle {
 
 impl HybridOracle {
     pub(crate) fn new(model: &Model) -> Self {
-        let parallel = should_parallelize_classification(model.kind(), model.constraints().algebraic().len());
+        let parallel =
+            should_parallelize_classification(model.kind(), model.constraints().algebraic().len());
         Self::new_with(model, parallel)
     }
 
@@ -135,7 +136,8 @@ impl HybridOracle {
         let arena = model.arena();
         let obj_expr = model.objective().as_ref().map(|o| o.expr);
         let obj = obj_expr.map_or_else(FunctionSlot::zero, |e| FunctionSlot::classify(&arena, e));
-        let con_exprs: Vec<ExprId> = model.constraints().algebraic().iter().map(|c| c.lhs).collect();
+        let con_exprs: Vec<ExprId> =
+            model.constraints().algebraic().iter().map(|c| c.lhs).collect();
         let arena_ref = &*arena;
         let cons = classify_slots(arena_ref, &con_exprs, parallel);
         let params = params_snapshot(&arena);
