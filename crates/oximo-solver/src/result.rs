@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use oximo_core::{
-    ConstraintId, Expr, ExprNode, IndexKey, IndexedVar, Model, ObjectiveSense, SocConstraintId,
-    VarId,
+    ConstraintId, ConstraintRef, Expr, ExprNode, IndexKey, IndexedVar, Model, ObjectiveSense,
+    SocConstraintId, VarId,
 };
 use rustc_hash::FxHashMap;
 
@@ -263,11 +263,16 @@ impl std::fmt::Display for ModelReport<'_> {
         // Constraint duals, only when the solver returned any
         if !r.dual.is_empty() {
             let model_constraints = m.constraints();
-            let cons = model_constraints.algebraic();
+            let cons: Vec<_> = model_constraints
+                .iter()
+                .filter_map(|constraint| match constraint {
+                    ConstraintRef::Algebraic { id, constraint } => Some((id, constraint)),
+                    ConstraintRef::SecondOrderCone { .. } => None,
+                })
+                .collect();
             writeln!(f, "\nconstraints ({})", cons.len())?;
-            let width = cons.iter().map(|c| c.name.len()).max().unwrap_or(0);
-            for (i, c) in cons.iter().enumerate() {
-                let id = ConstraintId(u32::try_from(i).expect("constraint index fits u32"));
+            let width = cons.iter().map(|(_, c)| c.name.len()).max().unwrap_or(0);
+            for (id, c) in cons {
                 let d = r.dual_of(id).map_or_else(|| "n/a".to_owned(), num);
                 writeln!(f, "  {:<width$}  dual = {d}", c.name)?;
             }
@@ -356,5 +361,27 @@ mod tests {
         assert!(out.contains("(LP, maximize)"), "{out}");
         assert!(out.contains("x = 5"), "{out}");
         assert!(out.contains("dual = 1"), "{out}");
+    }
+
+    #[test]
+    fn report_keeps_algebraic_duals_paired_when_skipping_soc_rows() {
+        use oximo_core::{constraint, objective, variable};
+
+        let m = Model::new("mixed");
+        variable!(m, x >= 0.0);
+        variable!(m, t >= 0.0);
+        let first = constraint!(m, first, x <= 1.0);
+        let second = constraint!(m, second, x >= 0.5);
+        m.add_soc_constraint("cone", [x], t);
+        objective!(m, Min, x);
+
+        let mut dual = FxHashMap::default();
+        dual.insert(first, 1.0);
+        dual.insert(second, 2.0);
+        let r = SolverResult { dual, ..Default::default() };
+
+        let out = r.report(&m).to_string();
+        assert!(out.contains("first   dual = 1"), "{out}");
+        assert!(out.contains("second  dual = 2"), "{out}");
     }
 }
