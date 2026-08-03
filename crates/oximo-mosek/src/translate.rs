@@ -158,7 +158,8 @@ fn build_rows_and_cones(
 ) -> Result<Meta, SolverError> {
     let arena = model.arena();
     let variables = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let mut row_by_constraint = vec![None; constraints.len()];
     let mut detected = Vec::new();
     let mut scratch = TaskScratch::default();
@@ -576,7 +577,8 @@ pub mod benchmark_support {
     pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
         let arena = model.arena();
         let variables = model.variables();
-        let constraints = model.constraints();
+        let model_constraints = model.constraints();
+        let constraints = model_constraints.algebraic();
         let arena_ref = &*arena;
         let variables_ref = &*variables;
         let row = |c: &oximo_core::Constraint| {

@@ -8,7 +8,8 @@ use oximo_core::prelude::*;
 fn detect_first(m: &Model) -> Option<SocForm> {
     let arena = m.arena();
     let vars = m.variables();
-    let constraints = m.constraints();
+    let model_constraints = m.constraints();
+    let constraints = model_constraints.algebraic();
     detect_soc(&arena, &vars, &constraints[0])
 }
 
@@ -106,7 +107,8 @@ fn explicit_form_recovers_affine_rows() {
     m.add_soc_constraint("cone", [x - y, 2.0 * y + 1.0], t);
 
     let arena = m.arena();
-    let socs = m.soc_constraints();
+    let model_constraints = m.constraints();
+    let socs = model_constraints.second_order_cones();
     let form = explicit_soc_form(&arena, &socs[0]).expect("affine members");
     assert_eq!(form.terms.len(), 2);
     assert_eq!(form.terms[0].coeffs.len(), 2);

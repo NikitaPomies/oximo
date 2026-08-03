@@ -44,7 +44,8 @@ pub fn solve(
     validate_solver(opts, kind)?;
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let socs = model.soc_constraints();
     let objective = model.objective();
     let sense = objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
@@ -60,7 +61,7 @@ pub fn solve(
         kind,
         &arena,
         &vars,
-        &constraints,
+        constraints,
         &socs,
         objective.as_ref(),
         sense_kw,
@@ -116,7 +117,6 @@ pub fn solve(
 
     drop(arena);
     drop(vars);
-    drop(constraints);
     drop(socs);
 
     // - Write .gms file
@@ -1052,7 +1052,7 @@ pub mod benchmark_support {
 
     pub fn render_equations(model: &Model, parallel: bool) -> String {
         let arena = model.arena().clone();
-        let constraints = model.constraints().clone();
+        let constraints = model.constraints().algebraic().to_vec();
         let socs = model.soc_constraints().clone();
         let mut out = String::new();
         if parallel {
@@ -1145,7 +1145,8 @@ mod tests {
     fn render(model: &Model, opts: &GamsOptions) -> String {
         let arena = model.arena();
         let vars = model.variables();
-        let constraints = model.constraints();
+        let model_constraints = model.constraints();
+        let constraints = model_constraints.algebraic();
         let socs = model.soc_constraints();
         let objective = model.objective();
         let sense_kw = match objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense) {
@@ -1158,7 +1159,7 @@ mod tests {
             model.kind(),
             &arena,
             &vars,
-            &constraints,
+            constraints,
             &socs,
             objective.as_ref(),
             sense_kw,

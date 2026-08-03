@@ -76,7 +76,8 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
 
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let socs = model.soc_constraints();
     let objective = model.objective();
     let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
@@ -89,7 +90,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     // synthetic variable names stay unique across both.
     let mut aux_counter = 0_u32;
     let gurobi_constrs =
-        add_constraints(&arena, &constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
+        add_constraints(&arena, constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
     let soc_rows = add_soc_rows(&arena, &vars, &socs, &mut grb_model, &gurobi_vars)?;
 
     let obj_constant = match objective.as_ref() {
@@ -682,7 +683,8 @@ pub mod benchmark_support {
 
     pub fn extract(model: &Model, parallel: bool) -> usize {
         let arena = model.arena();
-        let constraints = model.constraints();
+        let model_constraints = model.constraints();
+        let constraints = model_constraints.algebraic();
         let arena_ref = &*arena;
         let count = |constraint: &Constraint| {
             extract_linear(arena_ref, constraint.lhs).map_or(0, |terms| terms.coeffs.len() + 1)

@@ -40,7 +40,8 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     }
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
     let obj_terms = extract_linear(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
@@ -87,7 +88,7 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     writeln!(out, "ROWS")?;
     writeln!(out, " N  OBJ")?;
-    for c in constraints.iter() {
+    for c in constraints {
         let tag = match c.as_single() {
             Some((Sense::Le, _)) => 'L',
             Some((Sense::Ge, _)) => 'G',
@@ -145,7 +146,7 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     if constraints.iter().any(Constraint::is_range) {
         writeln!(out, "RANGES")?;
-        for c in constraints.iter() {
+        for c in constraints {
             if c.is_range() {
                 writeln!(out, "    RNG       {:<10}{}", c.name, c.upper - c.lower)?;
             }

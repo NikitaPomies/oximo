@@ -48,6 +48,66 @@ pub enum ModelKind {
     MINLP,
 }
 
+/// A borrowed constraint from a [`Model`].
+///
+/// Algebraic constraints and explicitly declared second-order-cone constraints
+/// retain their typed IDs and storage. This enum provides a unified inspection
+/// boundary without changing either representation.
+#[derive(Copy, Clone, Debug)]
+pub enum ConstraintRef<'a> {
+    Algebraic { id: ConstraintId, constraint: &'a Constraint },
+    SecondOrderCone { id: SocConstraintId, constraint: &'a SocConstraint },
+}
+
+/// Unified borrowed view of every constraint declared on a [`Model`].
+///
+/// The underlying algebraic and explicit-SOC registries remain separate, so
+/// backends can iterate a homogeneous slice without a per-constraint branch.
+/// [`Self::iter`] visits algebraic constraints in [`ConstraintId`] order,
+/// followed by explicit cones in [`SocConstraintId`] order.
+#[derive(Debug)]
+pub struct ModelConstraints<'a> {
+    algebraic: Ref<'a, Vec<Constraint>>,
+    second_order_cones: Ref<'a, Vec<SocConstraint>>,
+}
+
+impl ModelConstraints<'_> {
+    /// Algebraic constraints in [`ConstraintId`] order.
+    pub fn algebraic(&self) -> &[Constraint] {
+        &self.algebraic
+    }
+
+    /// Explicit second-order-cone constraints in [`SocConstraintId`] order.
+    pub fn second_order_cones(&self) -> &[SocConstraint] {
+        &self.second_order_cones
+    }
+
+    /// Iterate over all declared constraints without allocating.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "registration rejects constraint counts above u32::MAX"
+    )]
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = ConstraintRef<'_>> + Clone {
+        let algebraic = self.algebraic.iter().enumerate().map(|(index, constraint)| {
+            ConstraintRef::Algebraic { id: ConstraintId(index as u32), constraint }
+        });
+        let second_order_cones =
+            self.second_order_cones.iter().enumerate().map(|(index, constraint)| {
+                ConstraintRef::SecondOrderCone { id: SocConstraintId(index as u32), constraint }
+            });
+        algebraic.chain(second_order_cones)
+    }
+
+    /// Total number of algebraic and explicit second-order-cone constraints.
+    pub fn len(&self) -> usize {
+        self.algebraic.len() + self.second_order_cones.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.algebraic.is_empty() && self.second_order_cones.is_empty()
+    }
+}
+
 /// The optimization model. Owns the expression arena, variable/parameter
 /// registries, constraints, and (optional) objective.
 ///
@@ -575,12 +635,18 @@ impl Model {
         }
     }
 
-    pub fn constraints(&self) -> Ref<'_, Vec<Constraint>> {
-        self.constraints.borrow()
+    /// Unified view of every algebraic and explicit second-order-cone
+    /// constraint declared on this model.
+    pub fn constraints(&self) -> ModelConstraints<'_> {
+        ModelConstraints {
+            algebraic: self.constraints.borrow(),
+            second_order_cones: self.soc_constraints.borrow(),
+        }
     }
 
+    /// Total number of algebraic and explicit second-order-cone constraints.
     pub fn num_constraints(&self) -> usize {
-        self.constraints.borrow().len()
+        self.constraints.borrow().len() + self.soc_constraints.borrow().len()
     }
 
     pub fn constraint_id(&self, name: &str) -> Option<ConstraintId> {
@@ -685,6 +751,11 @@ impl Model {
         }
     }
 
+    /// Typed explicit-SOC registry for specialized backend passes.
+    ///
+    /// Use [`Self::constraints`] when inspecting constraints generically. This
+    /// accessor exists so performance-sensitive translators can keep a
+    /// homogeneous borrow scoped to one conic pass.
     pub fn soc_constraints(&self) -> Ref<'_, Vec<SocConstraint>> {
         self.soc_constraints.borrow()
     }
@@ -1131,6 +1202,24 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::LP);
         m.set_param(p, 2.0);
         assert_eq!(m.kind(), ModelKind::LP);
+    }
+
+    #[test]
+    fn unified_constraints_include_inactive_entries() {
+        let m = Model::new("inactive");
+        let x = m.__var("x").build();
+        let t = m.__var("t").lb(0.0).build();
+        m.__add_constraint("row", x.le(1.0));
+        m.add_soc_constraint("cone", [x], t);
+        m.constraints.borrow_mut()[0].active = false;
+        m.soc_constraints.borrow_mut()[0].active = false;
+
+        let constraints = m.constraints();
+        assert_eq!(constraints.len(), 2);
+        assert!(constraints.iter().all(|entry| match entry {
+            ConstraintRef::Algebraic { constraint, .. } => !constraint.active,
+            ConstraintRef::SecondOrderCone { constraint, .. } => !constraint.active,
+        }));
     }
 
     #[test]

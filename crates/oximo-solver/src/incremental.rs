@@ -53,7 +53,8 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     }
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
 
     let objective = model.objective();
     let obj = objective.as_ref();
@@ -86,7 +87,7 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     }
 
     let arena_ref: &ExprArena = &arena;
-    for c in constraints.iter() {
+    for c in constraints {
         let t = extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(&vars, v))

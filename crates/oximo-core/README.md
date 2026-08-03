@@ -61,16 +61,27 @@ Names are unique per registry. Registering a duplicate variable or constraint na
 ### Accessors
 
 ```rust,ignore
-m.num_variables()      // usize
-m.num_constraints()    // usize
-m.variables()          // Ref<'_, Vec<Variable>>
-m.constraints()        // Ref<'_, Vec<Constraint>>
-m.arena()              // Ref<'_, ExprArena>
-m.kind()               // ModelKind, cached, invalidated on change
-m.try_objective()      // Result<Objective, Error>
-m.variable_id("x")     // Option<VarId>
-m.constraint_id("cap") // Option<ConstraintId>
+m.num_variables()   // usize
+m.num_constraints() // algebraic + explicit SOC constraints
+m.variables()       // Ref<'_, Vec<Variable>>
+m.constraints()     // ModelConstraints<'_>
+m.constraints().algebraic()          // typed algebraic registry
+m.constraints().second_order_cones() // typed explicit-SOC registry
+m.arena()          // Ref<'_, ExprArena>
+m.kind()           // ModelKind, cached, invalidated on change
+m.try_objective()  // Result<Objective, Error>
+m.variable_id("x") // Option<VarId>
+m.constraint_id("cap")      // Option<ConstraintId> (algebraic)
+m.soc_constraint_id("cone") // Option<SocConstraintId>
 ```
+
+`ModelConstraints::iter()` visits every declared constraint. Its `algebraic()`
+and `second_order_cones()` slices are convenient when both kinds are needed in
+one scope. Typed views keep backend passes homogeneous while preserving the
+same storage and typed IDs.
+SOC-shaped quadratic constraints declared with `constraint!` remain algebraic
+entries; only constraints declared with `soc_constraint!` or
+`add_soc_constraint` appear in `second_order_cones()`.
 
 ### Fixing and unfixing variables
 

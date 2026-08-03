@@ -147,7 +147,8 @@ impl NlpEvaluator {
         let n_vars = model.variables().len();
         model.ensure_objective_declared().map_err(|_| AutodiffError::NoObjective)?;
         let objective_expr: Option<ExprId> = model.objective().as_ref().map(|o| o.expr);
-        let constraint_exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
+        let constraint_exprs: Vec<ExprId> =
+            model.constraints().algebraic().iter().map(|c| c.lhs).collect();
 
         let objective = match objective_expr {
             Some(e) => FunctionSlot::classify(&arena, e),
@@ -277,7 +278,8 @@ impl NlpEvaluator {
         {
             return false;
         }
-        let con_exprs: Vec<ExprId> = model.constraints().iter().map(|c| c.lhs).collect();
+        let con_exprs: Vec<ExprId> =
+            model.constraints().algebraic().iter().map(|c| c.lhs).collect();
         if con_exprs != self.constraint_exprs {
             return false;
         }
@@ -727,7 +729,7 @@ pub mod benchmark_support {
 
     pub fn classify(model: &Model, parallel: bool) -> usize {
         let arena = model.arena().clone();
-        let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
+        let exprs: Vec<_> = model.constraints().algebraic().iter().map(|c| c.lhs).collect();
         classify_slots(&arena, &exprs, parallel).iter().map(|slot| slot.support.len()).sum()
     }
 
@@ -740,7 +742,7 @@ pub mod benchmark_support {
     impl Refresh {
         pub fn new(model: &Model) -> Self {
             let arena = model.arena().clone();
-            let exprs: Vec<_> = model.constraints().iter().map(|c| c.lhs).collect();
+            let exprs: Vec<_> = model.constraints().algebraic().iter().map(|c| c.lhs).collect();
             let slots = classify_slots(&arena, &exprs, false);
             Self { slots, exprs }
         }

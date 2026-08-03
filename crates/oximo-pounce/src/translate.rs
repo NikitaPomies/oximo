@@ -98,10 +98,14 @@ pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, Sol
     }
     drop(vars);
 
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    if !model_constraints.second_order_cones().is_empty() {
+        return Err(SolverError::UnsupportedKind(ModelKind::SOCP));
+    }
+    let constraints = model_constraints.algebraic();
     let mut g_l = Vec::with_capacity(constraints.len());
     let mut g_u = Vec::with_capacity(constraints.len());
-    for c in constraints.iter() {
+    for c in constraints {
         g_l.push(c.lower.max(-POUNCE_INFINITY));
         g_u.push(c.upper.min(POUNCE_INFINITY));
     }

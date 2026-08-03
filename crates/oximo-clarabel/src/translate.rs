@@ -253,7 +253,8 @@ fn objective_data(model: &Model, n: usize) -> Result<(f64, Triplets, Vec<f64>, f
 fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<Vec<Row>, SolverError> {
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let arena_ref = &*arena;
     let vars_ref = &*vars;
     let classify_non_linear = |c: &oximo_core::Constraint| {
@@ -298,7 +299,8 @@ fn translation_capacities(
     explicit_forms: &[SocForm],
 ) -> (usize, usize, usize) {
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
     let mut row_count = 0;
     let mut nonzero_count = 0;
@@ -340,7 +342,8 @@ fn translation_capacities(
 /// the accumulated [`Rows`] and the two block sizes.
 fn linear_rows(model: &Model, rows: &[Row], mut acc: Rows) -> (Rows, usize, usize) {
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
     // ZeroCone rows: equalities, then fixed variables.
     for (i, (con, row)) in constraints.iter().zip(rows).enumerate() {

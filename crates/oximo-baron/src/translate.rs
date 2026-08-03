@@ -216,7 +216,8 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let arena = model.arena();
     let vars = model.variables();
-    let constraints = model.constraints();
+    let model_constraints = model.constraints();
+    let constraints = model_constraints.algebraic();
     let socs = model.soc_constraints();
     let objective = model.objective();
 
@@ -224,7 +225,7 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
     write_options(&mut bar, opts, RES_NAME, TIM_NAME);
     let var_order = write_var_declarations(&mut bar, &vars)?;
     write_bounds(&mut bar, &vars);
-    let con_order = write_equations(&mut bar, &arena, &constraints, &socs)?;
+    let con_order = write_equations(&mut bar, &arena, constraints, &socs)?;
     write_objective(&mut bar, &arena, objective.as_ref())?;
     write_starting_point(&mut bar, &vars);
     let soc_bounds = socs
@@ -1166,7 +1167,7 @@ pub mod benchmark_support {
 
     pub fn render_equations(model: &Model, parallel: bool) -> Result<String, SolverError> {
         let arena = model.arena().clone();
-        let constraints = model.constraints().clone();
+        let constraints = model.constraints().algebraic().to_vec();
         let socs = model.soc_constraints().clone();
         let mut out = String::new();
         let map = if parallel {

@@ -71,7 +71,8 @@ impl std::fmt::Display for IisReport<'_> {
         writeln!(f, "irreducible infeasible subsystem ({} members)", iis.len())?;
 
         if !iis.constraints.is_empty() {
-            let cons = m.constraints();
+            let model_constraints = m.constraints();
+            let cons = model_constraints.algebraic();
             writeln!(f, "\nconstraints ({})", iis.constraints.len())?;
             for id in &iis.constraints {
                 match cons.get(id.index()) {

@@ -22,8 +22,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+      # Newer Enzyme nightlies currently reject the generated `eval_tape_ad`
+      # derivative ABI during LLVM canonicalization.
+      # See: https://github.com/rust-lang/rust/issues/160470
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-26
           components: enzyme
       - uses: Swatinem/rust-cache@v2
       - name: Test oximo-autodiff with Enzyme
@@ -38,8 +42,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-26
           components: enzyme
       - uses: Swatinem/rust-cache@v2
       - name: Test oximo-pounce with Enzyme
