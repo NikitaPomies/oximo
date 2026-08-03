@@ -145,6 +145,21 @@ fn integer_models_are_rejected() {
 }
 
 #[test]
+fn soc_constraints_are_rejected_in_mixed_models() {
+    let m = Model::new("mixed_soc");
+    variable!(m, x >= 0.0);
+    variable!(m, t >= 0.0);
+    variable!(m, y >= 0.0);
+    m.add_soc_constraint("cone", [x], t);
+    constraint!(m, nonlinear, y.powi(3) <= 1.0);
+    objective!(m, Min, y);
+
+    assert_eq!(m.kind(), ModelKind::NLP);
+    let err = Pounce.solve(&m, &PounceOptions::default()).unwrap_err();
+    assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::SOCP)));
+}
+
+#[test]
 fn persistent_matches_cold_on_parameter_sweep() {
     let m = Model::new("nlp_sweep");
     param!(m, w = 1.0);
