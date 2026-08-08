@@ -452,8 +452,14 @@ fn parse_binary_segment(
         'J' => parse_binary_j(b, p),
         'G' => parse_binary_g(b, p),
         'F' | 'V' | 'L' | 'N' => Err(IoError::UnsupportedNl {
-            section: "binary".into(),
-            feature: "unsupported metadata/logical section".into(),
+            section: tag.to_string(),
+            feature: match tag {
+                'F' => "imported functions",
+                'V' => "defined variables",
+                'L' | 'N' => "logical/network constraints",
+                _ => unreachable!(),
+            }
+            .into(),
         }),
         x => Err(invalid("binary", format!("unknown segment {x}"))),
     }
