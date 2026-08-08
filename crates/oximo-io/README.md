@@ -145,9 +145,13 @@ the binary encoding emitted by this crate are accepted. Imported functions,
 defined variables, logical constraints, and complementarity are reported as
 unsupported.
 
-The reader preserves interval rows and initial values. Hollerith strings,
-parameter nodes, and defined-variable sections are not representable in the
-core model and are rejected with `IoError::UnsupportedNl`.
+The reader preserves interval rows and initial values. Hollerith strings are
+malformed NL input and return `IoError::InvalidNl`. Parameter nodes are not
+reader input, so the writer-side `Param` behavior remains documented as
+`IoError::UnsupportedNode`. Defined-variable sections return
+`IoError::UnsupportedNl`. Imported functions and logical/network sections are
+also rejected with that variant because they are not representable by the core
+model.
 
 ## Errors
 
