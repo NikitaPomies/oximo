@@ -32,9 +32,9 @@ mod emit_expr;
 mod header;
 mod options;
 mod permute;
+mod reader;
 mod segments;
 mod writer;
-mod reader;
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
