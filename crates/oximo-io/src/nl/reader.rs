@@ -758,7 +758,6 @@ fn build_model(
     }
     for (j, expr) in exprs.iter().enumerate() {
         let (kind, vals) = &p.rows[j];
-        let lin_const = 0.0;
         let (lo, hi) = match (*kind, vals.as_slice()) {
             (0, x) if x.len() == 2 => (x[0], x[1]),
             (1, x) if x.len() == 1 => (f64::NEG_INFINITY, x[0]),
@@ -768,7 +767,7 @@ fn build_model(
             _ => return Err(invalid("r", "invalid row type")),
         };
         let name = rows.get(j).cloned().unwrap_or_else(|| format!("c{j}"));
-        m.__add_constraint_interval(name, *expr, lo + lin_const, hi + lin_const);
+        m.__add_constraint_interval(name, *expr, lo, hi);
     }
     if h.n_obj == 0 {
         if p.objective.is_some() {
