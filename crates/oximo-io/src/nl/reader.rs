@@ -353,7 +353,7 @@ fn parse_ascii_jg(
     }
     let n = fields[1];
     *pos += 1;
-    let mut entries = Vec::with_capacity(n);
+    let mut entries = Vec::with_capacity(bounded_capacity(n, lines.len().saturating_sub(*pos)));
     for _ in 0..n {
         let values = record(lines, pos, "J/G")?;
         if values.len() != 2 {
@@ -580,7 +580,7 @@ fn parse_binary_j(b: &mut Bin<'_>, p: &mut Parsed, h: Header) -> Result<(), IoEr
         return Err(invalid("J", "row index out of range"));
     }
     let n = nonneg(b.i32()?, "J count")?;
-    let mut entries = Vec::with_capacity(n);
+    let mut entries = Vec::with_capacity(bounded_capacity(n, b.bytes.len().saturating_sub(b.pos)));
     for _ in 0..n {
         entries.push((nonneg(b.i32()?, "J index")?, b.f64()?));
     }
@@ -594,7 +594,7 @@ fn parse_binary_j(b: &mut Bin<'_>, p: &mut Parsed, h: Header) -> Result<(), IoEr
 fn parse_binary_g(b: &mut Bin<'_>, p: &mut Parsed) -> Result<(), IoError> {
     let _row = nonneg(b.i32()?, "G row")?;
     let n = nonneg(b.i32()?, "G count")?;
-    let mut entries = Vec::with_capacity(n);
+    let mut entries = Vec::with_capacity(bounded_capacity(n, b.bytes.len().saturating_sub(b.pos)));
     for _ in 0..n {
         entries.push((nonneg(b.i32()?, "G index")?, b.f64()?));
     }
@@ -629,7 +629,8 @@ fn parse_binary_expr(b: &mut Bin<'_>) -> Result<Node, IoError> {
                 }
             };
             if c == 54 {
-                let mut xs = Vec::with_capacity(ar);
+                let mut xs =
+                    Vec::with_capacity(bounded_capacity(ar, b.bytes.len().saturating_sub(b.pos)));
                 for _ in 0..ar {
                     xs.push(parse_binary_expr(b)?);
                 }
@@ -686,7 +687,7 @@ fn parse_expr(lines: &[String], i: &mut usize) -> Result<Node, IoError> {
         }
     };
     if code == 54 {
-        let mut xs = Vec::with_capacity(arity);
+        let mut xs = Vec::with_capacity(bounded_capacity(arity, lines.len().saturating_sub(*i)));
         for _ in 0..arity {
             xs.push(parse_expr(lines, i)?);
         }
@@ -933,6 +934,10 @@ fn ensure_unique(xs: &[String], what: &str) -> Result<(), IoError> {
 }
 fn invalid(section: &str, message: impl Into<String>) -> IoError {
     IoError::InvalidNl { section: section.into(), message: message.into() }
+}
+
+fn bounded_capacity(requested: usize, remaining: usize) -> usize {
+    requested.min(remaining)
 }
 
 #[cfg(test)]
