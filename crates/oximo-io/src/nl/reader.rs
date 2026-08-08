@@ -7,6 +7,8 @@
 
 #![allow(clippy::many_single_char_names)]
 
+const MAX_EXPRESSION_DEPTH: usize = 256;
+
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -251,7 +253,7 @@ fn parse_ascii_c(
 ) -> Result<(), IoError> {
     let idx = parse_suffix(line, 'C')?;
     *pos += 1;
-    let node = parse_expr(lines, pos)?;
+    let node = parse_expr(lines, pos, 0)?;
     if idx >= header.n_con {
         return Err(invalid("C", "row index out of range"));
     }
@@ -278,7 +280,7 @@ fn parse_ascii_o(
         _ => return Err(invalid("O", "invalid objective sense")),
     };
     *pos += 1;
-    parsed.objective = Some((sense, parse_expr(lines, pos)?));
+    parsed.objective = Some((sense, parse_expr(lines, pos, 0)?));
     Ok(())
 }
 
@@ -471,7 +473,7 @@ fn parse_binary_segment(
 
 fn parse_binary_c(b: &mut Bin<'_>, p: &mut Parsed, h: Header) -> Result<(), IoError> {
     let idx = nonneg(b.i32()?, "C index")?;
-    let node = parse_binary_expr(b)?;
+    let node = parse_binary_expr(b, 0)?;
     if idx >= h.n_con {
         return Err(invalid("C", "row index out of range"));
     }
@@ -489,7 +491,7 @@ fn parse_binary_o(b: &mut Bin<'_>, p: &mut Parsed) -> Result<(), IoError> {
         1 => ObjectiveSense::Maximize,
         _ => return Err(invalid("O", "invalid sense")),
     };
-    p.objective = Some((sense, parse_binary_expr(b)?));
+    p.objective = Some((sense, parse_binary_expr(b, 0)?));
     Ok(())
 }
 
@@ -602,7 +604,7 @@ fn parse_binary_g(b: &mut Bin<'_>, p: &mut Parsed) -> Result<(), IoError> {
     Ok(())
 }
 
-fn parse_binary_expr(b: &mut Bin<'_>) -> Result<Node, IoError> {
+fn parse_binary_expr(b: &mut Bin<'_>, depth: usize) -> Result<Node, IoError> {
     match b.byte()? as char {
         'v' => Ok(Node::Var(nonneg(b.i32()?, "variable index")?)),
         'n' => Ok(Node::Const(b.f64()?)),
@@ -631,16 +633,18 @@ fn parse_binary_expr(b: &mut Bin<'_>) -> Result<Node, IoError> {
             if c == 54 {
                 let mut xs =
                     Vec::with_capacity(bounded_capacity(ar, b.bytes.len().saturating_sub(b.pos)));
+                let child_depth = next_expression_depth(depth)?;
                 for _ in 0..ar {
-                    xs.push(parse_binary_expr(b)?);
+                    xs.push(parse_binary_expr(b, child_depth)?);
                 }
                 Ok(Node::Sum(xs))
             } else {
-                let a = parse_binary_expr(b)?;
+                let child_depth = next_expression_depth(depth)?;
+                let a = parse_binary_expr(b, child_depth)?;
                 if ar == 1 {
                     Ok(Node::Unary(c, Box::new(a)))
                 } else {
-                    Ok(Node::Binary(c, Box::new(a), Box::new(parse_binary_expr(b)?)))
+                    Ok(Node::Binary(c, Box::new(a), Box::new(parse_binary_expr(b, child_depth)?)))
                 }
             }
         }
@@ -648,7 +652,7 @@ fn parse_binary_expr(b: &mut Bin<'_>) -> Result<Node, IoError> {
     }
 }
 
-fn parse_expr(lines: &[String], i: &mut usize) -> Result<Node, IoError> {
+fn parse_expr(lines: &[String], i: &mut usize, depth: usize) -> Result<Node, IoError> {
     if *i >= lines.len() {
         return Err(invalid("expression", "truncated"));
     }
@@ -688,16 +692,18 @@ fn parse_expr(lines: &[String], i: &mut usize) -> Result<Node, IoError> {
     };
     if code == 54 {
         let mut xs = Vec::with_capacity(bounded_capacity(arity, lines.len().saturating_sub(*i)));
+        let child_depth = next_expression_depth(depth)?;
         for _ in 0..arity {
-            xs.push(parse_expr(lines, i)?);
+            xs.push(parse_expr(lines, i, child_depth)?);
         }
         return Ok(Node::Sum(xs));
     }
-    let a = parse_expr(lines, i)?;
+    let child_depth = next_expression_depth(depth)?;
+    let a = parse_expr(lines, i, child_depth)?;
     if arity == 1 {
         Ok(Node::Unary(code, Box::new(a)))
     } else {
-        let b = parse_expr(lines, i)?;
+        let b = parse_expr(lines, i, child_depth)?;
         Ok(Node::Binary(code, Box::new(a), Box::new(b)))
     }
 }
@@ -760,7 +766,7 @@ fn build_model(
     let c_nodes = p.c_expr.iter().cloned().chain(std::iter::repeat(None));
     for (j, base) in c_nodes.take(h.n_con).enumerate() {
         let base = base.unwrap_or(Node::Const(0.0));
-        let mut e = lower(&m, &vars, base)?;
+        let mut e = lower(&m, &vars, base, 0)?;
         if let Some(entries) = p.jac.get(j) {
             for &(v, c) in entries {
                 if v >= vars.len() {
@@ -791,7 +797,7 @@ fn build_model(
         m.__feasibility();
     } else {
         let (sense, node) = p.objective.ok_or_else(|| invalid("O", "missing objective record"))?;
-        let mut e = lower(&m, &vars, node)?;
+        let mut e = lower(&m, &vars, node, 0)?;
         for &(v, c) in &p.grad {
             if v >= vars.len() {
                 return Err(invalid("G", "variable index out of range"));
@@ -806,14 +812,15 @@ fn build_model(
     Ok(m)
 }
 
-fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node) -> Result<Expr<'a>, IoError> {
+fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<Expr<'a>, IoError> {
     match n {
         Node::Const(x) => Ok(m.__constant(x)),
         Node::Var(i) => {
             vars.get(i).copied().ok_or_else(|| invalid("expression", "variable index out of range"))
         }
         Node::Unary(c, a) => {
-            let x = lower(m, vars, *a)?;
+            let child_depth = next_expression_depth(depth)?;
+            let x = lower(m, vars, *a, child_depth)?;
             Ok(match c {
                 15 => x.abs(),
                 16 => -x,
@@ -825,8 +832,9 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node) -> Result<Expr<'a>, IoErr
             })
         }
         Node::Binary(c, a, b) => {
-            let x = lower(m, vars, *a)?;
-            let y = lower(m, vars, *b)?;
+            let child_depth = next_expression_depth(depth)?;
+            let x = lower(m, vars, *a, child_depth)?;
+            let y = lower(m, vars, *b, child_depth)?;
             Ok(match c {
                 0 => x + y,
                 1 => x - y,
@@ -839,9 +847,10 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node) -> Result<Expr<'a>, IoErr
         Node::Sum(xs) => {
             let mut it = xs.into_iter();
             let Some(first) = it.next() else { return Ok(m.__constant(0.0)) };
-            let mut e = lower(m, vars, first)?;
+            let child_depth = next_expression_depth(depth)?;
+            let mut e = lower(m, vars, first, child_depth)?;
             for x in it {
-                e = e + lower(m, vars, x)?;
+                e = e + lower(m, vars, x, child_depth)?;
             }
             Ok(e)
         }
@@ -939,6 +948,15 @@ fn invalid(section: &str, message: impl Into<String>) -> IoError {
 
 fn bounded_capacity(requested: usize, remaining: usize) -> usize {
     requested.min(remaining)
+}
+
+fn next_expression_depth(depth: usize) -> Result<usize, IoError> {
+    let next = depth.saturating_add(1);
+    if next > MAX_EXPRESSION_DEPTH {
+        Err(invalid("expression", "nesting too deep"))
+    } else {
+        Ok(next)
+    }
 }
 
 fn start_values(starts: &[(usize, f64)], n_var: usize) -> Vec<Option<f64>> {
@@ -1070,6 +1088,16 @@ mod tests {
     fn rejects_unsupported_opcode() {
         let text = format!("{}O 0 0\no999\n", header(0, 0, 1));
         assert_unsupported(read_nl(text.as_bytes()), "expression", "opcode 999");
+    }
+
+    #[test]
+    fn rejects_deep_expression_nesting() {
+        let mut text = format!("{}O 0 0\n", header(0, 0, 1));
+        for _ in 0..=MAX_EXPRESSION_DEPTH {
+            text.push_str("o16\n");
+        }
+        text.push_str("n0\n");
+        assert_invalid(read_nl(text.as_bytes()), "expression", "nesting too deep");
     }
 
     #[test]
