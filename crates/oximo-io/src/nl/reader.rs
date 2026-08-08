@@ -218,7 +218,7 @@ fn parse_ascii_segment(
         'r' => parse_ascii_r(lines, pos, parsed, header),
         'b' => parse_ascii_b(lines, pos, parsed, header),
         'x' => parse_ascii_x(line, lines, pos, parsed),
-        'J' | 'G' => parse_ascii_jg(tag, line, lines, pos, parsed),
+        'J' | 'G' => parse_ascii_jg(tag, line, lines, pos, parsed, header),
         'k' => {
             *pos += 1 + parse_suffix(line, 'k')?;
             Ok(())
@@ -338,6 +338,7 @@ fn parse_ascii_jg(
     lines: &[String],
     pos: &mut usize,
     parsed: &mut Parsed,
+    header: Header,
 ) -> Result<(), IoError> {
     let fields = line[1..]
         .split_whitespace()
@@ -347,6 +348,9 @@ fn parse_ascii_jg(
         return Err(invalid("J/G", "missing count"));
     }
     let row = fields[0];
+    if tag == 'J' && row >= header.n_con {
+        return Err(invalid("J", "row index out of range"));
+    }
     let n = fields[1];
     *pos += 1;
     let mut entries = Vec::with_capacity(n);
@@ -449,7 +453,7 @@ fn parse_binary_segment(
         'k' => skip_binary_ints(b, "k"),
         'd' => skip_binary_duals(b),
         'S' => skip_binary_suffix(b),
-        'J' => parse_binary_j(b, p),
+        'J' => parse_binary_j(b, p, h),
         'G' => parse_binary_g(b, p),
         'F' | 'V' | 'L' | 'N' => Err(IoError::UnsupportedNl {
             section: tag.to_string(),
@@ -570,8 +574,11 @@ fn skip_binary_suffix(b: &mut Bin<'_>) -> Result<(), IoError> {
     Ok(())
 }
 
-fn parse_binary_j(b: &mut Bin<'_>, p: &mut Parsed) -> Result<(), IoError> {
+fn parse_binary_j(b: &mut Bin<'_>, p: &mut Parsed, h: Header) -> Result<(), IoError> {
     let row = nonneg(b.i32()?, "J row")?;
+    if row >= h.n_con {
+        return Err(invalid("J", "row index out of range"));
+    }
     let n = nonneg(b.i32()?, "J count")?;
     let mut entries = Vec::with_capacity(n);
     for _ in 0..n {
@@ -933,6 +940,32 @@ mod tests {
     use super::*;
     use oximo_core::Relate;
 
+    fn header(n_var: usize, n_con: usize, n_obj: usize) -> String {
+        format!(
+            "g3 1 1 0\n {n_var} {n_con} {n_obj} 0 0\n 0 0\n 0 0\n 0 0 0\n 0 0 0 1\n 0 0 0 0 0\n 0 0\n 0 0\n 0 0 0 0 0\n"
+        )
+    }
+
+    fn assert_invalid(result: Result<Model, IoError>, section: &str, message: &str) {
+        match result {
+            Err(IoError::InvalidNl { section: got_section, message: got_message }) => {
+                assert_eq!(got_section, section);
+                assert_eq!(got_message, message);
+            }
+            other => panic!("expected InvalidNl, got {other:?}"),
+        }
+    }
+
+    fn assert_unsupported(result: Result<Model, IoError>, section: &str, feature: &str) {
+        match result {
+            Err(IoError::UnsupportedNl { section: got_section, feature: got_feature }) => {
+                assert_eq!(got_section, section);
+                assert_eq!(got_feature, feature);
+            }
+            other => panic!("expected UnsupportedNl, got {other:?}"),
+        }
+    }
+
     #[test]
     fn reads_netlib_diet_with_sidecars() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -996,5 +1029,43 @@ mod tests {
         let got = read_nl(text.as_bytes()).unwrap();
         assert!(matches!(got.variables()[0].domain, Domain::Binary));
         assert!(matches!(got.variables()[1].domain, Domain::Integer));
+    }
+
+    #[test]
+    fn rejects_truncated_header() {
+        assert_invalid(read_nl("g3 1 1 0\n".as_bytes()), "header", "truncated header");
+    }
+
+    #[test]
+    fn rejects_unknown_segment() {
+        let text = format!("{}Z\n", header(0, 0, 0));
+        assert_invalid(read_nl(text.as_bytes()), "body", "unknown segment Z");
+    }
+
+    #[test]
+    fn rejects_out_of_range_j_row() {
+        let text = format!("{}J 1 0\n", header(0, 1, 0));
+        assert_invalid(read_nl(text.as_bytes()), "J", "row index out of range");
+    }
+
+    #[test]
+    fn rejects_unsupported_opcode() {
+        let text = format!("{}O 0 0\no999\n", header(0, 0, 1));
+        assert_unsupported(read_nl(text.as_bytes()), "expression", "opcode 999");
+    }
+
+    #[test]
+    fn rejects_unsupported_function_and_defined_variable_sections() {
+        for (tag, feature) in [('F', "imported functions"), ('V', "defined variables")] {
+            let text = format!("{}{}\n", header(0, 0, 0), tag);
+            assert_unsupported(read_nl(text.as_bytes()), &tag.to_string(), feature);
+        }
+    }
+
+    #[test]
+    fn reads_feasibility_header_without_objective() {
+        let m = read_nl(header(0, 0, 0).as_bytes()).expect("feasibility NL should parse");
+        assert!(m.is_feasibility());
+        assert!(m.try_objective().is_err());
     }
 }
