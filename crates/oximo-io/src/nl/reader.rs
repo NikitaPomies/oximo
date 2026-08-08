@@ -745,12 +745,13 @@ fn build_model(
         .unwrap_or_else(|| "nl_model".into());
     let m = Model::new(model_name);
     let domains = domains(&h);
+    let starts = start_values(&p.starts, h.n_var);
     let mut vars = Vec::with_capacity(h.n_var);
     for (j, domain) in domains.iter().enumerate().take(h.n_var) {
         let name = cols.get(j).cloned().unwrap_or_else(|| format!("x{j}"));
         let (lb, ub) = p.bounds[j];
         let mut b = m.__var(name).bounds(lb, ub).domain(*domain);
-        if let Some((_, v)) = p.starts.iter().find(|(k, _)| *k == j) {
+        if let Some(Some(v)) = starts.get(j) {
             b = b.initial(*v);
         }
         vars.push(b.build());
@@ -938,6 +939,18 @@ fn invalid(section: &str, message: impl Into<String>) -> IoError {
 
 fn bounded_capacity(requested: usize, remaining: usize) -> usize {
     requested.min(remaining)
+}
+
+fn start_values(starts: &[(usize, f64)], n_var: usize) -> Vec<Option<f64>> {
+    let mut values = vec![None; n_var];
+    for &(index, value) in starts {
+        if let Some(slot) = values.get_mut(index) {
+            if slot.is_none() {
+                *slot = Some(value);
+            }
+        }
+    }
+    values
 }
 
 #[cfg(test)]
