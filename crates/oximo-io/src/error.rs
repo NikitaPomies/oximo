@@ -20,4 +20,8 @@ pub enum IoError {
     BinaryToString,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("invalid NL file in {section}: {message}")]
+    InvalidNl { section: String, message: String },
+    #[error("unsupported NL feature in {section}: {feature}")]
+    UnsupportedNl { section: String, feature: String },
 }

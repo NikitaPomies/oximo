@@ -34,6 +34,7 @@ mod options;
 mod permute;
 mod segments;
 mod writer;
+mod reader;
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
@@ -43,6 +44,7 @@ pub use options::{
     Complementarity, DefinedVar, ImportedFunction, NlFormat, SuffixData, SuffixFlavour, SuffixKind,
     WriteOptions,
 };
+pub use reader::{read_nl, read_nl_file};
 
 use std::io::Write;
 use std::path::Path;
