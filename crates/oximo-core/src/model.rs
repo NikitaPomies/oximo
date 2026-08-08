@@ -185,6 +185,12 @@ impl Model {
         }
     }
 
+    /// Construct a constant expression for format readers and other adapters.
+    #[doc(hidden)]
+    pub fn __constant(&self, value: f64) -> Expr<'_> {
+        Expr::constant(&self.arena, value)
+    }
+
     /// Called by [`VarBuilder::build`]. Pushes the var into the registry and
     /// returns its `Expr` handle.
     pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a> {
@@ -534,6 +540,19 @@ impl Model {
     #[doc(hidden)]
     pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintId {
         self.__add_constraint(self.next_auto_name(), c)
+    }
+
+    /// Register a canonical interval row. This is intentionally hidden from
+    /// the public builder API; file readers need to preserve native range rows.
+    #[doc(hidden)]
+    pub fn __add_constraint_interval(
+        &self,
+        name: impl Into<SmolStr>,
+        lhs: Expr<'_>,
+        lower: f64,
+        upper: f64,
+    ) -> ConstraintId {
+        self.register_constraint(name.into(), lhs.id, lower, upper)
     }
 
     /// Bulk-register constraints. Each entry is `(name, ConstraintExpr)`.

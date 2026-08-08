@@ -32,6 +32,7 @@ mod emit_expr;
 mod header;
 mod options;
 mod permute;
+mod reader;
 mod segments;
 mod writer;
 
@@ -43,6 +44,7 @@ pub use options::{
     Complementarity, DefinedVar, ImportedFunction, NlFormat, SuffixData, SuffixFlavour, SuffixKind,
     WriteOptions,
 };
+pub use reader::{read_nl, read_nl_file};
 
 use std::io::Write;
 use std::path::Path;

@@ -1,6 +1,6 @@
 # oximo-io
 
-Model I/O for [oximo](https://github.com/oximo-rs/oximo): MPS, LP, and NLP writers.
+Model I/O for [oximo](https://github.com/oximo-rs/oximo): MPS, LP, and NL writers/readers.
 
 Converts an oximo [`oximo_core::Model`] to standard text formats for exchanging models with external solvers and tools.
 
@@ -138,7 +138,20 @@ let mut f = BufWriter::new(File::create("rosen.nl")?);
 write_nl_with(&m, &mut f, &WriteOptions::binary())?;
 ```
 
-Not yet supported: range constraints, Hollerith (string) constants, and `Param` nodes.
+NL files can also be imported with `read_nl` (a stream) or `read_nl_file` (a
+path). The latter automatically uses sibling `.row` and `.col` sidecars when
+present, otherwise deterministic `c0`/`x0` names are generated. Both ASCII and
+the binary encoding emitted by this crate are accepted. Imported functions,
+defined variables, logical constraints, and complementarity are reported as
+unsupported.
+
+The reader preserves interval rows and initial values. Hollerith strings are
+malformed NL input and return `IoError::InvalidNl`. Parameter nodes are not
+reader input, so the writer-side `Param` behavior remains documented as
+`IoError::UnsupportedNode`. Defined-variable sections return
+`IoError::UnsupportedNl`. Imported functions and logical/network sections are
+also rejected with that variant because they are not representable by the core
+model.
 
 ## Errors
 
@@ -152,6 +165,8 @@ All functions return `Result<_, IoError>`:
 | `IoError::InvalidNumber`      | Non-finite (NaN/Inf) constant while `nonfinite_strings` is off             |
 | `IoError::BinaryToString`     | `to_nl_string` used with binary output; use `write_nl_with` to a byte sink |
 | `IoError::Io(e)`              | Underlying `std::io::Error` from the writer                                |
+| `IoError::InvalidNl`          | Malformed or truncated NL input                                            |
+| `IoError::UnsupportedNl`      | Semantics not representable by the core model                              |
 
 ## License
 
