@@ -887,11 +887,15 @@ fn parse_suffix(s: &str, c: char) -> Result<usize, IoError> {
         .parse()
         .map_err(|_| invalid("segment", "bad count"))
 }
+#[expect(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn as_index(x: f64) -> Result<usize, IoError> {
     if !x.is_finite() || x < 0.0 || x.fract() != 0.0 {
         return Err(invalid("index", "not a nonnegative integer"));
     }
-    format!("{x:.0}").parse::<usize>().map_err(|_| invalid("index", "index out of range"))
+    if x > usize::MAX as f64 {
+        return Err(invalid("index", "index out of range"));
+    }
+    Ok(x as usize)
 }
 fn nonneg(x: i32, field: &str) -> Result<usize, IoError> {
     if x < 0 {
