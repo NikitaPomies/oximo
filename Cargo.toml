@@ -60,7 +60,7 @@ highs            = "2.4"
 grb              = "3.0"    
 mosek            = "11.2"
 clarabel         = "0.11"
-pounce-rs        = "0.9"
+pounce-rs        = { version = "0.10", features = ["convex", "qp"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
