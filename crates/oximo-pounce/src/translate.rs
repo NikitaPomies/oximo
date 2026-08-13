@@ -40,6 +40,7 @@ pub(crate) struct WarmStart {
     pub z_l: Vec<f64>,
     pub z_u: Vec<f64>,
     pub lambda: Vec<f64>,
+    pub sqp_working: Option<pounce_rs::sqp::WorkingSet>,
 }
 
 /// Backend-agnostic solve outcome, mapped into a [`SolverResult`] by

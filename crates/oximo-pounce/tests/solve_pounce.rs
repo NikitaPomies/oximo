@@ -415,6 +415,47 @@ fn explicit_soc_routes_to_conic_ipm_and_reports_dual() {
 }
 
 #[test]
+fn persistent_convex_ipm_and_active_set_follow_parameter_sweeps() {
+    let m = Model::new("convex_sweep");
+    param!(m, target = 1.0);
+    variable!(m, -5.0 <= x <= 5.0);
+    objective!(m, Min, x.powi(2) - 2.0 * target * x);
+
+    for selection in [PounceSolverSelection::Auto, PounceSolverSelection::QpActiveSet] {
+        let options = PounceOptions::default().solver_selection(selection);
+        let mut persistent = Pounce.persistent();
+        for value in [1.0, -2.0, 0.5, 3.0] {
+            target.set_param_value(value);
+            let warm = persistent.solve(&m, &options).unwrap();
+            let cold = Pounce.solve(&m, &options).unwrap();
+            assert!(warm.has_solution(), "{selection:?}, target={value}");
+            assert_close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap(), 1e-6, "x");
+        }
+    }
+}
+
+#[test]
+fn persistent_conic_ipm_reuses_bound_expanded_warm_start() {
+    let m = Model::new("soc_sweep");
+    param!(m, weight = 1.0);
+    variable!(m, -2.0 <= x <= 2.0);
+    variable!(m, -2.0 <= y <= 2.0);
+    variable!(m, 0.0 <= t <= 2.0);
+    m.add_soc_constraint("disk", [x, y], t);
+    constraint!(m, radius, t == 1.0);
+    objective!(m, Max, weight * x + y);
+
+    let mut persistent = Pounce.persistent();
+    for value in [1.0, 2.0, 0.5] {
+        weight.set_param_value(value);
+        let warm = persistent.solve(&m, &PounceOptions::default()).unwrap();
+        let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+        assert!(warm.has_solution(), "weight={value}: {:?}", warm.termination);
+        assert_close(warm.objective().unwrap(), cold.objective().unwrap(), 1e-5, "objective");
+    }
+}
+
+#[test]
 fn persistent_reset_then_solve_ok() {
     let m = Model::new("reset");
     param!(m, w = 1.0);

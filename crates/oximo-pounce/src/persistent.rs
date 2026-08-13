@@ -6,6 +6,7 @@ use std::time::Instant;
 use oximo_core::{Model, ModelKind};
 use oximo_solver::{Solver, SolverError, SolverResult};
 
+use crate::convex::{self, Route};
 use crate::options::PounceOptions;
 use crate::translate::{WarmStart, assemble, setup};
 
@@ -14,9 +15,21 @@ use crate::exact as backend;
 #[cfg(not(feature = "enzyme"))]
 use crate::stable as backend;
 
-struct State {
+struct NlpState {
     oracle: backend::Oracle,
     warm: Option<WarmStart>,
+}
+
+struct ConvexState {
+    route: Route,
+    problem: convex::Problem,
+    warm: Option<pounce_rs::convex::QpWarmStart>,
+    active: Option<convex::ActivePersistent>,
+}
+
+enum State {
+    Nlp(NlpState),
+    Convex(Box<ConvexState>),
 }
 
 /// A stateful POUNCE handle that keeps the derivative build resident across
@@ -59,18 +72,78 @@ impl PouncePersistent {
         model: &Model,
         opts: &PounceOptions,
     ) -> Result<SolverResult, SolverError> {
+        let route = convex::route(model, opts)?;
+        if route == Route::Nlp {
+            return self.solve_nlp(model, opts);
+        }
+        self.solve_convex(model, opts, route)
+    }
+
+    fn solve_nlp(
+        &mut self,
+        model: &Model,
+        opts: &PounceOptions,
+    ) -> Result<SolverResult, SolverError> {
         let prep = setup(model, opts)?;
         let started = Instant::now();
-
         let state = match &mut self.state {
-            Some(state) if backend::try_reuse(&state.oracle, model) => state,
-            state => state.insert(State { oracle: backend::build(model)?, warm: None }),
+            Some(State::Nlp(state)) if backend::try_reuse(&state.oracle, model) => state,
+            slot => {
+                *slot = Some(State::Nlp(NlpState { oracle: backend::build(model)?, warm: None }));
+                let Some(State::Nlp(state)) = slot else { unreachable!() };
+                state
+            }
         };
         let mut outcome = backend::run(&state.oracle, &prep, opts, state.warm.as_ref())?;
         let elapsed = started.elapsed();
-
         state.warm = outcome.warm.take();
         Ok(assemble(prep.sign, outcome, elapsed))
+    }
+
+    fn solve_convex(
+        &mut self,
+        model: &Model,
+        opts: &PounceOptions,
+        route: Route,
+    ) -> Result<SolverResult, SolverError> {
+        convex::validate_options(opts)?;
+        let problem = convex::build_problem(model)?;
+        let started = Instant::now();
+        let state = match &mut self.state {
+            Some(State::Convex(state))
+                if state.route == route && state.problem.same_structure(&problem) =>
+            {
+                state.problem = problem;
+                state
+            }
+            slot => {
+                let active = (route == Route::QpActiveSet).then(convex::ActivePersistent::new);
+                *slot = Some(State::Convex(Box::new(ConvexState {
+                    route,
+                    problem,
+                    warm: None,
+                    active,
+                })));
+                let Some(State::Convex(state)) = slot else { unreachable!() };
+                state
+            }
+        };
+        let solution = if route == Route::QpActiveSet {
+            state
+                .active
+                .as_mut()
+                .expect("active-set state exists for active-set route")
+                .solve(&state.problem, opts)?
+        } else {
+            convex::run(&state.problem, opts, route, state.warm.as_ref())
+        };
+        let elapsed = started.elapsed();
+        let mut outcome = convex::outcome(&state.problem, opts, route, &solution);
+        state.warm = (route != Route::QpActiveSet && outcome.termination.admits_primal())
+            .then(|| convex::warm_from_solution(route, &state.problem, &solution));
+        let sign = state.problem.sign();
+        outcome.warm = None;
+        Ok(assemble(sign, outcome, elapsed))
     }
 }
 
@@ -82,7 +155,10 @@ impl Solver for PouncePersistent {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::NLP)
+        matches!(
+            kind,
+            ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
+        )
     }
 
     fn solve(&mut self, model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {

@@ -173,6 +173,7 @@ fn run_builder(
         z_l: sol.z_l.clone(),
         z_u: sol.z_u.clone(),
         lambda: sol.multipliers.clone(),
+        sqp_working: None,
     });
     Ok(Outcome {
         termination,

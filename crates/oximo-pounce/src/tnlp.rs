@@ -16,8 +16,10 @@ use pounce_rs::{
     NlpInfo, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
-use crate::options::PounceOptions;
-use crate::translate::{Outcome, Prepared, WarmStart, apply_options, map_status, set_str};
+use crate::options::{PounceAlgorithm, PounceOptions};
+use crate::translate::{
+    Outcome, Prepared, WarmStart, apply_options, map_status, selected_algorithm, set_str,
+};
 
 /// A derivative source for [`OximoTnlp`].
 ///
@@ -81,13 +83,27 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
         set_str(app.options_mut(), "hessian_approximation", "limited-memory")?;
     }
     apply_options(app.options_mut(), opts, warm.is_some())?;
+    if selected_algorithm(opts)? == PounceAlgorithm::ActiveSetSqp {
+        if let Some(warm) = warm {
+            app.set_sqp_warm_start(pounce_rs::sqp::SqpIterates {
+                x: warm.x.clone(),
+                lambda_g: warm.lambda.clone(),
+                lambda_x: warm.z_l.iter().zip(&warm.z_u).map(|(l, u)| l - u).collect(),
+                working: warm.sqp_working.clone(),
+            });
+        }
+    }
 
     let status = app.optimize_tnlp(Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>);
+    let sqp_working = app.last_sqp_working_set().cloned();
     let termination = map_status(status);
     let stats = app.statistics();
     let iterations = u64::try_from(stats.iteration_count.max(0)).unwrap_or(0);
     let raw_log = (opts.universal.verbose == Some(true)).then(|| format_raw_log(&stats, status));
 
+    if let Some(captured) = &mut tnlp.borrow_mut().captured {
+        captured.warm.sqp_working = sqp_working;
+    }
     let t = tnlp.borrow();
     Ok(match &t.captured {
         Some(c) => Outcome {
@@ -333,6 +349,7 @@ impl<O: DerivativeOracle> TNLP for OximoTnlp<O> {
                 z_l: sol.z_l.to_vec(),
                 z_u: sol.z_u.to_vec(),
                 lambda: sol.lambda.to_vec(),
+                sqp_working: None,
             },
             reduced,
             obj: sol.obj_value,
