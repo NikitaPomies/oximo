@@ -26,9 +26,13 @@ pub struct PounceOptions {
     pub print_level: Option<u32>,
     /// Barrier parameter update strategy (`mu_strategy`).
     pub mu_strategy: Option<MuStrategy>,
-    /// POUNCE's top-level solve algorithm. Defaults to the interior-point
-    /// method when omitted.
+    /// POUNCE's general-NLP algorithm. Defaults to the interior-point method
+    /// whenever structural routing selects the NLP engine.
     pub algorithm: Option<PounceAlgorithm>,
+    /// Structural solver route. [`PounceSolverSelection::Auto`] is used when
+    /// omitted and sends provably convex models to POUNCE's specialized
+    /// convex engines.
+    pub solver_selection: Option<PounceSolverSelection>,
     /// Macro-generated typed options, kept by value kind and applied in order.
     num_opts: Vec<(&'static str, f64)>,
     int_opts: Vec<(&'static str, i32)>,
@@ -50,8 +54,8 @@ pub enum MuStrategy {
 /// Both algorithms accept every continuous [`ModelKind`] supported by this
 /// backend. `ActiveSetSqp` is a general NLP algorithm despite its QP
 /// subproblems, so oximo intentionally permits it for LP, QP, QCP, and NLP
-/// models. POUNCE's `lp-ipm`, `qp-ipm`, and `socp` selectors are CLI-only and
-/// are not exposed here.
+/// models. Specialized convex engines are selected separately with
+/// [`PounceSolverSelection`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PounceAlgorithm {
     /// POUNCE's IPOPT-lineage primal-dual interior-point method.
@@ -59,6 +63,50 @@ pub enum PounceAlgorithm {
     InteriorPoint,
     /// Active-set sequential quadratic programming.
     ActiveSetSqp,
+}
+
+/// POUNCE solver route selected after classifying the oximo model.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PounceSolverSelection {
+    /// Use a specialized convex engine when convexity is certified, otherwise
+    /// use the general NLP engine.
+    #[default]
+    Auto,
+    /// Always use the general NLP engine.
+    Nlp,
+    /// Force the convex LP interior-point route (LP models only).
+    LpIpm,
+    /// Force the convex QP interior-point route (LP or convex QP).
+    QpIpm,
+    /// Force POUNCE's direct parametric active-set QP engine.
+    QpActiveSet,
+    /// Force the conic interior-point route (convex LP/QP/SOCP).
+    Socp,
+}
+
+impl PounceSolverSelection {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Nlp => "nlp",
+            Self::LpIpm => "lp-ipm",
+            Self::QpIpm => "qp-ipm",
+            Self::QpActiveSet => "qp-active-set",
+            Self::Socp => "socp",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "nlp" => Some(Self::Nlp),
+            "lp-ipm" => Some(Self::LpIpm),
+            "qp-ipm" => Some(Self::QpIpm),
+            "qp-active-set" => Some(Self::QpActiveSet),
+            "socp" => Some(Self::Socp),
+            _ => None,
+        }
+    }
 }
 
 impl PounceAlgorithm {
@@ -72,7 +120,14 @@ impl PounceAlgorithm {
     pub(crate) const fn supports(self, kind: ModelKind) -> bool {
         match self {
             Self::InteriorPoint | Self::ActiveSetSqp => {
-                matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::NLP)
+                matches!(
+                    kind,
+                    ModelKind::LP
+                        | ModelKind::QP
+                        | ModelKind::QCP
+                        | ModelKind::SOCP
+                        | ModelKind::NLP
+                )
             }
         }
     }
@@ -213,9 +268,6 @@ impl PounceOptions {
         (num, presolve_auxiliary_wall_time_fraction, "presolve_auxiliary_wall_time_fraction"),
         (bool, presolve_auxiliary_diagnostics, "presolve_auxiliary_diagnostics"),
         // FERAL backend (pure-Rust sparse symmetric linear solver).
-        // `feral_infeasibility_scaling_retry` is registered but never read by
-        // the library (the retry is implemented by the POUNCE CLI), so setting
-        // it would silently do nothing — it is deliberately not exposed.
         (str, linear_solver, "linear_solver"),
         (str, feral_ordering, "feral_ordering"),
         (str, feral_scaling, "feral_scaling"),
@@ -224,6 +276,37 @@ impl PounceOptions {
         (bool, feral_cascade_break, "feral_cascade_break"),
         (bool, feral_fma, "feral_fma"),
         (num, feral_singular_pivot_floor, "feral_singular_pivot_floor"),
+        // POUNCE convergence, restoration, scaling, and retry controls.
+        (num, acceptable_progress_kappa, "acceptable_progress_kappa"),
+        (num, dual_inf_scale_kappa, "dual_inf_scale_kappa"),
+        (num, feral_inertia_pivot_floor, "feral_inertia_pivot_floor"),
+        (bool, infeasibility_mu_strategy_retry, "infeasibility_mu_strategy_retry"),
+        (num, primal_noise_floor_kappa, "primal_noise_floor_kappa"),
+        (num, qp_tau_max, "qp_tau_max"),
+        (int, resto_decline_deferrals, "resto_decline_deferrals"),
+        (num, resto_decline_progress_ratio, "resto_decline_progress_ratio"),
+        (int, sqp_qp_max_schur_updates_before_refactor, "sqp_qp_max_schur_updates_before_refactor"),
+        (bool, sqp_qp_use_homotopy, "sqp_qp_use_homotopy"),
+        (bool, sqp_qp_use_schur_updates, "sqp_qp_use_schur_updates"),
+        (num, theta_max_adaptive_factor, "theta_max_adaptive_factor"),
+        (int, theta_max_adaptive_max_raises, "theta_max_adaptive_max_raises"),
+        (int, theta_max_adaptive_trigger, "theta_max_adaptive_trigger"),
+        (num, theta_max_row_scale_kappa, "theta_max_row_scale_kappa"),
+        // Specialized convex engine controls.
+        (bool, qp_presolve, "qp_presolve"),
+        (num, qp_tau, "qp_tau"),
+        (num, qp_reg, "qp_reg"),
+        (num, qp_infeas_tol, "qp_infeas_tol"),
+        (bool, qp_hsde, "qp_hsde"),
+        (bool, qp_equilibrate, "qp_equilibrate"),
+        (bool, qp_crossover, "qp_crossover"),
+        (bool, feral_infeasibility_scaling_retry, "feral_infeasibility_scaling_retry"),
+        // Active-set QP tuning shared by direct QP and NLP-SQP routes.
+        (int, sqp_qp_max_iter, "sqp_qp_max_iter"),
+        (num, sqp_qp_feas_tol, "sqp_qp_feas_tol"),
+        (num, sqp_qp_opt_tol, "sqp_qp_opt_tol"),
+        (num, sqp_qp_elastic_gamma, "sqp_qp_elastic_gamma"),
+        (str, sqp_qp_anti_cycling, "sqp_qp_anti_cycling"),
     );
 
     #[must_use]
@@ -254,6 +337,13 @@ impl PounceOptions {
     #[must_use]
     pub fn algorithm(mut self, algorithm: PounceAlgorithm) -> Self {
         self.algorithm = Some(algorithm);
+        self
+    }
+
+    /// Select POUNCE's structural solver route.
+    #[must_use]
+    pub fn solver_selection(mut self, selection: PounceSolverSelection) -> Self {
+        self.solver_selection = Some(selection);
         self
     }
 
@@ -346,5 +436,24 @@ mod tests {
                 ("acceptable_tol".to_owned(), PounceOptionValue::Num(1e-5)),
             ]
         );
+    }
+
+    #[test]
+    fn pounce_setters_use_the_declared_storage_kinds() {
+        let o = PounceOptions::default()
+            .solver_selection(PounceSolverSelection::Socp)
+            .acceptable_progress_kappa(0.2)
+            .resto_decline_deferrals(2)
+            .infeasibility_mu_strategy_retry(false)
+            .qp_tau(0.9)
+            .qp_presolve(true)
+            .sqp_qp_anti_cycling("bland");
+        assert_eq!(o.solver_selection, Some(PounceSolverSelection::Socp));
+        assert!(o.num_opts.contains(&("acceptable_progress_kappa", 0.2)));
+        assert!(o.num_opts.contains(&("qp_tau", 0.9)));
+        assert!(o.int_opts.contains(&("resto_decline_deferrals", 2)));
+        assert!(o.bool_opts.contains(&("infeasibility_mu_strategy_retry", false)));
+        assert!(o.bool_opts.contains(&("qp_presolve", true)));
+        assert!(o.str_opts.contains(&("sqp_qp_anti_cycling", "bland".to_owned())));
     }
 }

@@ -134,7 +134,9 @@ fn run_builder(
         nlp = nlp.option_str("algorithm", algorithm.as_str());
     }
     for &(name, v) in opts.num_opts() {
-        nlp = nlp.option_num(name, v);
+        if !crate::translate::convex_only_option(name) {
+            nlp = nlp.option_num(name, v);
+        }
     }
     for &(name, v) in opts.int_opts() {
         nlp = nlp.option_int(name, v);
@@ -143,9 +145,14 @@ fn run_builder(
         nlp = nlp.option_str(name, v);
     }
     for &(name, v) in opts.bool_opts() {
-        nlp = nlp.option_str(name, if v { "yes" } else { "no" });
+        if !crate::translate::convex_only_option(name) {
+            nlp = nlp.option_str(name, if v { "yes" } else { "no" });
+        }
     }
     for (name, value) in &opts.extra {
+        if crate::translate::convex_only_option(name) {
+            continue;
+        }
         nlp = match value {
             PounceOptionValue::Num(v) => nlp.option_num(name, *v),
             PounceOptionValue::Int(v) => nlp.option_int(name, *v),
@@ -171,6 +178,7 @@ fn run_builder(
         termination,
         x: sol.x,
         lambda: sol.multipliers,
+        soc_dual: Vec::new(),
         reduced: Some(reduced),
         objective: Some(sol.objective),
         iterations,

@@ -3,8 +3,8 @@
 //! With `--features enzyme` the same models are solved with exact derivatives.
 
 use oximo_core::prelude::*;
-use oximo_pounce::{MuStrategy, Pounce, PounceAlgorithm, PounceOptions};
-use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus};
+use oximo_pounce::{MuStrategy, Pounce, PounceAlgorithm, PounceOptions, PounceSolverSelection};
+use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus, UniversalOptionsExt};
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
     assert!((got - want).abs() < tol, "{what}: got {got}, want {want}");
@@ -301,14 +301,117 @@ fn active_set_sqp_solves_a_qp() {
 }
 
 #[test]
-fn cli_only_algorithm_selectors_are_rejected() {
-    let m = Model::new("cli_only_selector");
+fn active_set_sqp_does_not_run_interior_point_infeasibility_retries() {
+    let m = Model::new("active_set_infeasible");
+    variable!(m, -2.0 <= x <= 2.0, initial = 0.0);
+    constraint!(m, impossible, x.powi(2) <= -1.0);
+    objective!(m, Min, x);
+
+    let options = PounceOptions::default()
+        .algorithm(PounceAlgorithm::ActiveSetSqp)
+        .presolve(false)
+        .print_level(0)
+        .verbose(true);
+    let result = Pounce.solve(&m, &options).unwrap();
+    assert_eq!(
+        result.termination,
+        TerminationStatus::Infeasible,
+        "{}",
+        result.raw_log.as_deref().unwrap_or("no log")
+    );
+    assert!(
+        result
+            .raw_log
+            .as_deref()
+            .is_some_and(|log| !log.contains("local-infeasibility second opinion")),
+        "interior-point retry controls must not be applied to active-set SQP"
+    );
+}
+
+#[test]
+fn convex_algorithm_selectors_are_available() {
+    let m = Model::new("convex_selector");
     variable!(m, x >= 0.0);
     objective!(m, Min, x);
 
-    let err =
-        Pounce.solve(&m, &PounceOptions::default().set("solver_selection", "qp-ipm")).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(message) if message.contains("CLI")));
+    for selection in [
+        PounceSolverSelection::LpIpm,
+        PounceSolverSelection::QpIpm,
+        PounceSolverSelection::QpActiveSet,
+        PounceSolverSelection::Socp,
+    ] {
+        let result =
+            Pounce.solve(&m, &PounceOptions::default().solver_selection(selection)).unwrap();
+        assert!(result.has_solution(), "{selection:?}: {:?}", result.termination);
+    }
+}
+
+#[test]
+fn automatic_convexity_respects_objective_sense() {
+    let concave_max = Model::new("concave_max");
+    variable!(concave_max, -10.0 <= x <= 10.0);
+    objective!(concave_max, Max, 4.0 * x - x.powi(2));
+    let result = Pounce.solve(&concave_max, &PounceOptions::default()).unwrap();
+    assert_close(result.value_of(x).unwrap(), 2.0, 1e-5, "concave maximize x");
+
+    let convex_max = Model::new("convex_max");
+    variable!(convex_max, -1.0 <= y <= 1.0, initial = 0.2);
+    objective!(convex_max, Max, y.powi(2));
+    let forced = Pounce
+        .solve(
+            &convex_max,
+            &PounceOptions::default().solver_selection(PounceSolverSelection::QpIpm),
+        )
+        .unwrap_err();
+    assert!(matches!(forced, SolverError::Backend(message) if message.contains("proven-convex")));
+    let automatic = Pounce.solve(&convex_max, &PounceOptions::default()).unwrap();
+    assert!(automatic.has_solution());
+}
+
+#[test]
+fn convex_iteration_limit_is_not_retried_as_nlp() {
+    let m = Model::new("limited_lp");
+    variable!(m, 0.0 <= x <= 10.0);
+    objective!(m, Min, x);
+
+    let options = PounceOptions::default().max_iter(0).qp_presolve(false).verbose(true);
+    let cold = Pounce.solve(&m, &options).unwrap();
+    assert_eq!(cold.termination, TerminationStatus::IterationLimit);
+    assert!(
+        cold.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route")),
+        "an iteration limit must retain the original convex result"
+    );
+}
+
+#[test]
+fn convex_objective_constants_survive_sense_normalization() {
+    let min_model = Model::new("constant_min");
+    variable!(min_model, -5.0 <= x <= 5.0);
+    objective!(min_model, Min, (x - 2.0).powi(2) + 7.0);
+    let min_result = Pounce.solve(&min_model, &PounceOptions::default()).unwrap();
+    assert_close(min_result.objective().unwrap(), 7.0, 1e-6, "minimum constant");
+
+    let max_model = Model::new("constant_max");
+    variable!(max_model, -5.0 <= y <= 5.0);
+    objective!(max_model, Max, 11.0 - (y + 1.0).powi(2));
+    let max_result = Pounce.solve(&max_model, &PounceOptions::default()).unwrap();
+    assert_close(max_result.objective().unwrap(), 11.0, 1e-6, "maximum constant");
+}
+
+#[test]
+fn explicit_soc_routes_to_conic_ipm_and_reports_dual() {
+    let m = Model::new("soc");
+    variable!(m, -2.0 <= x <= 2.0);
+    variable!(m, -2.0 <= y <= 2.0);
+    variable!(m, 0.0 <= t <= 2.0);
+    let cone = m.add_soc_constraint("disk", [x, y], t);
+    constraint!(m, radius, t == 1.0);
+    objective!(m, Max, x);
+
+    let result = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+    assert!(result.has_solution(), "{:?}", result.termination);
+    assert_close(result.value_of(x).unwrap(), 1.0, 1e-5, "soc x");
+    assert!(result.soc_dual_of(cone).is_some());
 }
 
 #[test]

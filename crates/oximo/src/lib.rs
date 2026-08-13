@@ -54,6 +54,7 @@ pub mod gams {
 pub mod pounce {
     pub use oximo_pounce::{
         MuStrategy, Pounce, PounceAlgorithm, PounceOptionValue, PounceOptions, PouncePersistent,
+        PounceSolverSelection,
     };
 }
 
@@ -92,7 +93,9 @@ pub mod prelude {
 
     #[cfg(feature = "pounce")]
     #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
-    pub use oximo_pounce::{Pounce, PounceAlgorithm, PounceOptions, PouncePersistent};
+    pub use oximo_pounce::{
+        Pounce, PounceAlgorithm, PounceOptions, PouncePersistent, PounceSolverSelection,
+    };
 }
 
 pub mod solvers {

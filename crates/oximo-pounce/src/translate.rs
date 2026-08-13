@@ -5,13 +5,13 @@
 
 use std::time::{Duration, Instant};
 
-use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, VarId};
+use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, SocConstraintId, VarId};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use pounce_rs::ApplicationReturnStatus;
 use pounce_rs::pounce_common::options_list::OptionsList;
 use rustc_hash::FxHashMap;
 
-use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions};
+use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection};
 
 #[cfg(feature = "enzyme")]
 use crate::exact as backend;
@@ -51,6 +51,8 @@ pub(crate) struct Outcome {
     pub termination: TerminationStatus,
     pub x: Vec<f64>,
     pub lambda: Vec<f64>,
+    /// Explicit second-order-cone bound multipliers in model order.
+    pub soc_dual: Vec<f64>,
     pub reduced: Option<Vec<f64>>,
     pub objective: Option<f64>,
     pub iterations: u64,
@@ -67,8 +69,25 @@ pub(crate) struct Outcome {
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    let route = crate::convex::route(model, opts)?;
+    if route != crate::convex::Route::Nlp {
+        return crate::convex::solve(model, opts, route);
+    }
+    solve_nlp(model, opts)
+}
+
+pub(crate) fn solve_nlp(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    solve_nlp_since(model, opts, Instant::now())
+}
+
+/// Solve through the NLP route while charging time already spent by an
+/// automatic convex attempt to the reported solve duration.
+pub(crate) fn solve_nlp_since(
+    model: &Model,
+    opts: &PounceOptions,
+    started: Instant,
+) -> Result<SolverResult, SolverError> {
     let prep = setup(model, opts)?;
-    let started = Instant::now();
     let oracle = backend::build(model)?;
     let outcome = backend::run(&oracle, &prep, opts, None)?;
     Ok(assemble(prep.sign, outcome, started.elapsed()))
@@ -77,7 +96,10 @@ pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, Solver
 /// Kind gate, objective declaration check, sign, and bound snapshot.
 pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, SolverError> {
     let kind = model.kind();
-    if !matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::NLP) {
+    if !matches!(
+        kind,
+        ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
+    ) {
         return Err(SolverError::UnsupportedKind(kind));
     }
     validate_algorithm(kind, opts)?;
@@ -113,14 +135,9 @@ pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, Sol
     Ok(Prepared { sign, x_l, x_u, g_l, g_u, x0 })
 }
 
-/// Resolve the backend algorithm after raw options (which apply last).
-///
-/// POUNCE's library exposes only its NLP interior-point and active-set SQP
-/// algorithms. Its specialized convex selectors need the CLI's structural
-/// extraction and cannot be used by `IpoptApplication`.
+/// Resolve the NLP algorithm after raw options (which apply last).
 pub(crate) fn selected_algorithm(opts: &PounceOptions) -> Result<PounceAlgorithm, SolverError> {
     let mut algorithm = opts.algorithm.unwrap_or_default();
-    let mut solver_selection = None;
     for (name, value) in &opts.extra {
         match (name.as_str(), value) {
             ("algorithm", PounceOptionValue::Str(value)) => {
@@ -139,25 +156,30 @@ pub(crate) fn selected_algorithm(opts: &PounceOptions) -> Result<PounceAlgorithm
                     "pounce option `algorithm` must be a string".into(),
                 ));
             }
-            ("solver_selection", PounceOptionValue::Str(value)) => solver_selection = Some(value),
-            ("solver_selection", _) => {
-                return Err(SolverError::Backend(
-                    "pounce option `solver_selection` must be a string".into(),
-                ));
-            }
             _ => {}
         }
     }
-    match solver_selection.map(String::as_str) {
-        Some("qp-active-set") => Ok(PounceAlgorithm::ActiveSetSqp),
-        Some("auto" | "nlp") | None => Ok(algorithm),
-        Some(value @ ("lp-ipm" | "qp-ipm" | "socp")) => Err(SolverError::Backend(format!(
-            "pounce solver_selection `{value}` is only available through POUNCE's CLI; use `algorithm` instead"
-        ))),
-        Some(value) => Err(SolverError::Backend(format!(
-            "pounce solver_selection `{value}` is unsupported by the Rust library"
-        ))),
+    Ok(algorithm)
+}
+
+/// Resolve structural routing after raw options (which apply last).
+pub(crate) fn selected_solver(opts: &PounceOptions) -> Result<PounceSolverSelection, SolverError> {
+    let mut selection = opts.solver_selection.unwrap_or_default();
+    for (name, value) in &opts.extra {
+        if name == "solver_selection" {
+            let PounceOptionValue::Str(value) = value else {
+                return Err(SolverError::Backend(
+                    "pounce option `solver_selection` must be a string".into(),
+                ));
+            };
+            selection = PounceSolverSelection::parse(value).ok_or_else(|| {
+                SolverError::Backend(format!(
+                    "pounce solver_selection `{value}` is unsupported. Use auto, nlp, lp-ipm, qp-ipm, qp-active-set, or socp"
+                ))
+            })?;
+        }
     }
+    Ok(selection)
 }
 
 pub(crate) fn validate_algorithm(
@@ -200,6 +222,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
     let mut solutions = Vec::new();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
     let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
+    let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
 
     if has_point {
         let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
@@ -218,6 +241,12 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
                     .insert(VarId(u32::try_from(i).expect("variable count overflow")), sign * r);
             }
         }
+        for (i, &value) in o.soc_dual.iter().enumerate() {
+            soc_dual.insert(
+                SocConstraintId(u32::try_from(i).expect("SOC constraint count overflow")),
+                value,
+            );
+        }
         solutions.push(SolutionPoint { primal, objective: o.objective.map(|f| sign * f) });
     }
 
@@ -227,7 +256,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
         primal_status,
         solutions,
         dual,
-        soc_dual: FxHashMap::default(),
+        soc_dual,
         reduced_costs,
         best_bound: None,
         gap: None,
@@ -275,6 +304,19 @@ fn set_bool(list: &mut OptionsList, name: &str, v: bool) -> Result<(), SolverErr
     list.set_bool_value(name, v, true, true).map(|_| ()).map_err(|e| opt_error(name, &e))
 }
 
+pub(crate) fn convex_only_option(name: &str) -> bool {
+    matches!(
+        name,
+        "qp_tau"
+            | "qp_tau_max"
+            | "qp_reg"
+            | "qp_infeas_tol"
+            | "qp_hsde"
+            | "qp_equilibrate"
+            | "qp_crossover"
+    )
+}
+
 /// Apply [`PounceOptions`] onto POUNCE's option list (from `IpoptApplication::options_mut()`),
 /// surfacing an invalid name or out-of-range value as a [`SolverError::Backend`].
 /// Both derivative paths apply onto the live application via [`crate::tnlp::run`].
@@ -302,8 +344,13 @@ pub(crate) fn apply_options(
     if let Some(algorithm) = opts.algorithm {
         set_str(list, "algorithm", algorithm.as_str())?;
     }
+    if let Some(selection) = opts.solver_selection {
+        set_str(list, "solver_selection", selection.as_str())?;
+    }
     for &(name, v) in opts.num_opts() {
-        set_num(list, name, v)?;
+        if !convex_only_option(name) {
+            set_num(list, name, v)?;
+        }
     }
     for &(name, v) in opts.int_opts() {
         set_int(list, name, v)?;
@@ -312,9 +359,14 @@ pub(crate) fn apply_options(
         set_str(list, name, v)?;
     }
     for &(name, v) in opts.bool_opts() {
-        set_bool(list, name, v)?;
+        if !convex_only_option(name) {
+            set_bool(list, name, v)?;
+        }
     }
     for (name, value) in &opts.extra {
+        if convex_only_option(name) {
+            continue;
+        }
         match value {
             PounceOptionValue::Num(v) => set_num(list, name, *v)?,
             PounceOptionValue::Int(v) => set_int(list, name, *v)?,
