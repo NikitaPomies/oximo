@@ -118,6 +118,10 @@ fn run_builder(
         .x0(&x0)
         .option_int("print_level", print_level(opts));
 
+    if opts.universal.verbose == Some(true) {
+        nlp = nlp.capture_iterations();
+    }
+
     if let Some(tol) = opts.tol {
         nlp = nlp.option_num("tol", tol);
     }
