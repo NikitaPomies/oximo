@@ -32,6 +32,11 @@ enum State {
     Convex(Box<ConvexState>),
 }
 
+struct CachedValidation {
+    options: PounceOptions,
+    result: Result<(), String>,
+}
+
 /// A stateful POUNCE handle that keeps the derivative build resident across
 /// solves. Created by [`Pounce::persistent`](crate::Pounce).
 ///
@@ -46,6 +51,7 @@ enum State {
 #[derive(Default)]
 pub struct PouncePersistent {
     state: Option<State>,
+    validation: Option<CachedValidation>,
 }
 
 impl std::fmt::Debug for PouncePersistent {
@@ -65,6 +71,7 @@ impl PouncePersistent {
     /// from scratch (and starts from the model's initial point).
     pub fn reset(&mut self) {
         self.state = None;
+        self.validation = None;
     }
 
     fn solve_resident(
@@ -114,7 +121,7 @@ impl PouncePersistent {
         opts: &PounceOptions,
         route: Route,
     ) -> Result<SolverResult, SolverError> {
-        convex::validate_options(opts)?;
+        self.validate_convex_options(opts)?;
         let problem = convex::build_problem(model)?;
         let started = Instant::now();
         let state = match &mut self.state {
@@ -156,6 +163,23 @@ impl PouncePersistent {
         outcome.warm = None;
         Ok(assemble(sign, outcome, elapsed))
     }
+
+    fn validate_convex_options(&mut self, opts: &PounceOptions) -> Result<(), SolverError> {
+        if let Some(cached) = &self.validation
+            && cached.options == *opts
+        {
+            return cached.result.clone().map_err(SolverError::Backend);
+        }
+        self.validation = None;
+        let result = convex::validate_options(opts);
+        let cached = match &result {
+            Ok(()) => Ok(()),
+            Err(SolverError::Backend(message)) => Err(message.clone()),
+            Err(_) => return result,
+        };
+        self.validation = Some(CachedValidation { options: opts.clone(), result: cached });
+        result
+    }
 }
 
 impl Solver for PouncePersistent {
@@ -180,5 +204,38 @@ impl Solver for PouncePersistent {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convex_validation_cache_tracks_options_and_errors() {
+        let mut solver = PouncePersistent::new();
+        let valid = PounceOptions::default().qp_tau(0.9);
+        solver.validate_convex_options(&valid).unwrap();
+        assert!(
+            solver
+                .validation
+                .as_ref()
+                .is_some_and(|cached| { cached.options == valid && cached.result.is_ok() })
+        );
+        solver.validate_convex_options(&valid).unwrap();
+
+        let invalid = PounceOptions::default().set("not_a_real_option", true);
+        let first = solver.validate_convex_options(&invalid).unwrap_err().to_string();
+        let second = solver.validate_convex_options(&invalid).unwrap_err().to_string();
+        assert_eq!(first, second);
+        assert!(
+            solver
+                .validation
+                .as_ref()
+                .is_some_and(|cached| { cached.options == invalid && cached.result.is_err() })
+        );
+
+        solver.reset();
+        assert!(solver.validation.is_none());
     }
 }

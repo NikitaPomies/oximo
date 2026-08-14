@@ -15,7 +15,7 @@ use oximo_solver::{HasUniversal, UniversalOptions};
 ///     `verbose` -> `print_level` 5 (else 0) and captures the iteration log
 ///     into [`SolverResult::raw_log`](oximo_solver::SolverResult::raw_log),
 ///     `threads` is ignored.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PounceOptions {
     pub universal: UniversalOptions,
     /// Desired convergence tolerance (`tol`).
