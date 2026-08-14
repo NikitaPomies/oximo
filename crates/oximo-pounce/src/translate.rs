@@ -571,6 +571,88 @@ mod retry_tests {
         );
     }
 
+    #[test]
+    fn promoted_retry_log_retains_both_attempts_in_order() {
+        let original = logged_outcome("original\n");
+        let mut retry = logged_outcome("retry\n");
+        merge_retry_log(&original, &mut retry, "adaptive mu", true);
+        assert_eq!(
+            retry.raw_log.as_deref(),
+            Some(
+                "original\nPOUNCE local-infeasibility second opinion (adaptive mu): promoted\nretry\n"
+            )
+        );
+    }
+
+    #[test]
+    fn retry_diagnostics_explain_errors_and_exhausted_budgets() {
+        let mut error = logged_outcome("original\n");
+        record_retry_error(&mut error, "MC64 scaling", &SolverError::Backend("failed".into()));
+        assert!(error.raw_log.as_deref().is_some_and(|log| {
+            log.contains("(MC64 scaling) failed: backend error: failed, original retained")
+        }));
+
+        let mut skipped = logged_outcome("original\n");
+        record_retry_skip(&mut skipped, "adaptive mu");
+        assert!(
+            skipped
+                .raw_log
+                .as_deref()
+                .is_some_and(|log| log.contains("(adaptive mu) skipped: time budget exhausted"))
+        );
+    }
+
+    #[test]
+    fn raw_route_and_algorithm_options_take_precedence_and_validate_types() {
+        let options = PounceOptions::default()
+            .algorithm(PounceAlgorithm::ActiveSetSqp)
+            .solver_selection(PounceSolverSelection::Nlp)
+            .set("algorithm", "interior-point")
+            .set("solver_selection", "qp-active-set");
+        assert_eq!(selected_algorithm(&options).unwrap(), PounceAlgorithm::InteriorPoint);
+        assert_eq!(selected_solver(&options).unwrap(), PounceSolverSelection::QpActiveSet);
+
+        for options in [
+            PounceOptions::default().set("algorithm", "invalid"),
+            PounceOptions::default().set("algorithm", true),
+            PounceOptions::default().set("solver_selection", "invalid"),
+            PounceOptions::default().set("solver_selection", true),
+        ] {
+            assert!(matches!(
+                selected_algorithm(&options).and_then(|_| selected_solver(&options)),
+                Err(SolverError::Backend(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn retry_controls_use_the_last_well_typed_value() {
+        let options = PounceOptions::default()
+            .feral_infeasibility_scaling_retry(false)
+            .set("feral_infeasibility_scaling_retry", "wrong-type")
+            .set("feral_infeasibility_scaling_retry", true)
+            .feral_scaling("none")
+            .feral_scaling("matching")
+            .set("feral_scaling", false)
+            .set("feral_scaling", "mc64");
+        assert_eq!(effective_bool(&options, "feral_infeasibility_scaling_retry"), Some(true));
+        assert_eq!(effective_string(&options, "feral_scaling").as_deref(), Some("mc64"));
+        assert_eq!(effective_bool(&options, "missing"), None);
+        assert_eq!(effective_string(&options, "missing"), None);
+    }
+
+    #[test]
+    fn initial_guesses_respect_finite_and_one_sided_bounds() {
+        for (actual, expected) in [
+            (initial_guess(-2.0, 4.0), 1.0),
+            (initial_guess(3.0, f64::INFINITY), 3.0),
+            (initial_guess(f64::NEG_INFINITY, -3.0), -3.0),
+            (initial_guess(f64::NEG_INFINITY, f64::INFINITY), 0.0),
+        ] {
+            assert!((actual - expected).abs() <= f64::EPSILON);
+        }
+    }
+
     fn logged_outcome(log: &str) -> Outcome {
         Outcome {
             termination: TerminationStatus::Infeasible,

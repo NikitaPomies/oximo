@@ -456,4 +456,36 @@ mod tests {
         assert!(o.bool_opts.contains(&("qp_presolve", true)));
         assert!(o.str_opts.contains(&("sqp_qp_anti_cycling", "bland".to_owned())));
     }
+
+    #[test]
+    fn solver_selection_parses_every_public_value() {
+        for (text, expected) in [
+            ("auto", PounceSolverSelection::Auto),
+            ("nlp", PounceSolverSelection::Nlp),
+            ("lp-ipm", PounceSolverSelection::LpIpm),
+            ("qp-ipm", PounceSolverSelection::QpIpm),
+            ("qp-active-set", PounceSolverSelection::QpActiveSet),
+            ("socp", PounceSolverSelection::Socp),
+        ] {
+            assert_eq!(PounceSolverSelection::parse(text), Some(expected));
+            assert_eq!(expected.as_str(), text);
+        }
+        assert_eq!(PounceSolverSelection::parse("unknown"), None);
+    }
+
+    #[test]
+    fn algorithms_report_their_names_and_supported_model_kinds() {
+        for (algorithm, name) in [
+            (PounceAlgorithm::InteriorPoint, "interior-point"),
+            (PounceAlgorithm::ActiveSetSqp, "active-set-sqp"),
+        ] {
+            assert_eq!(algorithm.as_str(), name);
+            for kind in
+                [ModelKind::LP, ModelKind::QP, ModelKind::QCP, ModelKind::SOCP, ModelKind::NLP]
+            {
+                assert!(algorithm.supports(kind), "{algorithm:?} should support {kind:?}");
+            }
+            assert!(!algorithm.supports(ModelKind::MILP));
+        }
+    }
 }
