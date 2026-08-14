@@ -463,7 +463,8 @@ fn set_bool(list: &mut OptionsList, name: &str, v: bool) -> Result<(), SolverErr
 pub(crate) fn convex_only_option(name: &str) -> bool {
     matches!(
         name,
-        "qp_tau"
+        "qp_presolve"
+            | "qp_tau"
             | "qp_tau_max"
             | "qp_reg"
             | "qp_infeas_tol"
@@ -650,6 +651,25 @@ mod retry_tests {
             (initial_guess(f64::NEG_INFINITY, f64::INFINITY), 0.0),
         ] {
             assert!((actual - expected).abs() <= f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn only_standalone_convex_options_bypass_the_pounce_registry() {
+        for name in [
+            "qp_presolve",
+            "qp_tau",
+            "qp_tau_max",
+            "qp_reg",
+            "qp_infeas_tol",
+            "qp_hsde",
+            "qp_equilibrate",
+            "qp_crossover",
+        ] {
+            assert!(convex_only_option(name), "{name}");
+        }
+        for name in ["solver_selection", "feral_infeasibility_scaling_retry", "sqp_qp_max_iter"] {
+            assert!(!convex_only_option(name), "{name}");
         }
     }
 
