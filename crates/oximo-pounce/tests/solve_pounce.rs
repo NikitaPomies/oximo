@@ -2,6 +2,8 @@
 //! These run on stable Rust (the default finite-difference path).
 //! With `--features enzyme` the same models are solved with exact derivatives.
 
+use std::time::Duration;
+
 use oximo_core::prelude::*;
 use oximo_pounce::{MuStrategy, Pounce, PounceAlgorithm, PounceOptions, PounceSolverSelection};
 use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus, UniversalOptionsExt};
@@ -257,17 +259,57 @@ fn verbose_captures_raw_log() {
     variable!(m, -10.0 <= x <= 10.0, initial = -1.2);
     objective!(m, Min, (x - 2.0).powi(2));
 
-    let quiet = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+    let quiet = Pounce
+        .solve(&m, &PounceOptions::default().solver_selection(PounceSolverSelection::Nlp))
+        .unwrap();
     assert!(quiet.raw_log.is_none(), "no log capture without verbose");
 
-    let mut opts = PounceOptions::default();
+    let mut opts =
+        PounceOptions::default().solver_selection(PounceSolverSelection::Nlp).print_level(0);
     opts.universal.verbose = Some(true);
     let res = Pounce.solve(&m, &opts).unwrap();
     assert!(res.iterations > 0, "TNLP solve reports iterations");
     let log = res.raw_log.expect("verbose solve should capture a log");
     assert!(log.contains("Number of Iterations....:"), "log has the summary: {log}");
     assert!(log.contains("objective function evaluations"), "log has eval counts: {log}");
+    assert!(log.contains("KKT error above row noise:"), "log has noise-aware KKT error: {log}");
+    assert!(log.contains("Iteration history:"), "log has iteration history: {log}");
     assert!(log.contains("EXIT:"), "log has the exit status: {log}");
+}
+
+#[test]
+fn time_limit_routes_auto_to_nlp_and_rejects_forced_convex() {
+    let m = Model::new("time_limited_lp");
+    variable!(m, 0.0 <= x <= 10.0);
+    objective!(m, Min, x);
+
+    let automatic = Pounce
+        .solve(
+            &m,
+            &PounceOptions::default()
+                .time_limit(Duration::from_secs(1))
+                .verbose(true)
+                .print_level(0),
+        )
+        .unwrap();
+    assert!(automatic.has_solution(), "automatic NLP route failed: {:?}", automatic.termination);
+    assert!(
+        automatic.raw_log.as_deref().is_some_and(|log| !log.contains("POUNCE convex route")),
+        "a time-limited automatic solve must use the NLP route"
+    );
+
+    let forced = Pounce
+        .solve(
+            &m,
+            &PounceOptions::default()
+                .solver_selection(PounceSolverSelection::QpIpm)
+                .time_limit(Duration::from_secs(1)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(forced, SolverError::Backend(ref message) if message.contains("cannot honor a time limit")),
+        "unexpected forced-route error: {forced:?}"
+    );
 }
 
 #[test]
@@ -277,10 +319,12 @@ fn verbose_builder_path_logs_exit_status() {
     variable!(m, -10.0 <= y <= 10.0, initial = 1.0);
     objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
-    let mut opts = PounceOptions::default();
+    let mut opts = PounceOptions::default().print_level(0);
     opts.universal.verbose = Some(true);
     let res = Pounce.solve(&m, &opts).unwrap();
     let log = res.raw_log.expect("verbose solve should capture a log");
+    assert!(log.contains("KKT error above row noise:"), "log has noise-aware KKT error: {log}");
+    assert!(log.contains("Iteration history:"), "log has iteration history: {log}");
     assert!(log.contains("EXIT:"), "log has the exit status: {log}");
 }
 
