@@ -90,8 +90,163 @@ pub(crate) fn solve_nlp_since(
 ) -> Result<SolverResult, SolverError> {
     let prep = setup(model, opts)?;
     let oracle = backend::build(model)?;
-    let outcome = backend::run(&oracle, &prep, opts, None)?;
+    let outcome = run_nlp_with_retries(&oracle, &prep, opts, None)?;
     Ok(assemble(prep.sign, outcome, started.elapsed()))
+}
+
+/// Mirror POUNCE's two-rung second opinion for a local-infeasibility verdict.
+/// A retry is promoted only when its own convergence check succeeds.
+pub(crate) fn run_nlp_with_retries(
+    oracle: &backend::Oracle,
+    prep: &Prepared,
+    opts: &PounceOptions,
+    warm: Option<&WarmStart>,
+) -> Result<Outcome, SolverError> {
+    let started = Instant::now();
+    let mut original = backend::run(oracle, prep, opts, warm)?;
+    if original.termination != TerminationStatus::Infeasible {
+        return Ok(original);
+    }
+
+    // These retries change interior-point controls and cannot provide a
+    // meaningful second opinion for the active-set SQP algorithm.
+    if selected_algorithm(opts)? != PounceAlgorithm::InteriorPoint {
+        return Ok(original);
+    }
+
+    let scaling = effective_string(opts, "feral_scaling");
+    if effective_bool(opts, "feral_infeasibility_scaling_retry").unwrap_or(true)
+        && scaling.as_deref() != Some("mc64")
+    {
+        if let Some(retry_opts) = retry_options(opts, started, "feral_scaling", "mc64") {
+            match backend::run(oracle, prep, &retry_opts, None) {
+                Ok(mut retry) if retry.termination == TerminationStatus::LocallyOptimal => {
+                    merge_retry_log(&original, &mut retry, "MC64 scaling", true);
+                    return Ok(retry);
+                }
+                Ok(retry) => merge_retry_log(&retry, &mut original, "MC64 scaling", false),
+                Err(error) => record_retry_error(&mut original, "MC64 scaling", &error),
+            }
+        } else {
+            record_retry_skip(&mut original, "MC64 scaling");
+        }
+    }
+
+    let adaptive = effective_mu_is_adaptive(opts);
+    if effective_bool(opts, "infeasibility_mu_strategy_retry").unwrap_or(true) && !adaptive {
+        if let Some(retry_opts) = retry_options(opts, started, "mu_strategy", "adaptive") {
+            match backend::run(oracle, prep, &retry_opts, None) {
+                Ok(mut retry) if retry.termination == TerminationStatus::LocallyOptimal => {
+                    merge_retry_log(&original, &mut retry, "adaptive mu", true);
+                    return Ok(retry);
+                }
+                Ok(retry) => merge_retry_log(&retry, &mut original, "adaptive mu", false),
+                Err(error) => record_retry_error(&mut original, "adaptive mu", &error),
+            }
+        } else {
+            record_retry_skip(&mut original, "adaptive mu");
+        }
+    }
+    Ok(original)
+}
+
+fn effective_mu_is_adaptive(opts: &PounceOptions) -> bool {
+    let mut adaptive = opts.mu_strategy == Some(crate::options::MuStrategy::Adaptive);
+    for (name, value) in &opts.extra {
+        if name == "mu_strategy"
+            && let PounceOptionValue::Str(value) = value
+        {
+            adaptive = value == "adaptive";
+        }
+    }
+    adaptive
+}
+
+fn retry_options(
+    opts: &PounceOptions,
+    started: Instant,
+    name: &str,
+    value: &str,
+) -> Option<PounceOptions> {
+    let mut retry = opts.clone().set(name, value);
+    if let Some(limit) = opts.universal.time_limit {
+        let remaining = limit.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return None;
+        }
+        retry.universal.time_limit = Some(remaining);
+    }
+    Some(retry)
+}
+
+fn merge_retry_log(source: &Outcome, target: &mut Outcome, label: &str, promoted: bool) {
+    let Some(target_log) = &mut target.raw_log else {
+        return;
+    };
+    let disposition = if promoted { "promoted" } else { "did not converge, original retained" };
+    let mut merged = if promoted {
+        source.raw_log.clone().unwrap_or_default()
+    } else {
+        std::mem::take(target_log)
+    };
+    use std::fmt::Write as _;
+    let _ = writeln!(merged, "POUNCE local-infeasibility second opinion ({label}): {disposition}");
+    if promoted {
+        merged.push_str(target_log);
+    } else if let Some(source_log) = &source.raw_log {
+        merged.push_str(source_log);
+    }
+    *target_log = merged;
+}
+
+fn record_retry_error(original: &mut Outcome, label: &str, error: &SolverError) {
+    let Some(log) = &mut original.raw_log else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        log,
+        "POUNCE local-infeasibility second opinion ({label}) failed: {error}, original retained"
+    );
+}
+
+fn record_retry_skip(original: &mut Outcome, label: &str) {
+    let Some(log) = &mut original.raw_log else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        log,
+        "POUNCE local-infeasibility second opinion ({label}) skipped: time budget exhausted"
+    );
+}
+
+fn effective_bool(opts: &PounceOptions, name: &str) -> Option<bool> {
+    let mut value =
+        opts.bool_opts().iter().filter(|(key, _)| *key == name).map(|(_, v)| *v).next_back();
+    for (key, raw) in &opts.extra {
+        if key == name {
+            value = match raw {
+                PounceOptionValue::Bool(v) => Some(*v),
+                _ => value,
+            };
+        }
+    }
+    value
+}
+
+fn effective_string(opts: &PounceOptions, name: &str) -> Option<String> {
+    let mut value =
+        opts.str_opts().iter().filter(|(key, _)| *key == name).map(|(_, v)| v.clone()).next_back();
+    for (key, raw) in &opts.extra {
+        if key == name {
+            value = match raw {
+                PounceOptionValue::Str(v) => Some(v.clone()),
+                _ => value,
+            };
+        }
+    }
+    value
 }
 
 /// Kind gate, objective declaration check, sign, and bound snapshot.
@@ -376,4 +531,57 @@ pub(crate) fn apply_options(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use crate::options::MuStrategy;
+
+    #[test]
+    fn raw_mu_strategy_has_final_precedence() {
+        let monotone = PounceOptions::default()
+            .mu_strategy(MuStrategy::Adaptive)
+            .set("mu_strategy", "monotone");
+        assert!(!effective_mu_is_adaptive(&monotone));
+
+        let adaptive = PounceOptions::default()
+            .mu_strategy(MuStrategy::Monotone)
+            .set("mu_strategy", "adaptive");
+        assert!(effective_mu_is_adaptive(&adaptive));
+    }
+
+    #[test]
+    fn retries_do_not_start_after_the_shared_budget_expires() {
+        let mut opts = PounceOptions::default();
+        opts.universal.time_limit = Some(Duration::ZERO);
+        assert!(retry_options(&opts, Instant::now(), "mu_strategy", "adaptive").is_none());
+    }
+
+    #[test]
+    fn failed_retry_log_retains_both_attempts_in_order() {
+        let mut original = logged_outcome("original\n");
+        let retry = logged_outcome("retry\n");
+        merge_retry_log(&retry, &mut original, "MC64 scaling", false);
+        assert_eq!(
+            original.raw_log.as_deref(),
+            Some(
+                "original\nPOUNCE local-infeasibility second opinion (MC64 scaling): did not converge, original retained\nretry\n"
+            )
+        );
+    }
+
+    fn logged_outcome(log: &str) -> Outcome {
+        Outcome {
+            termination: TerminationStatus::Infeasible,
+            x: Vec::new(),
+            lambda: Vec::new(),
+            soc_dual: Vec::new(),
+            reduced: None,
+            objective: None,
+            iterations: 0,
+            warm: None,
+            raw_log: Some(log.to_owned()),
+        }
+    }
 }

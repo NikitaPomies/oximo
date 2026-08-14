@@ -8,7 +8,7 @@ use oximo_solver::{Solver, SolverError, SolverResult};
 
 use crate::convex::{self, Route};
 use crate::options::PounceOptions;
-use crate::translate::{WarmStart, assemble, setup};
+use crate::translate::{WarmStart, assemble, run_nlp_with_retries, setup};
 
 #[cfg(feature = "enzyme")]
 use crate::exact as backend;
@@ -84,8 +84,16 @@ impl PouncePersistent {
         model: &Model,
         opts: &PounceOptions,
     ) -> Result<SolverResult, SolverError> {
+        self.solve_nlp_since(model, opts, Instant::now())
+    }
+
+    fn solve_nlp_since(
+        &mut self,
+        model: &Model,
+        opts: &PounceOptions,
+        started: Instant,
+    ) -> Result<SolverResult, SolverError> {
         let prep = setup(model, opts)?;
-        let started = Instant::now();
         let state = match &mut self.state {
             Some(State::Nlp(state)) if backend::try_reuse(&state.oracle, model) => state,
             slot => {
@@ -94,7 +102,7 @@ impl PouncePersistent {
                 state
             }
         };
-        let mut outcome = backend::run(&state.oracle, &prep, opts, state.warm.as_ref())?;
+        let mut outcome = run_nlp_with_retries(&state.oracle, &prep, opts, state.warm.as_ref())?;
         let elapsed = started.elapsed();
         state.warm = outcome.warm.take();
         Ok(assemble(prep.sign, outcome, elapsed))
@@ -137,6 +145,9 @@ impl PouncePersistent {
         } else {
             convex::run(&state.problem, opts, route, state.warm.as_ref())
         };
+        if convex::should_fallback_to_nlp(model, opts, &solution)? {
+            return self.solve_nlp_since(model, opts, started);
+        }
         let elapsed = started.elapsed();
         let mut outcome = convex::outcome(&state.problem, opts, route, &solution);
         state.warm = (route != Route::QpActiveSet && outcome.termination.admits_primal())

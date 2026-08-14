@@ -381,6 +381,14 @@ fn convex_iteration_limit_is_not_retried_as_nlp() {
         cold.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route")),
         "an iteration limit must retain the original convex result"
     );
+
+    let mut persistent = Pounce.persistent();
+    let resident = persistent.solve(&m, &options).unwrap();
+    assert_eq!(resident.termination, TerminationStatus::IterationLimit);
+    assert!(
+        resident.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route")),
+        "persistent solving must use the same fallback policy"
+    );
 }
 
 #[test]
