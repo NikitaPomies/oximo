@@ -230,7 +230,6 @@ pub(crate) struct Problem {
     objective_constant: f64,
 }
 
-#[allow(dead_code)]
 impl Problem {
     pub(crate) fn same_structure(&self, other: &Self) -> bool {
         fn triplets_same(left: &[Triplet], right: &[Triplet]) -> bool {
@@ -544,6 +543,7 @@ pub(crate) fn outcome(
         QpStatus::PrimalInfeasible => TerminationStatus::Infeasible,
         QpStatus::DualInfeasible => TerminationStatus::Unbounded,
         QpStatus::IterationLimit => TerminationStatus::IterationLimit,
+        QpStatus::TimeLimit => TerminationStatus::TimeLimit,
         QpStatus::NumericalFailure => TerminationStatus::NumericError,
     };
     let mut lambda = vec![0.0; problem.maps.len()];
@@ -773,7 +773,6 @@ fn validate_convex_options(opts: &PounceOptions) -> Result<(), SolverError> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub(crate) fn warm_from_solution(route: Route, problem: &Problem, sol: &QpSolution) -> QpWarmStart {
     if route == Route::Socp {
         let (expanded, _) = expand_bounds_for_conic_warm(&problem.qp, &problem.cones);
@@ -795,7 +794,6 @@ pub(crate) fn warm_from_solution(route: Route, problem: &Problem, sol: &QpSoluti
     }
 }
 
-#[allow(dead_code)]
 struct ActiveData {
     n: usize,
     m: usize,
@@ -808,7 +806,6 @@ struct ActiveData {
     x_upper: Vec<f64>,
 }
 
-#[allow(dead_code)]
 impl ActiveData {
     fn from_problem(problem: &QpProblem) -> Self {
         use pounce_rs::qp::{GenTMatrixSpace, SymTMatrixSpace};
@@ -886,13 +883,11 @@ impl ActiveData {
 }
 
 /// Resident native active-set engine plus its previous problem/solution.
-#[allow(dead_code)]
 pub(crate) struct ActivePersistent {
     solver: pounce_rs::qp::ParametricActiveSetSolver,
     previous: Option<(ActiveData, pounce_rs::qp::QpSolution)>,
 }
 
-#[allow(dead_code)]
 impl ActivePersistent {
     pub(crate) fn new() -> Self {
         Self { solver: pounce_rs::qp::ParametricActiveSetSolver::new(backend()), previous: None }
@@ -927,7 +922,6 @@ impl ActivePersistent {
     }
 }
 
-#[allow(dead_code)]
 fn native_active_options(opts: &PounceOptions) -> pounce_rs::qp::QpOptions {
     use pounce_rs::qp::AntiCyclingChoice;
     let mut out = pounce_rs::qp::QpOptions::default();
@@ -964,7 +958,6 @@ fn native_active_options(opts: &PounceOptions) -> pounce_rs::qp::QpOptions {
     out
 }
 
-#[allow(dead_code)]
 fn convert_native_solution(problem: &QpProblem, native: &pounce_rs::qp::QpSolution) -> QpSolution {
     let m_eq = problem.b.len();
     let mut y = vec![0.0; m_eq];
@@ -981,6 +974,7 @@ fn convert_native_solution(problem: &QpProblem, native: &pounce_rs::qp::QpSoluti
         pounce_rs::qp::QpStatus::Infeasible => QpStatus::PrimalInfeasible,
         pounce_rs::qp::QpStatus::Unbounded => QpStatus::DualInfeasible,
         pounce_rs::qp::QpStatus::MaxIter => QpStatus::IterationLimit,
+        pounce_rs::qp::QpStatus::TimeLimit => QpStatus::TimeLimit,
         pounce_rs::qp::QpStatus::NumericalError => QpStatus::NumericalFailure,
     };
     QpSolution {
