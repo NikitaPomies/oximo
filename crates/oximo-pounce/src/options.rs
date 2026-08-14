@@ -371,6 +371,69 @@ impl PounceOptions {
     pub(crate) fn bool_opts(&self) -> &[(&'static str, bool)] {
         &self.bool_opts
     }
+
+    fn effective_value<T>(
+        &self,
+        name: &str,
+        typed: impl Iterator<Item = (&'static str, T)>,
+        from_raw: impl Fn(&PounceOptionValue) -> Option<T>,
+    ) -> Option<T> {
+        let mut value = typed.filter(|(key, _)| *key == name).map(|(_, value)| value).last();
+        for (key, raw) in &self.extra {
+            if key == name {
+                value = from_raw(raw);
+            }
+        }
+        value
+    }
+
+    pub(crate) fn effective_num(&self, name: &str) -> Option<f64> {
+        self.effective_value(name, self.num_opts.iter().map(|&(key, value)| (key, value)), |raw| {
+            match raw {
+                PounceOptionValue::Num(value) => Some(*value),
+                _ => None,
+            }
+        })
+    }
+
+    pub(crate) fn effective_int(&self, name: &str) -> Option<i32> {
+        self.effective_value(name, self.int_opts.iter().map(|&(key, value)| (key, value)), |raw| {
+            match raw {
+                PounceOptionValue::Int(value) => Some(*value),
+                _ => None,
+            }
+        })
+    }
+
+    pub(crate) fn effective_bool(&self, name: &str) -> Option<bool> {
+        self.effective_value(name, self.bool_opts.iter().map(|&(key, value)| (key, value)), |raw| {
+            match raw {
+                PounceOptionValue::Bool(value) => Some(*value),
+                PounceOptionValue::Str(value)
+                    if matches!(value.as_str(), "yes" | "true" | "on") =>
+                {
+                    Some(true)
+                }
+                PounceOptionValue::Str(value)
+                    if matches!(value.as_str(), "no" | "false" | "off") =>
+                {
+                    Some(false)
+                }
+                _ => None,
+            }
+        })
+    }
+
+    pub(crate) fn effective_string(&self, name: &str) -> Option<String> {
+        self.effective_value(
+            name,
+            self.str_opts.iter().map(|(key, value)| (*key, value.clone())),
+            |raw| match raw {
+                PounceOptionValue::Str(value) => Some(value.clone()),
+                _ => None,
+            },
+        )
+    }
 }
 
 impl HasUniversal for PounceOptions {
@@ -487,5 +550,22 @@ mod tests {
             }
             assert!(!algorithm.supports(ModelKind::MILP));
         }
+    }
+
+    #[test]
+    fn wrong_kind_raw_overrides_clear_typed_values() {
+        let options = PounceOptions::default()
+            .qp_tau(0.9)
+            .set("qp_tau", true)
+            .sqp_qp_max_iter(20)
+            .set("sqp_qp_max_iter", "wrong")
+            .qp_presolve(true)
+            .set("qp_presolve", 1.0)
+            .sqp_qp_anti_cycling("bland")
+            .set("sqp_qp_anti_cycling", false);
+        assert_eq!(options.effective_num("qp_tau"), None);
+        assert_eq!(options.effective_int("sqp_qp_max_iter"), None);
+        assert_eq!(options.effective_bool("qp_presolve"), None);
+        assert_eq!(options.effective_string("sqp_qp_anti_cycling"), None);
     }
 }

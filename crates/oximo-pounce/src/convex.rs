@@ -676,54 +676,19 @@ fn presolve_enabled(opts: &PounceOptions) -> bool {
 }
 
 fn num_value(opts: &PounceOptions, sought: &str) -> Option<f64> {
-    let mut out = opts.num_opts().iter().filter(|(n, _)| *n == sought).map(|(_, v)| *v).next_back();
-    for (name, value) in &opts.extra {
-        if name == sought {
-            out = if let PounceOptionValue::Num(v) = value { Some(*v) } else { None };
-        }
-    }
-    out
+    opts.effective_num(sought)
 }
 
 fn int_value(opts: &PounceOptions, sought: &str) -> Option<i32> {
-    let mut out = opts.int_opts().iter().filter(|(n, _)| *n == sought).map(|(_, v)| *v).next_back();
-    for (name, value) in &opts.extra {
-        if name == sought {
-            out = if let PounceOptionValue::Int(v) = value { Some(*v) } else { None };
-        }
-    }
-    out
+    opts.effective_int(sought)
 }
 
 fn bool_value(opts: &PounceOptions, sought: &str) -> Option<bool> {
-    let mut out =
-        opts.bool_opts().iter().filter(|(n, _)| *n == sought).map(|(_, v)| *v).next_back();
-    for (name, value) in &opts.extra {
-        if name == sought {
-            out = match value {
-                PounceOptionValue::Bool(v) => Some(*v),
-                PounceOptionValue::Str(v) if matches!(v.as_str(), "yes" | "true" | "on") => {
-                    Some(true)
-                }
-                PounceOptionValue::Str(v) if matches!(v.as_str(), "no" | "false" | "off") => {
-                    Some(false)
-                }
-                _ => None,
-            };
-        }
-    }
-    out
+    opts.effective_bool(sought)
 }
 
 fn str_value(opts: &PounceOptions, sought: &str) -> Option<String> {
-    let mut out =
-        opts.str_opts().iter().filter(|(n, _)| *n == sought).map(|(_, v)| v.clone()).next_back();
-    for (name, value) in &opts.extra {
-        if name == sought {
-            out = if let PounceOptionValue::Str(v) = value { Some(v.clone()) } else { None };
-        }
-    }
-    out
+    opts.effective_string(sought)
 }
 
 fn validate_convex_options(opts: &PounceOptions) -> Result<(), SolverError> {

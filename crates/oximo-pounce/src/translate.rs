@@ -222,31 +222,11 @@ fn record_retry_skip(original: &mut Outcome, label: &str) {
 }
 
 fn effective_bool(opts: &PounceOptions, name: &str) -> Option<bool> {
-    let mut value =
-        opts.bool_opts().iter().filter(|(key, _)| *key == name).map(|(_, v)| *v).next_back();
-    for (key, raw) in &opts.extra {
-        if key == name {
-            value = match raw {
-                PounceOptionValue::Bool(v) => Some(*v),
-                _ => value,
-            };
-        }
-    }
-    value
+    opts.effective_bool(name)
 }
 
 fn effective_string(opts: &PounceOptions, name: &str) -> Option<String> {
-    let mut value =
-        opts.str_opts().iter().filter(|(key, _)| *key == name).map(|(_, v)| v.clone()).next_back();
-    for (key, raw) in &opts.extra {
-        if key == name {
-            value = match raw {
-                PounceOptionValue::Str(v) => Some(v.clone()),
-                _ => value,
-            };
-        }
-    }
-    value
+    opts.effective_string(name)
 }
 
 /// Kind gate, objective declaration check, sign, and bound snapshot.
