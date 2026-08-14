@@ -5,13 +5,13 @@
 
 use std::time::{Duration, Instant};
 
-use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, VarId};
+use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, SocConstraintId, VarId};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use pounce_rs::ApplicationReturnStatus;
 use pounce_rs::pounce_common::options_list::OptionsList;
 use rustc_hash::FxHashMap;
 
-use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions};
+use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection};
 
 #[cfg(feature = "enzyme")]
 use crate::exact as backend;
@@ -19,7 +19,7 @@ use crate::exact as backend;
 use crate::stable as backend;
 
 /// POUNCE treats bounds at or beyond +-2e19 as infinite.
-const POUNCE_INFINITY: f64 = 2.0e19;
+pub(crate) const POUNCE_INFINITY: f64 = 2.0e19;
 
 /// Bounds and objective sense snapshotted from the model, shared by both
 /// derivative paths.
@@ -40,6 +40,7 @@ pub(crate) struct WarmStart {
     pub z_l: Vec<f64>,
     pub z_u: Vec<f64>,
     pub lambda: Vec<f64>,
+    pub sqp_working: Option<pounce_rs::sqp::WorkingSet>,
 }
 
 /// Backend-agnostic solve outcome, mapped into a [`SolverResult`] by
@@ -51,6 +52,8 @@ pub(crate) struct Outcome {
     pub termination: TerminationStatus,
     pub x: Vec<f64>,
     pub lambda: Vec<f64>,
+    /// Explicit second-order-cone bound multipliers in model order.
+    pub soc_dual: Vec<f64>,
     pub reduced: Option<Vec<f64>>,
     pub objective: Option<f64>,
     pub iterations: u64,
@@ -67,17 +70,172 @@ pub(crate) struct Outcome {
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    let route = crate::convex::route(model, opts)?;
+    if route != crate::convex::Route::Nlp {
+        return crate::convex::solve(model, opts, route);
+    }
+    solve_nlp(model, opts)
+}
+
+pub(crate) fn solve_nlp(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    solve_nlp_since(model, opts, Instant::now())
+}
+
+/// Solve through the NLP route while charging time already spent by an
+/// automatic convex attempt to the reported solve duration.
+pub(crate) fn solve_nlp_since(
+    model: &Model,
+    opts: &PounceOptions,
+    started: Instant,
+) -> Result<SolverResult, SolverError> {
     let prep = setup(model, opts)?;
-    let started = Instant::now();
     let oracle = backend::build(model)?;
-    let outcome = backend::run(&oracle, &prep, opts, None)?;
+    let outcome = run_nlp_with_retries(&oracle, &prep, opts, None)?;
     Ok(assemble(prep.sign, outcome, started.elapsed()))
+}
+
+/// Mirror POUNCE's two-rung second opinion for a local-infeasibility verdict.
+/// A retry is promoted only when its own convergence check succeeds.
+pub(crate) fn run_nlp_with_retries(
+    oracle: &backend::Oracle,
+    prep: &Prepared,
+    opts: &PounceOptions,
+    warm: Option<&WarmStart>,
+) -> Result<Outcome, SolverError> {
+    let started = Instant::now();
+    let mut original = backend::run(oracle, prep, opts, warm)?;
+    if original.termination != TerminationStatus::Infeasible {
+        return Ok(original);
+    }
+
+    // These retries change interior-point controls and cannot provide a
+    // meaningful second opinion for the active-set SQP algorithm.
+    if selected_algorithm(opts)? != PounceAlgorithm::InteriorPoint {
+        return Ok(original);
+    }
+
+    let scaling = effective_string(opts, "feral_scaling");
+    if effective_bool(opts, "feral_infeasibility_scaling_retry").unwrap_or(true)
+        && scaling.as_deref() != Some("mc64")
+    {
+        if let Some(retry_opts) = retry_options(opts, started, "feral_scaling", "mc64") {
+            match backend::run(oracle, prep, &retry_opts, None) {
+                Ok(mut retry) if retry.termination == TerminationStatus::LocallyOptimal => {
+                    merge_retry_log(&original, &mut retry, "MC64 scaling", true);
+                    return Ok(retry);
+                }
+                Ok(retry) => merge_retry_log(&retry, &mut original, "MC64 scaling", false),
+                Err(error) => record_retry_error(&mut original, "MC64 scaling", &error),
+            }
+        } else {
+            record_retry_skip(&mut original, "MC64 scaling");
+        }
+    }
+
+    let adaptive = effective_mu_is_adaptive(opts);
+    if effective_bool(opts, "infeasibility_mu_strategy_retry").unwrap_or(true) && !adaptive {
+        if let Some(retry_opts) = retry_options(opts, started, "mu_strategy", "adaptive") {
+            match backend::run(oracle, prep, &retry_opts, None) {
+                Ok(mut retry) if retry.termination == TerminationStatus::LocallyOptimal => {
+                    merge_retry_log(&original, &mut retry, "adaptive mu", true);
+                    return Ok(retry);
+                }
+                Ok(retry) => merge_retry_log(&retry, &mut original, "adaptive mu", false),
+                Err(error) => record_retry_error(&mut original, "adaptive mu", &error),
+            }
+        } else {
+            record_retry_skip(&mut original, "adaptive mu");
+        }
+    }
+    Ok(original)
+}
+
+fn effective_mu_is_adaptive(opts: &PounceOptions) -> bool {
+    let mut adaptive = opts.mu_strategy == Some(crate::options::MuStrategy::Adaptive);
+    for (name, value) in &opts.extra {
+        if name == "mu_strategy"
+            && let PounceOptionValue::Str(value) = value
+        {
+            adaptive = value == "adaptive";
+        }
+    }
+    adaptive
+}
+
+fn retry_options(
+    opts: &PounceOptions,
+    started: Instant,
+    name: &str,
+    value: &str,
+) -> Option<PounceOptions> {
+    let mut retry = opts.clone().set(name, value);
+    if let Some(limit) = opts.universal.time_limit {
+        let remaining = limit.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return None;
+        }
+        retry.universal.time_limit = Some(remaining);
+    }
+    Some(retry)
+}
+
+fn merge_retry_log(source: &Outcome, target: &mut Outcome, label: &str, promoted: bool) {
+    let Some(target_log) = &mut target.raw_log else {
+        return;
+    };
+    let disposition = if promoted { "promoted" } else { "did not converge, original retained" };
+    let mut merged = if promoted {
+        source.raw_log.clone().unwrap_or_default()
+    } else {
+        std::mem::take(target_log)
+    };
+    use std::fmt::Write as _;
+    let _ = writeln!(merged, "POUNCE local-infeasibility second opinion ({label}): {disposition}");
+    if promoted {
+        merged.push_str(target_log);
+    } else if let Some(source_log) = &source.raw_log {
+        merged.push_str(source_log);
+    }
+    *target_log = merged;
+}
+
+fn record_retry_error(original: &mut Outcome, label: &str, error: &SolverError) {
+    let Some(log) = &mut original.raw_log else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        log,
+        "POUNCE local-infeasibility second opinion ({label}) failed: {error}, original retained"
+    );
+}
+
+fn record_retry_skip(original: &mut Outcome, label: &str) {
+    let Some(log) = &mut original.raw_log else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        log,
+        "POUNCE local-infeasibility second opinion ({label}) skipped: time budget exhausted"
+    );
+}
+
+fn effective_bool(opts: &PounceOptions, name: &str) -> Option<bool> {
+    opts.effective_bool(name)
+}
+
+fn effective_string(opts: &PounceOptions, name: &str) -> Option<String> {
+    opts.effective_string(name)
 }
 
 /// Kind gate, objective declaration check, sign, and bound snapshot.
 pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, SolverError> {
     let kind = model.kind();
-    if !matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::NLP) {
+    if !matches!(
+        kind,
+        ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
+    ) {
         return Err(SolverError::UnsupportedKind(kind));
     }
     validate_algorithm(kind, opts)?;
@@ -113,14 +271,9 @@ pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, Sol
     Ok(Prepared { sign, x_l, x_u, g_l, g_u, x0 })
 }
 
-/// Resolve the backend algorithm after raw options (which apply last).
-///
-/// POUNCE's library exposes only its NLP interior-point and active-set SQP
-/// algorithms. Its specialized convex selectors need the CLI's structural
-/// extraction and cannot be used by `IpoptApplication`.
+/// Resolve the NLP algorithm after raw options (which apply last).
 pub(crate) fn selected_algorithm(opts: &PounceOptions) -> Result<PounceAlgorithm, SolverError> {
     let mut algorithm = opts.algorithm.unwrap_or_default();
-    let mut solver_selection = None;
     for (name, value) in &opts.extra {
         match (name.as_str(), value) {
             ("algorithm", PounceOptionValue::Str(value)) => {
@@ -139,25 +292,30 @@ pub(crate) fn selected_algorithm(opts: &PounceOptions) -> Result<PounceAlgorithm
                     "pounce option `algorithm` must be a string".into(),
                 ));
             }
-            ("solver_selection", PounceOptionValue::Str(value)) => solver_selection = Some(value),
-            ("solver_selection", _) => {
-                return Err(SolverError::Backend(
-                    "pounce option `solver_selection` must be a string".into(),
-                ));
-            }
             _ => {}
         }
     }
-    match solver_selection.map(String::as_str) {
-        Some("qp-active-set") => Ok(PounceAlgorithm::ActiveSetSqp),
-        Some("auto" | "nlp") | None => Ok(algorithm),
-        Some(value @ ("lp-ipm" | "qp-ipm" | "socp")) => Err(SolverError::Backend(format!(
-            "pounce solver_selection `{value}` is only available through POUNCE's CLI; use `algorithm` instead"
-        ))),
-        Some(value) => Err(SolverError::Backend(format!(
-            "pounce solver_selection `{value}` is unsupported by the Rust library"
-        ))),
+    Ok(algorithm)
+}
+
+/// Resolve structural routing after raw options (which apply last).
+pub(crate) fn selected_solver(opts: &PounceOptions) -> Result<PounceSolverSelection, SolverError> {
+    let mut selection = opts.solver_selection.unwrap_or_default();
+    for (name, value) in &opts.extra {
+        if name == "solver_selection" {
+            let PounceOptionValue::Str(value) = value else {
+                return Err(SolverError::Backend(
+                    "pounce option `solver_selection` must be a string".into(),
+                ));
+            };
+            selection = PounceSolverSelection::parse(value).ok_or_else(|| {
+                SolverError::Backend(format!(
+                    "pounce solver_selection `{value}` is unsupported. Use auto, nlp, lp-ipm, qp-ipm, qp-active-set, or socp"
+                ))
+            })?;
+        }
     }
+    Ok(selection)
 }
 
 pub(crate) fn validate_algorithm(
@@ -200,6 +358,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
     let mut solutions = Vec::new();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
     let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
+    let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
 
     if has_point {
         let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
@@ -218,6 +377,12 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
                     .insert(VarId(u32::try_from(i).expect("variable count overflow")), sign * r);
             }
         }
+        for (i, &value) in o.soc_dual.iter().enumerate() {
+            soc_dual.insert(
+                SocConstraintId(u32::try_from(i).expect("SOC constraint count overflow")),
+                value,
+            );
+        }
         solutions.push(SolutionPoint { primal, objective: o.objective.map(|f| sign * f) });
     }
 
@@ -227,7 +392,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
         primal_status,
         solutions,
         dual,
-        soc_dual: FxHashMap::default(),
+        soc_dual,
         reduced_costs,
         best_bound: None,
         gap: None,
@@ -275,6 +440,20 @@ fn set_bool(list: &mut OptionsList, name: &str, v: bool) -> Result<(), SolverErr
     list.set_bool_value(name, v, true, true).map(|_| ()).map_err(|e| opt_error(name, &e))
 }
 
+pub(crate) fn convex_only_option(name: &str) -> bool {
+    matches!(
+        name,
+        "qp_presolve"
+            | "qp_tau"
+            | "qp_tau_max"
+            | "qp_reg"
+            | "qp_infeas_tol"
+            | "qp_hsde"
+            | "qp_equilibrate"
+            | "qp_crossover"
+    )
+}
+
 /// Apply [`PounceOptions`] onto POUNCE's option list (from `IpoptApplication::options_mut()`),
 /// surfacing an invalid name or out-of-range value as a [`SolverError::Backend`].
 /// Both derivative paths apply onto the live application via [`crate::tnlp::run`].
@@ -302,8 +481,13 @@ pub(crate) fn apply_options(
     if let Some(algorithm) = opts.algorithm {
         set_str(list, "algorithm", algorithm.as_str())?;
     }
+    if let Some(selection) = opts.solver_selection {
+        set_str(list, "solver_selection", selection.as_str())?;
+    }
     for &(name, v) in opts.num_opts() {
-        set_num(list, name, v)?;
+        if !convex_only_option(name) {
+            set_num(list, name, v)?;
+        }
     }
     for &(name, v) in opts.int_opts() {
         set_int(list, name, v)?;
@@ -312,9 +496,14 @@ pub(crate) fn apply_options(
         set_str(list, name, v)?;
     }
     for &(name, v) in opts.bool_opts() {
-        set_bool(list, name, v)?;
+        if !convex_only_option(name) {
+            set_bool(list, name, v)?;
+        }
     }
     for (name, value) in &opts.extra {
+        if convex_only_option(name) {
+            continue;
+        }
         match value {
             PounceOptionValue::Num(v) => set_num(list, name, *v)?,
             PounceOptionValue::Int(v) => set_int(list, name, *v)?,
@@ -323,4 +512,158 @@ pub(crate) fn apply_options(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use crate::options::MuStrategy;
+
+    #[test]
+    fn raw_mu_strategy_has_final_precedence() {
+        let monotone = PounceOptions::default()
+            .mu_strategy(MuStrategy::Adaptive)
+            .set("mu_strategy", "monotone");
+        assert!(!effective_mu_is_adaptive(&monotone));
+
+        let adaptive = PounceOptions::default()
+            .mu_strategy(MuStrategy::Monotone)
+            .set("mu_strategy", "adaptive");
+        assert!(effective_mu_is_adaptive(&adaptive));
+    }
+
+    #[test]
+    fn retries_do_not_start_after_the_shared_budget_expires() {
+        let mut opts = PounceOptions::default();
+        opts.universal.time_limit = Some(Duration::ZERO);
+        assert!(retry_options(&opts, Instant::now(), "mu_strategy", "adaptive").is_none());
+    }
+
+    #[test]
+    fn failed_retry_log_retains_both_attempts_in_order() {
+        let mut original = logged_outcome("original\n");
+        let retry = logged_outcome("retry\n");
+        merge_retry_log(&retry, &mut original, "MC64 scaling", false);
+        assert_eq!(
+            original.raw_log.as_deref(),
+            Some(
+                "original\nPOUNCE local-infeasibility second opinion (MC64 scaling): did not converge, original retained\nretry\n"
+            )
+        );
+    }
+
+    #[test]
+    fn promoted_retry_log_retains_both_attempts_in_order() {
+        let original = logged_outcome("original\n");
+        let mut retry = logged_outcome("retry\n");
+        merge_retry_log(&original, &mut retry, "adaptive mu", true);
+        assert_eq!(
+            retry.raw_log.as_deref(),
+            Some(
+                "original\nPOUNCE local-infeasibility second opinion (adaptive mu): promoted\nretry\n"
+            )
+        );
+    }
+
+    #[test]
+    fn retry_diagnostics_explain_errors_and_exhausted_budgets() {
+        let mut error = logged_outcome("original\n");
+        record_retry_error(&mut error, "MC64 scaling", &SolverError::Backend("failed".into()));
+        assert!(error.raw_log.as_deref().is_some_and(|log| {
+            log.contains("(MC64 scaling) failed: backend error: failed, original retained")
+        }));
+
+        let mut skipped = logged_outcome("original\n");
+        record_retry_skip(&mut skipped, "adaptive mu");
+        assert!(
+            skipped
+                .raw_log
+                .as_deref()
+                .is_some_and(|log| log.contains("(adaptive mu) skipped: time budget exhausted"))
+        );
+    }
+
+    #[test]
+    fn raw_route_and_algorithm_options_take_precedence_and_validate_types() {
+        let options = PounceOptions::default()
+            .algorithm(PounceAlgorithm::ActiveSetSqp)
+            .solver_selection(PounceSolverSelection::Nlp)
+            .set("algorithm", "interior-point")
+            .set("solver_selection", "qp-active-set");
+        assert_eq!(selected_algorithm(&options).unwrap(), PounceAlgorithm::InteriorPoint);
+        assert_eq!(selected_solver(&options).unwrap(), PounceSolverSelection::QpActiveSet);
+
+        for options in [
+            PounceOptions::default().set("algorithm", "invalid"),
+            PounceOptions::default().set("algorithm", true),
+            PounceOptions::default().set("solver_selection", "invalid"),
+            PounceOptions::default().set("solver_selection", true),
+        ] {
+            assert!(matches!(
+                selected_algorithm(&options).and_then(|_| selected_solver(&options)),
+                Err(SolverError::Backend(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn retry_controls_use_the_last_well_typed_value() {
+        let options = PounceOptions::default()
+            .feral_infeasibility_scaling_retry(false)
+            .set("feral_infeasibility_scaling_retry", "wrong-type")
+            .set("feral_infeasibility_scaling_retry", true)
+            .feral_scaling("none")
+            .feral_scaling("matching")
+            .set("feral_scaling", false)
+            .set("feral_scaling", "mc64");
+        assert_eq!(effective_bool(&options, "feral_infeasibility_scaling_retry"), Some(true));
+        assert_eq!(effective_string(&options, "feral_scaling").as_deref(), Some("mc64"));
+        assert_eq!(effective_bool(&options, "missing"), None);
+        assert_eq!(effective_string(&options, "missing"), None);
+    }
+
+    #[test]
+    fn initial_guesses_respect_finite_and_one_sided_bounds() {
+        for (actual, expected) in [
+            (initial_guess(-2.0, 4.0), 1.0),
+            (initial_guess(3.0, f64::INFINITY), 3.0),
+            (initial_guess(f64::NEG_INFINITY, -3.0), -3.0),
+            (initial_guess(f64::NEG_INFINITY, f64::INFINITY), 0.0),
+        ] {
+            assert!((actual - expected).abs() <= f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn only_standalone_convex_options_bypass_the_pounce_registry() {
+        for name in [
+            "qp_presolve",
+            "qp_tau",
+            "qp_tau_max",
+            "qp_reg",
+            "qp_infeas_tol",
+            "qp_hsde",
+            "qp_equilibrate",
+            "qp_crossover",
+        ] {
+            assert!(convex_only_option(name), "{name}");
+        }
+        for name in ["solver_selection", "feral_infeasibility_scaling_retry", "sqp_qp_max_iter"] {
+            assert!(!convex_only_option(name), "{name}");
+        }
+    }
+
+    fn logged_outcome(log: &str) -> Outcome {
+        Outcome {
+            termination: TerminationStatus::Infeasible,
+            x: Vec::new(),
+            lambda: Vec::new(),
+            soc_dual: Vec::new(),
+            reduced: None,
+            objective: None,
+            iterations: 0,
+            warm: None,
+            raw_log: Some(log.to_owned()),
+        }
+    }
 }

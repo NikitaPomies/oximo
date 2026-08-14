@@ -16,8 +16,10 @@ use pounce_rs::{
     NlpInfo, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
-use crate::options::PounceOptions;
-use crate::translate::{Outcome, Prepared, WarmStart, apply_options, map_status, set_str};
+use crate::options::{PounceAlgorithm, PounceOptions};
+use crate::translate::{
+    Outcome, Prepared, WarmStart, apply_options, map_status, selected_algorithm, set_str,
+};
 
 /// A derivative source for [`OximoTnlp`].
 ///
@@ -81,19 +83,39 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
         set_str(app.options_mut(), "hessian_approximation", "limited-memory")?;
     }
     apply_options(app.options_mut(), opts, warm.is_some())?;
+    let collect_iterations = opts.universal.verbose == Some(true);
+    let _collector = collect_iterations.then(pounce_rs::collector_scope);
+    if collect_iterations {
+        app.enable_iter_history();
+    }
+    if selected_algorithm(opts)? == PounceAlgorithm::ActiveSetSqp {
+        if let Some(warm) = warm {
+            app.set_sqp_warm_start(pounce_rs::sqp::SqpIterates {
+                x: warm.x.clone(),
+                lambda_g: warm.lambda.clone(),
+                lambda_x: warm.z_l.iter().zip(&warm.z_u).map(|(l, u)| l - u).collect(),
+                working: warm.sqp_working.clone(),
+            });
+        }
+    }
 
     let status = app.optimize_tnlp(Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>);
+    let sqp_working = app.last_sqp_working_set().cloned();
     let termination = map_status(status);
     let stats = app.statistics();
     let iterations = u64::try_from(stats.iteration_count.max(0)).unwrap_or(0);
     let raw_log = (opts.universal.verbose == Some(true)).then(|| format_raw_log(&stats, status));
 
+    if let Some(captured) = &mut tnlp.borrow_mut().captured {
+        captured.warm.sqp_working = sqp_working;
+    }
     let t = tnlp.borrow();
     Ok(match &t.captured {
         Some(c) => Outcome {
             termination,
             x: c.warm.x.clone(),
             lambda: c.warm.lambda.clone(),
+            soc_dual: Vec::new(),
             reduced: Some(c.reduced.clone()),
             objective: Some(c.obj),
             iterations,
@@ -104,6 +126,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
             termination,
             x: Vec::new(),
             lambda: Vec::new(),
+            soc_dual: Vec::new(),
             reduced: None,
             objective: None,
             iterations,
@@ -115,6 +138,10 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
 
 /// The Ipopt-style end-of-solve report off the application's statistics
 /// (values are in POUNCE's minimization sense).
+#[expect(
+    clippy::too_many_lines,
+    reason = "the backend log intentionally mirrors POUNCE's complete end-of-solve report"
+)]
 pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnStatus) -> String {
     let mut log = String::new();
     let _ = writeln!(log, "Number of Iterations....: {}", stats.iteration_count);
@@ -145,6 +172,8 @@ pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnS
         "Overall NLP error.......: {:24.16e} {:24.16e}",
         stats.final_kkt_error, stats.final_unscaled_kkt_error
     );
+    let _ =
+        writeln!(log, "KKT error above row noise: {:24.16e}", stats.final_kkt_error_above_noise);
     let _ = writeln!(log);
     let _ = writeln!(
         log,
@@ -180,6 +209,30 @@ pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnS
             stats.restoration_inner_iters,
             stats.restoration_wall_secs
         );
+    }
+    if stats.sqp_qp_solves > 0 {
+        let _ = writeln!(
+            log,
+            "SQP QP solves / working-set changes                   = {} / {}",
+            stats.sqp_qp_solves, stats.sqp_qp_working_set_changes
+        );
+    }
+    if !stats.iterations.is_empty() {
+        let _ = writeln!(log, "\nIteration history:");
+        for row in &stats.iterations {
+            let _ = writeln!(
+                log,
+                "iter={} obj={:.9e} inf_pr={:.3e} inf_du={:.3e} mu={:.3e} alpha_pr={:.3e} alpha_du={:.3e} resto={}",
+                row.iter,
+                row.objective,
+                row.inf_pr,
+                row.inf_du,
+                row.mu,
+                row.alpha_primal,
+                row.alpha_dual,
+                row.alpha_primal_char == 'r'
+            );
+        }
     }
     let _ = writeln!(
         log,
@@ -331,6 +384,7 @@ impl<O: DerivativeOracle> TNLP for OximoTnlp<O> {
                 z_l: sol.z_l.to_vec(),
                 z_u: sol.z_u.to_vec(),
                 lambda: sol.lambda.to_vec(),
+                sqp_working: None,
             },
             reduced,
             obj: sol.obj_value,

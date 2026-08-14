@@ -2,9 +2,11 @@
 //! These run on stable Rust (the default finite-difference path).
 //! With `--features enzyme` the same models are solved with exact derivatives.
 
+use std::time::Duration;
+
 use oximo_core::prelude::*;
-use oximo_pounce::{MuStrategy, Pounce, PounceAlgorithm, PounceOptions};
-use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus};
+use oximo_pounce::{MuStrategy, Pounce, PounceAlgorithm, PounceOptions, PounceSolverSelection};
+use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus, UniversalOptionsExt};
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
     assert!((got - want).abs() < tol, "{what}: got {got}, want {want}");
@@ -257,17 +259,57 @@ fn verbose_captures_raw_log() {
     variable!(m, -10.0 <= x <= 10.0, initial = -1.2);
     objective!(m, Min, (x - 2.0).powi(2));
 
-    let quiet = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+    let quiet = Pounce
+        .solve(&m, &PounceOptions::default().solver_selection(PounceSolverSelection::Nlp))
+        .unwrap();
     assert!(quiet.raw_log.is_none(), "no log capture without verbose");
 
-    let mut opts = PounceOptions::default();
+    let mut opts =
+        PounceOptions::default().solver_selection(PounceSolverSelection::Nlp).print_level(0);
     opts.universal.verbose = Some(true);
     let res = Pounce.solve(&m, &opts).unwrap();
     assert!(res.iterations > 0, "TNLP solve reports iterations");
     let log = res.raw_log.expect("verbose solve should capture a log");
     assert!(log.contains("Number of Iterations....:"), "log has the summary: {log}");
     assert!(log.contains("objective function evaluations"), "log has eval counts: {log}");
+    assert!(log.contains("KKT error above row noise:"), "log has noise-aware KKT error: {log}");
+    assert!(log.contains("Iteration history:"), "log has iteration history: {log}");
     assert!(log.contains("EXIT:"), "log has the exit status: {log}");
+}
+
+#[test]
+fn time_limit_routes_auto_to_nlp_and_rejects_forced_convex() {
+    let m = Model::new("time_limited_lp");
+    variable!(m, 0.0 <= x <= 10.0);
+    objective!(m, Min, x);
+
+    let automatic = Pounce
+        .solve(
+            &m,
+            &PounceOptions::default()
+                .time_limit(Duration::from_secs(1))
+                .verbose(true)
+                .print_level(0),
+        )
+        .unwrap();
+    assert!(automatic.has_solution(), "automatic NLP route failed: {:?}", automatic.termination);
+    assert!(
+        automatic.raw_log.as_deref().is_some_and(|log| !log.contains("POUNCE convex route")),
+        "a time-limited automatic solve must use the NLP route"
+    );
+
+    let forced = Pounce
+        .solve(
+            &m,
+            &PounceOptions::default()
+                .solver_selection(PounceSolverSelection::QpIpm)
+                .time_limit(Duration::from_secs(1)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(forced, SolverError::Backend(ref message) if message.contains("cannot honor a time limit")),
+        "unexpected forced-route error: {forced:?}"
+    );
 }
 
 #[test]
@@ -277,10 +319,12 @@ fn verbose_builder_path_logs_exit_status() {
     variable!(m, -10.0 <= y <= 10.0, initial = 1.0);
     objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
-    let mut opts = PounceOptions::default();
+    let mut opts = PounceOptions::default().print_level(0);
     opts.universal.verbose = Some(true);
     let res = Pounce.solve(&m, &opts).unwrap();
     let log = res.raw_log.expect("verbose solve should capture a log");
+    assert!(log.contains("KKT error above row noise:"), "log has noise-aware KKT error: {log}");
+    assert!(log.contains("Iteration history:"), "log has iteration history: {log}");
     assert!(log.contains("EXIT:"), "log has the exit status: {log}");
 }
 
@@ -301,14 +345,183 @@ fn active_set_sqp_solves_a_qp() {
 }
 
 #[test]
-fn cli_only_algorithm_selectors_are_rejected() {
-    let m = Model::new("cli_only_selector");
+fn active_set_sqp_does_not_run_interior_point_infeasibility_retries() {
+    let m = Model::new("active_set_infeasible");
+    variable!(m, -2.0 <= x <= 2.0, initial = 0.0);
+    constraint!(m, impossible, x.powi(2) <= -1.0);
+    objective!(m, Min, x);
+
+    let options = PounceOptions::default()
+        .algorithm(PounceAlgorithm::ActiveSetSqp)
+        .presolve(false)
+        .print_level(0)
+        .verbose(true);
+    let result = Pounce.solve(&m, &options).unwrap();
+    assert_eq!(
+        result.termination,
+        TerminationStatus::Infeasible,
+        "{}",
+        result.raw_log.as_deref().unwrap_or("no log")
+    );
+    assert!(
+        result
+            .raw_log
+            .as_deref()
+            .is_some_and(|log| !log.contains("local-infeasibility second opinion")),
+        "interior-point retry controls must not be applied to active-set SQP"
+    );
+}
+
+#[test]
+fn convex_algorithm_selectors_are_available() {
+    let m = Model::new("convex_selector");
     variable!(m, x >= 0.0);
     objective!(m, Min, x);
 
-    let err =
-        Pounce.solve(&m, &PounceOptions::default().set("solver_selection", "qp-ipm")).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(message) if message.contains("CLI")));
+    for (selection, route) in [
+        (PounceSolverSelection::LpIpm, "QpIpm"),
+        (PounceSolverSelection::QpIpm, "QpIpm"),
+        (PounceSolverSelection::QpActiveSet, "QpActiveSet"),
+        (PounceSolverSelection::Socp, "Socp"),
+    ] {
+        let result = Pounce
+            .solve(&m, &PounceOptions::default().solver_selection(selection).verbose(true))
+            .unwrap();
+        assert!(result.has_solution(), "{selection:?}: {:?}", result.termination);
+        assert!(
+            result
+                .raw_log
+                .as_deref()
+                .is_some_and(|log| log.contains(&format!("POUNCE convex route: {route}"))),
+            "{selection:?} did not use the expected {route} engine"
+        );
+    }
+}
+
+#[test]
+fn automatic_convexity_respects_objective_sense() {
+    let concave_max = Model::new("concave_max");
+    variable!(concave_max, -10.0 <= x <= 10.0);
+    objective!(concave_max, Max, 4.0 * x - x.powi(2));
+    let result = Pounce.solve(&concave_max, &PounceOptions::default().verbose(true)).unwrap();
+    assert_close(result.value_of(x).unwrap(), 2.0, 1e-5, "concave maximize x");
+    assert!(
+        result.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route: QpIpm")),
+        "automatic concave-max normalization did not use the convex QP engine"
+    );
+
+    let convex_max = Model::new("convex_max");
+    variable!(convex_max, -1.0 <= y <= 1.0, initial = 0.2);
+    objective!(convex_max, Max, y.powi(2));
+    let forced = Pounce
+        .solve(
+            &convex_max,
+            &PounceOptions::default().solver_selection(PounceSolverSelection::QpIpm),
+        )
+        .unwrap_err();
+    assert!(matches!(forced, SolverError::Backend(message) if message.contains("proven-convex")));
+    let automatic = Pounce.solve(&convex_max, &PounceOptions::default()).unwrap();
+    assert!(automatic.has_solution());
+}
+
+#[test]
+fn convex_iteration_limit_is_not_retried_as_nlp() {
+    let m = Model::new("limited_lp");
+    variable!(m, 0.0 <= x <= 10.0);
+    objective!(m, Min, x);
+
+    let options = PounceOptions::default().max_iter(0).qp_presolve(false).verbose(true);
+    let cold = Pounce.solve(&m, &options).unwrap();
+    assert_eq!(cold.termination, TerminationStatus::IterationLimit);
+    assert!(
+        cold.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route")),
+        "an iteration limit must retain the original convex result"
+    );
+
+    let mut persistent = Pounce.persistent();
+    let resident = persistent.solve(&m, &options).unwrap();
+    assert_eq!(resident.termination, TerminationStatus::IterationLimit);
+    assert!(
+        resident.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route")),
+        "persistent solving must use the same fallback policy"
+    );
+}
+
+#[test]
+fn convex_objective_constants_survive_sense_normalization() {
+    let min_model = Model::new("constant_min");
+    variable!(min_model, -5.0 <= x <= 5.0);
+    objective!(min_model, Min, (x - 2.0).powi(2) + 7.0);
+    let min_result = Pounce.solve(&min_model, &PounceOptions::default()).unwrap();
+    assert_close(min_result.objective().unwrap(), 7.0, 1e-6, "minimum constant");
+
+    let max_model = Model::new("constant_max");
+    variable!(max_model, -5.0 <= y <= 5.0);
+    objective!(max_model, Max, 11.0 - (y + 1.0).powi(2));
+    let max_result = Pounce.solve(&max_model, &PounceOptions::default()).unwrap();
+    assert_close(max_result.objective().unwrap(), 11.0, 1e-6, "maximum constant");
+}
+
+#[test]
+fn explicit_soc_routes_to_conic_ipm_and_reports_dual() {
+    let m = Model::new("soc");
+    variable!(m, -2.0 <= x <= 2.0);
+    variable!(m, -2.0 <= y <= 2.0);
+    variable!(m, 0.0 <= t <= 2.0);
+    let cone = m.add_soc_constraint("disk", [x, y], t);
+    constraint!(m, radius, t == 1.0);
+    objective!(m, Max, x);
+
+    let result = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+    assert!(result.has_solution(), "{:?}", result.termination);
+    assert_close(result.value_of(x).unwrap(), 1.0, 1e-5, "soc x");
+    assert!(result.soc_dual_of(cone).is_some());
+}
+
+#[test]
+fn persistent_convex_ipm_and_active_set_follow_parameter_sweeps() {
+    let m = Model::new("convex_sweep");
+    param!(m, target = 1.0);
+    variable!(m, -5.0 <= x <= 5.0);
+    objective!(m, Min, x.powi(2) - 2.0 * target * x);
+
+    for selection in [PounceSolverSelection::Auto, PounceSolverSelection::QpActiveSet] {
+        let options = PounceOptions::default().solver_selection(selection);
+        let mut persistent = Pounce.persistent();
+        for value in [1.0, -2.0, 0.5, 3.0] {
+            target.set_param_value(value);
+            let warm = persistent.solve(&m, &options).unwrap();
+            let cold = Pounce.solve(&m, &options).unwrap();
+            assert!(warm.has_solution(), "{selection:?}, target={value}");
+            assert_close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap(), 1e-6, "x");
+        }
+    }
+}
+
+#[test]
+fn persistent_conic_ipm_reuses_bound_expanded_warm_start() {
+    let m = Model::new("soc_sweep");
+    param!(m, weight = 1.0);
+    variable!(m, -2.0 <= x <= 0.5);
+    variable!(m, -2.0 <= y <= 2.0);
+    variable!(m, 0.0 <= t <= 2.0);
+    m.add_soc_constraint("disk", [x, y], t);
+    constraint!(m, radius, t == 1.0);
+    objective!(m, Max, weight * x + y);
+
+    let mut persistent = Pounce.persistent();
+    for value in [1.0, 2.0, 0.5] {
+        weight.set_param_value(value);
+        let warm = persistent.solve(&m, &PounceOptions::default()).unwrap();
+        let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+        assert!(warm.has_solution(), "weight={value}: {:?}", warm.termination);
+        assert_close(warm.objective().unwrap(), cold.objective().unwrap(), 1e-5, "objective");
+        assert_eq!(warm.reduced_costs.len(), 3);
+        for variable in [x, y, t] {
+            let id = variable.var_id().unwrap();
+            assert_close(warm.reduced_costs[&id], cold.reduced_costs[&id], 1e-4, "reduced cost");
+        }
+    }
 }
 
 #[test]
@@ -347,4 +560,180 @@ fn persistent_sweep_reclassifies_nonlinear_objective() {
         assert!(close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap()), "w {wv}: x");
         assert!(close(warm.value_of(y).unwrap(), cold.value_of(y).unwrap()), "w {wv}: y");
     }
+}
+
+#[test]
+fn public_solver_metadata_matches_supported_model_kinds() {
+    assert_eq!(Pounce.name(), "pounce");
+    for kind in [ModelKind::LP, ModelKind::QP, ModelKind::QCP, ModelKind::SOCP, ModelKind::NLP] {
+        assert!(Pounce.supports(kind), "{kind:?}");
+    }
+    assert!(!Pounce.supports(ModelKind::MILP));
+
+    let persistent = Pounce.persistent();
+    assert_eq!(persistent.name(), "pounce");
+    assert!(persistent.supports(ModelKind::SOCP));
+    assert!(!persistent.supports(ModelKind::MINLP));
+    assert!(format!("{persistent:?}").contains("resident: false"));
+}
+
+#[test]
+fn forced_routes_reject_incompatible_models() {
+    let qp = Model::new("not_an_lp");
+    variable!(qp, -2.0 <= x <= 2.0);
+    objective!(qp, Min, x.powi(2));
+    let error = Pounce
+        .solve(&qp, &PounceOptions::default().solver_selection(PounceSolverSelection::LpIpm))
+        .unwrap_err();
+    assert!(
+        matches!(error, SolverError::Backend(message) if message.contains("anything other than an LP"))
+    );
+
+    let nlp = Model::new("not_convex");
+    variable!(nlp, -2.0 <= y <= 2.0, initial = 0.5);
+    objective!(nlp, Min, y.powi(3));
+    for selection in [PounceSolverSelection::QpActiveSet, PounceSolverSelection::Socp] {
+        let error =
+            Pounce.solve(&nlp, &PounceOptions::default().solver_selection(selection)).unwrap_err();
+        assert!(matches!(error, SolverError::Backend(_)), "{selection:?}: {error:?}");
+    }
+
+    let soc = Model::new("soc_is_not_nlp");
+    variable!(soc, sx);
+    variable!(soc, st >= 0.0);
+    soc.add_soc_constraint("cone", [sx], st);
+    objective!(soc, Min, st);
+    for options in [
+        PounceOptions::default().solver_selection(PounceSolverSelection::Nlp),
+        PounceOptions::default().algorithm(PounceAlgorithm::ActiveSetSqp),
+        PounceOptions::default().time_limit(Duration::from_secs(1)),
+    ] {
+        let error = Pounce.solve(&soc, &options).unwrap_err();
+        assert!(matches!(error, SolverError::Backend(_)), "{error:?}");
+    }
+}
+
+#[test]
+fn coupled_quadratic_hessians_are_certified_by_inertia() {
+    let convex = Model::new("coupled_convex");
+    variable!(convex, -5.0 <= x <= 5.0);
+    variable!(convex, -5.0 <= y <= 5.0);
+    objective!(convex, Min, (x + y).powi(2) + (x - 1.0).powi(2));
+    let result = Pounce
+        .solve(
+            &convex,
+            &PounceOptions::default().solver_selection(PounceSolverSelection::QpIpm).verbose(true),
+        )
+        .unwrap();
+    assert!(result.has_solution(), "{:?}", result.termination);
+    assert!(result.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route")));
+
+    let indefinite = Model::new("coupled_indefinite");
+    variable!(indefinite, -1.0 <= u <= 1.0);
+    variable!(indefinite, -1.0 <= v <= 1.0);
+    objective!(indefinite, Min, u * v);
+    let error = Pounce
+        .solve(
+            &indefinite,
+            &PounceOptions::default().solver_selection(PounceSolverSelection::QpIpm),
+        )
+        .unwrap_err();
+    assert!(matches!(error, SolverError::Backend(message) if message.contains("proven-convex")));
+}
+
+#[test]
+fn detected_socp_routes_to_conic_ipm() {
+    let m = Model::new("detected_socp");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    constraint!(m, fix_x, x == 3.0);
+    constraint!(m, fix_y, y == 4.0);
+    constraint!(m, cone, x.powi(2) + y.powi(2) <= t.powi(2));
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let result = Pounce.solve(&m, &PounceOptions::default().qp_presolve(false)).unwrap();
+    assert!(result.has_solution(), "{:?}", result.termination);
+    assert_close(result.value_of(t).unwrap(), 5.0, 1e-5, "t");
+    assert_close(
+        result.dual_of(m.constraint_id("cone").unwrap()).unwrap(),
+        -1.0,
+        1e-5,
+        "cone dual",
+    );
+}
+
+#[test]
+fn ranged_linear_constraint_maps_both_sides_and_dual() {
+    let m = Model::new("ranged_lp");
+    variable!(m, x >= 0.0);
+    variable!(m, y >= 0.0);
+    constraint!(m, band, 1.0 <= x + y <= 3.0);
+    objective!(m, Max, 3.0 * x + y + 2.0);
+
+    let result = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+    assert_close(result.value_of(x).unwrap(), 3.0, 1e-5, "x");
+    assert_close(result.value_of(y).unwrap(), 0.0, 1e-5, "y");
+    assert_close(result.objective().unwrap(), 11.0, 1e-5, "objective");
+    assert_close(result.dual_of(m.constraint_id("band").unwrap()).unwrap(), 3.0, 1e-5, "band dual");
+}
+
+#[test]
+fn convex_options_validate_and_apply_to_each_qp_engine() {
+    let m = Model::new("convex_options");
+    variable!(m, -5.0 <= x <= 5.0);
+    objective!(m, Min, (x - 2.0).powi(2));
+
+    let ipm = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::QpIpm)
+        .qp_presolve(true)
+        .set("qp_presolve", false)
+        .qp_tau(0.9)
+        .qp_tau_max(0.95)
+        .qp_reg(1e-9)
+        .qp_infeas_tol(1e-7)
+        .qp_hsde(false)
+        .qp_equilibrate(false)
+        .qp_crossover(false);
+    assert!(Pounce.solve(&m, &ipm).unwrap().has_solution());
+
+    let active = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::QpActiveSet)
+        .sqp_qp_max_iter(100)
+        .sqp_qp_feas_tol(1e-8)
+        .sqp_qp_opt_tol(1e-8)
+        .sqp_qp_elastic_gamma(1e4)
+        .sqp_qp_use_schur_updates(false)
+        .sqp_qp_use_homotopy(false)
+        .sqp_qp_max_schur_updates_before_refactor(2)
+        .sqp_qp_anti_cycling("bland");
+    assert!(Pounce.solve(&m, &active).unwrap().has_solution());
+    assert!(Pounce.persistent().solve(&m, &active).unwrap().has_solution());
+
+    for invalid in [
+        PounceOptions::default().set("qp_tau", "not-a-number"),
+        PounceOptions::default().qp_tau(1.0),
+        PounceOptions::default().qp_tau(0.9).qp_tau_max(0.8),
+        PounceOptions::default().sqp_qp_anti_cycling("invalid"),
+    ] {
+        let error =
+            Pounce.solve(&m, &invalid.solver_selection(PounceSolverSelection::QpIpm)).unwrap_err();
+        assert!(matches!(error, SolverError::Backend(_)), "{error:?}");
+    }
+}
+
+#[test]
+fn persistent_error_discards_resident_state() {
+    let m = Model::new("clear_state");
+    variable!(m, 0.0 <= x <= 5.0);
+    objective!(m, Min, (x - 2.0).powi(2));
+
+    let mut solver = Pounce.persistent();
+    assert!(solver.solve(&m, &PounceOptions::default()).unwrap().has_solution());
+    let error =
+        solver.solve(&m, &PounceOptions::default().set("not_a_real_option", true)).unwrap_err();
+    assert!(matches!(error, SolverError::Backend(_)));
+    assert!(format!("{solver:?}").contains("resident: false"));
+    assert!(solver.solve(&m, &PounceOptions::default()).unwrap().has_solution());
 }

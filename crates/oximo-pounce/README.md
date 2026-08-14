@@ -1,7 +1,8 @@
 # oximo-pounce
 
 A [POUNCE](https://github.com/jkitchin/pounce) backend for oximo. POUNCE is a
-pure-Rust port of IPOPT, so this backend solves continuous LP/QP/QCP/NLP models.
+pure-Rust optimization suite. This backend uses its convex LP/QP/conic engines
+and its IPOPT-based general NLP engines.
 
 ## Derivatives
 
@@ -31,20 +32,22 @@ let res = Pounce.solve(&model, &Default::default())?;
 ## Options
 
 `PounceOptions` has dedicated setters for the common controls (`tol`, `max_iter`,
-`print_level`, `mu_strategy`) plus one typed builder method per option in POUNCE's
+`print_level`, `mu_strategy`, `solver_selection`) plus typed builder methods for POUNCE's
 [documented option reference](https://kitchingroup.cheme.cmu.edu/pounce/options.html)
 (barrier-µ strategy, quality-function oracle, L1 penalty-barrier, NLP
-presolve/FBBT/auxiliary preprocessing, and FERAL backend tuning).
+presolve/FBBT/auxiliary preprocessing, FERAL backend tuning, the
+convergence/restoration controls, convex-IPM controls, and active-set QP tuning).
 Each method is named exactly like the POUNCE option:
 
 ```rust,ignore
-use oximo_pounce::{MuStrategy, PounceOptions, Pounce};
+use oximo_pounce::{MuStrategy, PounceOptions, Pounce, PounceSolverSelection};
 use oximo_solver::Solver;
 
 let opts = PounceOptions::default()
     .tol(1e-8)
     .mu_strategy(MuStrategy::Adaptive)
     .mu_oracle("probing")
+    .solver_selection(PounceSolverSelection::Auto)
     .presolve(true)
     .linear_solver("feral");
 
@@ -54,7 +57,7 @@ let opts = opts.set("acceptable_tol", 1e-5);
 let res = Pounce.solve(&model, &opts)?;
 ```
 
-A few options are managed by this backend and should not be set by hand:
+A few NLP options are managed by this backend and should not be set by hand:
 `print_level` (via `verbose`/the `print_level` setter), `max_cpu_time` (via `time_limit`),
 `warm_start_init_point` (via the persistent handle), and `hessian_approximation`
 (set to `limited-memory` only when the model has a nonlinear function and the
@@ -62,14 +65,24 @@ A few options are managed by this backend and should not be set by hand:
 
 ## Solver type/routing
 
-`PounceOptions::algorithm` selects either the default IPOPT-lineage
-`PounceAlgorithm::InteriorPoint` method or `PounceAlgorithm::ActiveSetSqp`.
-Both are valid for every continuous oximo kind POUNCE accepts: LP, QP, QCP,
-and NLP. The latter is a general NLP method despite solving QP subproblems.
+`PounceSolverSelection::Auto` is the default. It normalizes the objective
+sense, certifies a quadratic Hessian as positive semidefinite using POUNCE's
+FERAL inertia interface, and routes only a proved-convex model:
 
-POUNCE's `lp-ipm`, `qp-ipm`, and `socp` selectors rely on its command-line
-driver's structural extraction and are not available from `pounce-rs`'s
-`IpoptApplication`.
+- LP and convex QP use the convex IPM.
+- SOCP with a convex objective uses the conic IPM. Both explicit oximo cones
+  and recognized quadratic SOC forms are translated.
+- QCP, indefinite QP, and general NLP use the TNLP/builder path.
+
+An inconclusive convexity test always falls back to NLP. If an automatic LP or
+detected-SOCP convex solve ends in a numerical failure, it receives one NLP
+attempt.
+Forced routes never change engines: `LpIpm`, `QpIpm`, `QpActiveSet`, and
+`Socp` either run that engine or return a compatibility error. `Nlp` always
+selects the general path.
+
+The standalone convex engines currently expose no time-limit hook. With a time
+limit, `Auto` uses NLP.
 
 ## Licensing
 

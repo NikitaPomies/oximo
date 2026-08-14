@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod convex;
 mod options;
 mod persistent;
 mod tnlp;
@@ -17,11 +18,15 @@ mod stable;
 #[doc(hidden)]
 pub use hybrid::benchmark_support;
 
-pub use options::{MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions};
+pub use options::{
+    MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection,
+};
 pub use persistent::PouncePersistent;
 
-/// The POUNCE interior-point backend: a pure-Rust IPOPT port.
-/// Solves continuous LP/QP/QCP/NLP models.
+/// The POUNCE backend:
+/// specialized convex LP/QP/SOCP engines with a general IPOPT-lineage
+/// QCP/NLP fallback.
+///
 /// On stable Rust an all-linear/quadratic model gets exact analytic
 /// derivatives (including the Hessian).
 /// A model with nonlinear functions is handed to POUNCE's builder, which
@@ -39,7 +44,10 @@ impl oximo_solver::Solver for Pounce {
 
     fn supports(&self, kind: oximo_core::ModelKind) -> bool {
         use oximo_core::ModelKind;
-        matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::NLP)
+        matches!(
+            kind,
+            ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
+        )
     }
 
     fn solve(
