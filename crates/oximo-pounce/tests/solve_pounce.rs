@@ -378,15 +378,23 @@ fn convex_algorithm_selectors_are_available() {
     variable!(m, x >= 0.0);
     objective!(m, Min, x);
 
-    for selection in [
-        PounceSolverSelection::LpIpm,
-        PounceSolverSelection::QpIpm,
-        PounceSolverSelection::QpActiveSet,
-        PounceSolverSelection::Socp,
+    for (selection, route) in [
+        (PounceSolverSelection::LpIpm, "QpIpm"),
+        (PounceSolverSelection::QpIpm, "QpIpm"),
+        (PounceSolverSelection::QpActiveSet, "QpActiveSet"),
+        (PounceSolverSelection::Socp, "Socp"),
     ] {
-        let result =
-            Pounce.solve(&m, &PounceOptions::default().solver_selection(selection)).unwrap();
+        let result = Pounce
+            .solve(&m, &PounceOptions::default().solver_selection(selection).verbose(true))
+            .unwrap();
         assert!(result.has_solution(), "{selection:?}: {:?}", result.termination);
+        assert!(
+            result
+                .raw_log
+                .as_deref()
+                .is_some_and(|log| log.contains(&format!("POUNCE convex route: {route}"))),
+            "{selection:?} did not use the expected {route} engine"
+        );
     }
 }
 
@@ -395,8 +403,12 @@ fn automatic_convexity_respects_objective_sense() {
     let concave_max = Model::new("concave_max");
     variable!(concave_max, -10.0 <= x <= 10.0);
     objective!(concave_max, Max, 4.0 * x - x.powi(2));
-    let result = Pounce.solve(&concave_max, &PounceOptions::default()).unwrap();
+    let result = Pounce.solve(&concave_max, &PounceOptions::default().verbose(true)).unwrap();
     assert_close(result.value_of(x).unwrap(), 2.0, 1e-5, "concave maximize x");
+    assert!(
+        result.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route: QpIpm")),
+        "automatic concave-max normalization did not use the convex QP engine"
+    );
 
     let convex_max = Model::new("convex_max");
     variable!(convex_max, -1.0 <= y <= 1.0, initial = 0.2);
