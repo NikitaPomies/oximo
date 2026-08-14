@@ -16,7 +16,8 @@ use pounce_rs::linsol::{FeralSolverInterface, SparseSymLinearSolverInterface, ba
 
 use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection};
 use crate::translate::{
-    Outcome, apply_options, assemble, selected_algorithm, selected_solver, solve_nlp_since,
+    Outcome, POUNCE_INFINITY, apply_options, assemble, selected_algorithm, selected_solver,
+    solve_nlp_since,
 };
 
 const PSD_TOL: f64 = 1e-9;
@@ -867,7 +868,7 @@ impl ActiveData {
         );
         let mut lower = problem.b.clone();
         let mut upper = problem.b.clone();
-        lower.extend(std::iter::repeat_n(-1e20, problem.h.len()));
+        lower.extend(std::iter::repeat_n(-POUNCE_INFINITY, problem.h.len()));
         upper.extend_from_slice(&problem.h);
         Self {
             n: problem.n,
@@ -877,8 +878,8 @@ impl ActiveData {
             matrix,
             lower,
             upper,
-            x_lower: problem.lb.iter().map(|value| value.max(-1e20)).collect(),
-            x_upper: problem.ub.iter().map(|value| value.min(1e20)).collect(),
+            x_lower: problem.lb.iter().map(|value| value.max(-POUNCE_INFINITY)).collect(),
+            x_upper: problem.ub.iter().map(|value| value.min(POUNCE_INFINITY)).collect(),
         }
     }
 

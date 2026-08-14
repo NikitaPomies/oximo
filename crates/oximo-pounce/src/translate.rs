@@ -19,7 +19,7 @@ use crate::exact as backend;
 use crate::stable as backend;
 
 /// POUNCE treats bounds at or beyond +-2e19 as infinite.
-const POUNCE_INFINITY: f64 = 2.0e19;
+pub(crate) const POUNCE_INFINITY: f64 = 2.0e19;
 
 /// Bounds and objective sense snapshotted from the model, shared by both
 /// derivative paths.
