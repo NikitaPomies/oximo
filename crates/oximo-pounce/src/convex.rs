@@ -543,7 +543,6 @@ pub(crate) fn outcome(
         QpStatus::PrimalInfeasible => TerminationStatus::Infeasible,
         QpStatus::DualInfeasible => TerminationStatus::Unbounded,
         QpStatus::IterationLimit => TerminationStatus::IterationLimit,
-        QpStatus::TimeLimit => TerminationStatus::TimeLimit,
         QpStatus::NumericalFailure => TerminationStatus::NumericError,
     };
     let mut lambda = vec![0.0; problem.maps.len()];
@@ -974,7 +973,6 @@ fn convert_native_solution(problem: &QpProblem, native: &pounce_rs::qp::QpSoluti
         pounce_rs::qp::QpStatus::Infeasible => QpStatus::PrimalInfeasible,
         pounce_rs::qp::QpStatus::Unbounded => QpStatus::DualInfeasible,
         pounce_rs::qp::QpStatus::MaxIter => QpStatus::IterationLimit,
-        pounce_rs::qp::QpStatus::TimeLimit => QpStatus::TimeLimit,
         pounce_rs::qp::QpStatus::NumericalError => QpStatus::NumericalFailure,
     };
     QpSolution {
