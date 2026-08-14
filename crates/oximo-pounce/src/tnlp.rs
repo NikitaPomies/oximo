@@ -83,7 +83,9 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
         set_str(app.options_mut(), "hessian_approximation", "limited-memory")?;
     }
     apply_options(app.options_mut(), opts, warm.is_some())?;
-    if opts.universal.verbose == Some(true) {
+    let collect_iterations = opts.universal.verbose == Some(true);
+    let _collector = collect_iterations.then(pounce_rs::collector_scope);
+    if collect_iterations {
         app.enable_iter_history();
     }
     if selected_algorithm(opts)? == PounceAlgorithm::ActiveSetSqp {
