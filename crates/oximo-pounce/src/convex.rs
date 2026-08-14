@@ -176,38 +176,37 @@ fn hessian_is_psd(hessian: &[(oximo_expr::VarId, oximo_expr::VarId, f64)], sign:
     let k = active.len();
     let mut rows: Vec<BTreeMap<usize, f64>> = (0..k).map(|_| BTreeMap::new()).collect();
     for &(row, col, value) in hessian {
-        let r = active.binary_search(&col.index()).expect("active Hessian column");
-        let c = active.binary_search(&row.index()).expect("active Hessian row");
+        let r = active.binary_search(&row.index()).expect("active Hessian row");
+        let c = active.binary_search(&col.index()).expect("active Hessian column");
         *rows[r].entry(c).or_default() += sign * value;
     }
     for (d, row) in rows.iter_mut().enumerate() {
         *row.entry(d).or_default() += PSD_TOL;
     }
-    let mut ia = Vec::with_capacity(k + 1);
-    let mut ja = Vec::new();
+    let mut irn = Vec::new();
+    let mut jcn = Vec::new();
     let mut values = Vec::new();
-    ia.push(0_i32);
-    for row in rows {
+    for (row_index, row) in rows.into_iter().enumerate() {
         for (col, value) in row {
-            ja.push(i32::try_from(col).expect("Hessian dimension overflow"));
+            irn.push(i32::try_from(row_index + 1).expect("Hessian dimension overflow"));
+            jcn.push(i32::try_from(col + 1).expect("Hessian dimension overflow"));
             values.push(value);
         }
-        ia.push(i32::try_from(ja.len()).expect("Hessian nonzero count overflow"));
     }
 
     let mut solver = FeralSolverInterface::new();
     let init = solver.initialize_structure(
         i32::try_from(k).expect("Hessian dimension overflow"),
         i32::try_from(values.len()).expect("Hessian nonzero count overflow"),
-        &ia,
-        &ja,
+        &irn,
+        &jcn,
     );
     if format!("{init:?}") != "Success" {
         return false;
     }
     solver.values_array_mut().copy_from_slice(&values);
     let mut rhs = vec![0.0; k];
-    let status = solver.multi_solve(true, &ia, &ja, 1, &mut rhs, false, 0);
+    let status = solver.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0);
     format!("{status:?}") == "Success"
         && solver.provides_inertia()
         && solver.number_of_neg_evals() == 0
