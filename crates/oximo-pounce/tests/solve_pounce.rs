@@ -639,6 +639,12 @@ fn detected_socp_routes_to_conic_ipm() {
     let result = Pounce.solve(&m, &PounceOptions::default().qp_presolve(false)).unwrap();
     assert!(result.has_solution(), "{:?}", result.termination);
     assert_close(result.value_of(t).unwrap(), 5.0, 1e-5, "t");
+    assert_close(
+        result.dual_of(m.constraint_id("cone").unwrap()).unwrap(),
+        -1.0,
+        1e-5,
+        "cone dual",
+    );
 }
 
 #[test]

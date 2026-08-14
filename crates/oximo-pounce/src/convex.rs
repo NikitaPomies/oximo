@@ -344,9 +344,9 @@ pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
         cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
     }
     for (index, form) in detected {
+        maps[index] = ConstraintMap::Ineq { upper: Some(h.len()), lower: None };
         append_soc(&mut g, &mut h, &form);
         cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
-        maps[index] = ConstraintMap::None;
     }
 
     Ok(Problem {
