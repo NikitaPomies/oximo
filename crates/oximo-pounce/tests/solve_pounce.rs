@@ -490,7 +490,7 @@ fn persistent_convex_ipm_and_active_set_follow_parameter_sweeps() {
 fn persistent_conic_ipm_reuses_bound_expanded_warm_start() {
     let m = Model::new("soc_sweep");
     param!(m, weight = 1.0);
-    variable!(m, -2.0 <= x <= 2.0);
+    variable!(m, -2.0 <= x <= 0.5);
     variable!(m, -2.0 <= y <= 2.0);
     variable!(m, 0.0 <= t <= 2.0);
     m.add_soc_constraint("disk", [x, y], t);
@@ -504,6 +504,11 @@ fn persistent_conic_ipm_reuses_bound_expanded_warm_start() {
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "weight={value}: {:?}", warm.termination);
         assert_close(warm.objective().unwrap(), cold.objective().unwrap(), 1e-5, "objective");
+        assert_eq!(warm.reduced_costs.len(), 3);
+        for variable in [x, y, t] {
+            let id = variable.var_id().unwrap();
+            assert_close(warm.reduced_costs[&id], cold.reduced_costs[&id], 1e-4, "reduced cost");
+        }
     }
 }
 

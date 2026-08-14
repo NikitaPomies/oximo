@@ -465,7 +465,9 @@ fn run_socp(
 ) -> QpSolution {
     let (expanded, cones) = expand_bounds_for_conic_warm(&problem.qp, &problem.cones);
     if let Some(warm) = warm.filter(|w| same_warm_shape(&expanded, w)) {
-        return solve_socp_ipm_warm(&expanded, &cones, warm, opts, backend);
+        let mut solution = solve_socp_ipm_warm(&expanded, &cones, warm, opts, backend);
+        restore_conic_bound_multipliers(&problem.qp, &mut solution);
+        return solution;
     }
     if !presolve {
         return solve_socp_ipm(&problem.qp, &problem.cones, opts, backend);
@@ -479,6 +481,22 @@ fn run_socp(
         }
         PresolveOutcome::Infeasible(_) => empty_solution(&problem.qp, QpStatus::PrimalInfeasible),
         PresolveOutcome::Unbounded => empty_solution(&problem.qp, QpStatus::DualInfeasible),
+    }
+}
+
+fn restore_conic_bound_multipliers(qp: &QpProblem, solution: &mut QpSolution) {
+    let mut row = qp.h.len();
+    solution.z_lb = vec![0.0; qp.n];
+    solution.z_ub = vec![0.0; qp.n];
+    for i in 0..qp.n {
+        if qp.ub[i].is_finite() {
+            solution.z_ub[i] = solution.z.get(row).copied().unwrap_or(0.0);
+            row += 1;
+        }
+        if qp.lb[i].is_finite() {
+            solution.z_lb[i] = solution.z.get(row).copied().unwrap_or(0.0);
+            row += 1;
+        }
     }
 }
 
