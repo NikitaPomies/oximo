@@ -110,6 +110,15 @@ fn writer_preserves_objective_constant() {
 }
 
 #[test]
+fn writer_formats_negative_objective_constant() {
+    let m = Model::new("negative_constant");
+    variable!(m, x);
+    objective!(m, Min, x - 4.0);
+    let text = to_lp_string(&m).expect("write LP");
+    assert!(text.contains("obj: x - 4"), "{text}");
+}
+
+#[test]
 fn file_reader_uses_stem_as_model_name() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("example.lp");

@@ -839,7 +839,8 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     write!(out, " obj:")?;
     write_linear(out, &obj_terms, &vars)?;
     if obj_terms.constant != 0.0 {
-        write!(out, " + {}", obj_terms.constant)?;
+        let sign = if obj_terms.constant < 0.0 { '-' } else { '+' };
+        write!(out, " {sign} {}", obj_terms.constant.abs())?;
     }
     writeln!(out)?;
 
