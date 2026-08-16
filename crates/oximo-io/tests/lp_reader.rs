@@ -68,6 +68,15 @@ fn constraint_rhs_can_continue_on_next_line() {
 }
 
 #[test]
+fn unnamed_constraint_names_skip_explicit_names() {
+    let text = "Minimize\n obj: x\nSubject To\n x <= 5\n c0: x >= 0\n x = 2\nEnd\n";
+    let model = read_lp(text.as_bytes()).expect("constraint names should be unique");
+    let constraints = model.constraints();
+    let names: Vec<_> = constraints.algebraic().iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["c1", "c0", "c2"]);
+}
+
+#[test]
 fn negative_upper_bound_implies_free_lower_bound() {
     let model = read_lp("Minimize\n obj: x\nBounds\n x <= -1\nEnd\n".as_bytes())
         .expect("bound should parse");

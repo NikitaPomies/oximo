@@ -475,7 +475,6 @@ fn parse_constraint_line(
             .split_once(':')
             .map_or((String::new(), pending.as_str()), |(n, b)| (n.trim().to_string(), b));
         let (expr, sense, rhs) = parse_row(body, *pending_line)?;
-        let name = if name.is_empty() { format!("c{}", p.rows.len()) } else { name };
         collect_vars(&expr, &mut p.vars);
         p.rows.push((name, expr, sense, rhs));
         pending.clear();
@@ -614,7 +613,24 @@ fn build_model(
         };
         vars.insert(n.clone(), m.__var(n.clone()).bounds(lb, ub).domain(domain).build());
     }
-    for (name, expr, sense, rhs) in p.rows {
+    let mut used_names: HashSet<String> = p
+        .rows
+        .iter()
+        .filter(|(name, _, _, _)| !name.is_empty())
+        .map(|(name, _, _, _)| name.clone())
+        .collect();
+    let mut next_generated_name = 0;
+    for (mut name, expr, sense, rhs) in p.rows {
+        if name.is_empty() {
+            loop {
+                let candidate = format!("c{next_generated_name}");
+                next_generated_name += 1;
+                if used_names.insert(candidate.clone()) {
+                    name = candidate;
+                    break;
+                }
+            }
+        }
         if degree(&expr) > 2 {
             return Err(invalid_lp(
                 1,
