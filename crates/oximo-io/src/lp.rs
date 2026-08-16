@@ -310,9 +310,19 @@ impl ExprParser {
                     .parse::<u32>()
                     .map_err(|_| invalid_lp(self.line, column, "power is too large"))?,
                 Some(Token { column, .. }) => {
-                    return Err(invalid_lp(self.line, column, "power must be a nonnegative integer"));
+                    return Err(invalid_lp(
+                        self.line,
+                        column,
+                        "power must be a nonnegative integer",
+                    ));
                 }
-                None => return Err(invalid_lp(self.line, self.pos + 1, "power must be a nonnegative integer")),
+                None => {
+                    return Err(invalid_lp(
+                        self.line,
+                        self.pos + 1,
+                        "power must be a nonnegative integer",
+                    ));
+                }
             };
             a = Ast::Pow(Box::new(a), n);
         }
@@ -730,9 +740,7 @@ fn bound_value(toks: &[Token], pos: &mut usize) -> Option<f64> {
 
 fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoError> {
     let toks = lex(line, line_no)?;
-    if toks.len() == 2
-        && matches!(&toks[1].kind, Tok::Word(x) if x.eq_ignore_ascii_case("free"))
-    {
+    if toks.len() == 2 && matches!(&toks[1].kind, Tok::Word(x) if x.eq_ignore_ascii_case("free")) {
         if let Tok::Word(n) = &toks[0].kind {
             p.bounds.insert(n.clone(), (f64::NEG_INFINITY, f64::INFINITY));
             return Ok(());
