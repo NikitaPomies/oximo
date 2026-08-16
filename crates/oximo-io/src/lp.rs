@@ -4,13 +4,15 @@
 //! optimization problems. It supports a single objective, assumes variables
 //! are non-negative by default, and uses an explicit `Bounds` section for free
 //! variables. This module imports the LP/QP subset represented by `oximo-core`
-//! and exports linear LP/MILP models.
+//! and exports linear and quadratic LP/MILP/QP/QCP models.
 //!
 //! [`write_lp`] writes an oximo [`Model`] to any `std::io::Write`.
 //! [`read_lp`] and [`read_lp_file`] import streams and files, respectively.
 //!
 //! References:
 //! - "CPLEX lp files," lp_solve. <https://lpsolve.sourceforge.net/5.5/CPLEX-format.htm> (accessed May 11, 2026).
+//! - IBM, "Quadratic terms in LP file format." <https://www.ibm.com/docs/en/icos/22.1.2?topic=representation-quadratic-terms-in-lp-file-format>
+//! - IBM, "Constraints in LP file format." <https://www.ibm.com/docs/en/icos/22.1.0?topic=representation-constraints-in-lp-file-format>
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -18,7 +20,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use oximo_core::{Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, var_name};
-use oximo_expr::{Expr, LinearTerms, describe_nonlinear_term, extract_linear};
+use oximo_expr::{Expr, QuadraticTerms, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::FxHashSet;
 
 use crate::error::IoError;
@@ -817,8 +819,10 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
 /// - `Binaries` (binary vars)
 /// - `End`
 ///
-/// LP only represents linear LP/MILP. Nonlinear nodes raise
-/// [`IoError::Nonlinear`], second-order cone constraints [`IoError::Conic`].
+/// LP export supports linear and quadratic LP/MILP/QP/QCP expressions using
+/// CPLEX bracket notation. Higher-degree or otherwise nonlinear nodes raise
+/// [`IoError::Nonlinear`]; second-order cone constraints raise
+/// [`IoError::Conic`].
 ///
 /// # Errors
 ///
@@ -837,11 +841,12 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     let constraints = model_constraints.algebraic();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
-    let obj_terms = extract_linear(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
-        location: "the objective".into(),
-        term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
-            .unwrap_or_else(|| "<nonlinear>".into()),
-    })?;
+    let obj_terms =
+        extract_quadratic(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
+            location: "the objective".into(),
+            term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
 
     writeln!(out, "\\* OXIMO LP export - model: {} *\\", model.name)?;
 
@@ -851,7 +856,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     };
     writeln!(out, "{sense_kw}")?;
     write!(out, " obj:")?;
-    write_linear(out, &obj_terms, &vars)?;
+    write_quadratic(out, &obj_terms, &vars, false)?;
     if obj_terms.constant != 0.0 {
         let sign = if obj_terms.constant < 0.0 { '-' } else { '+' };
         write!(out, " {sign} {}", obj_terms.constant.abs())?;
@@ -866,7 +871,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     writeln!(out, "Subject To")?;
     for c in constraints {
-        let t = extract_linear(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+        let t = extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
                 .unwrap_or_else(|| "<nonlinear>".into()),
@@ -879,18 +884,18 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             };
             let adjusted_rhs = rhs - t.constant;
             write!(out, " {}:", c.name)?;
-            write_linear(out, &t, &vars)?;
+            write_quadratic(out, &t, &vars, true)?;
             writeln!(out, " {op} {adjusted_rhs}")?;
         } else if c.is_range() {
             let lo = c.lower - t.constant;
             let hi = c.upper - t.constant;
             let lo_label = unique_label(&mut used_labels, &format!("{}_lo", c.name));
             write!(out, " {lo_label}:")?;
-            write_linear(out, &t, &vars)?;
+            write_quadratic(out, &t, &vars, true)?;
             writeln!(out, " >= {lo}")?;
             let hi_label = unique_label(&mut used_labels, &format!("{}_hi", c.name));
             write!(out, " {hi_label}:")?;
-            write_linear(out, &t, &vars)?;
+            write_quadratic(out, &t, &vars, true)?;
             writeln!(out, " <= {hi}")?;
         } else {
             // Free `[-inf, +inf]` row: imposes no constraint and has no valid LP
@@ -1015,42 +1020,80 @@ fn unique_label(used: &mut FxHashSet<String>, base: &str) -> String {
     }
 }
 
-/// Write a linear expression as a sequence of `+/- coeff varname` terms.
-/// Skips zero coefficients; coefficient `1` and `-1` are written without the
-/// magnitude (LP format permits `+ x` and `- x`).
-fn write_linear<W: Write>(
+/// Write a quadratic expression using CPLEX's bracket notation. Objective
+/// brackets contain the Hessian coefficients and are divided by two; a
+/// constraint bracket contains the polynomial coefficients directly.
+fn write_quadratic<W: Write>(
     out: &mut W,
-    t: &LinearTerms,
+    t: &QuadraticTerms,
     vars: &[oximo_core::Variable],
+    constraint: bool,
 ) -> std::io::Result<()> {
     let mut first = true;
-    for (v, coef) in &t.coeffs {
-        if *coef == 0.0 {
-            continue;
-        }
-        let name = vars[v.index()].name.as_str();
-        let (sign, mag) = if *coef < 0.0 { ("-", -coef) } else { ("+", *coef) };
+    for &(v, coef) in &t.linear {
+        write_signed_term(out, &mut first, coef, vars[v.index()].name.as_str())?;
+    }
+    if !t.hessian.is_empty() {
         if first {
-            if sign == "-" {
-                if (mag - 1.0).abs() < f64::EPSILON {
-                    write!(out, " - {name}")?;
-                } else {
-                    write!(out, " -{mag} {name}")?;
-                }
-            } else if (mag - 1.0).abs() < f64::EPSILON {
-                write!(out, " {name}")?;
-            } else {
-                write!(out, " {mag} {name}")?;
-            }
-            first = false;
-        } else if (mag - 1.0).abs() < f64::EPSILON {
-            write!(out, " {sign} {name}")?;
+            write!(out, " [")?;
         } else {
-            write!(out, " {sign} {mag} {name}")?;
+            write!(out, " + [")?;
         }
+        let mut first_quad = true;
+        for &(row, col, hessian) in &t.hessian {
+            let coefficient = if constraint {
+                if row == col { hessian / 2.0 } else { hessian }
+            } else if row == col {
+                hessian
+            } else {
+                2.0 * hessian
+            };
+            let body = if row == col {
+                format!("{}^2", vars[row.index()].name)
+            } else {
+                format!("{} * {}", vars[col.index()].name, vars[row.index()].name)
+            };
+            write_signed_term(out, &mut first_quad, coefficient, &body)?;
+        }
+        write!(out, " ]")?;
+        if !constraint {
+            write!(out, "/2")?;
+        }
+        first = false;
     }
     if first {
         write!(out, " 0")?;
+    }
+    Ok(())
+}
+
+fn write_signed_term<W: Write>(
+    out: &mut W,
+    first: &mut bool,
+    coefficient: f64,
+    body: &str,
+) -> std::io::Result<()> {
+    if coefficient == 0.0 {
+        return Ok(());
+    }
+    let negative = coefficient < 0.0;
+    let magnitude = coefficient.abs();
+    let coefficient_text = if (magnitude - 1.0).abs() < f64::EPSILON {
+        String::new()
+    } else {
+        format!("{magnitude} ")
+    };
+    if *first {
+        if negative {
+            write!(out, " - {coefficient_text}{body}")?;
+        } else {
+            write!(out, " {coefficient_text}{body}")?;
+        }
+        *first = false;
+    } else if negative {
+        write!(out, " - {coefficient_text}{body}")?;
+    } else {
+        write!(out, " + {coefficient_text}{body}")?;
     }
     Ok(())
 }
