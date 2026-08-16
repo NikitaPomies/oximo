@@ -84,7 +84,7 @@ Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Ma
 | Integer variables  | `General` section (integer/semi-integer), `Binaries` section       |
 | Semicont variables | `Semi-Continuous` section, threshold emitted as the lower bound    |
 | Bounds             | Free variables declared with `free`; default lb=0, ub=+inf omitted |
-| Objective constant | Written as a comment if non-zero                                   |
+| Objective constant | Written as a final numeric term if non-zero                        |
 
 ```rust,ignore
 use oximo_io::{write_lp, to_lp_string};
@@ -97,6 +97,8 @@ let s = to_lp_string(&model)?;
 // To file
 let mut f = BufWriter::new(File::create("model.lp")?);
 write_lp(&model, &mut f)?;
+
+let imported = oximo_io::read_lp(s.as_bytes())?;
 ```
 
 ### NL
@@ -167,6 +169,8 @@ All functions return `Result<_, IoError>`:
 | `IoError::Io(e)`              | Underlying `std::io::Error` from the writer                                |
 | `IoError::InvalidNl`          | Malformed or truncated NL input                                            |
 | `IoError::UnsupportedNl`      | Semantics not representable by the core model                              |
+| `IoError::InvalidLp`          | Invalid LP input, with line and column                                     |
+| `IoError::UnsupportedLp`      | LP semantics not representable by oximo's core model                       |
 
 ## License
 
