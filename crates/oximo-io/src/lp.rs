@@ -30,7 +30,7 @@ use crate::error::IoError;
 /// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
 pub fn read_lp<R: Read>(mut input: R) -> Result<Model, IoError> {
     let mut text = String::new();
-    input.read_to_string(&mut text).map_err(|e| invalid_lp(1, 1, e.to_string()))?;
+    input.read_to_string(&mut text)?;
     parse_lp(&text, "lp_model")
 }
 
@@ -42,7 +42,7 @@ pub fn read_lp<R: Read>(mut input: R) -> Result<Model, IoError> {
 pub fn read_lp_file(path: impl AsRef<Path>) -> Result<Model, IoError> {
     let path = path.as_ref();
     let mut text = String::new();
-    File::open(path)?.read_to_string(&mut text).map_err(|e| invalid_lp(1, 1, e.to_string()))?;
+    File::open(path)?.read_to_string(&mut text)?;
     let name = path.file_stem().and_then(|x| x.to_str()).unwrap_or("lp_model");
     parse_lp(&text, name)
 }

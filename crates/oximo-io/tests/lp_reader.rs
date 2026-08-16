@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{self, Cursor, Read};
 
 use oximo_core::prelude::*;
 use oximo_io::{IoError, read_lp, read_lp_file, to_lp_string};
@@ -123,6 +123,28 @@ fn file_reader_uses_stem_as_model_name() {
     std::fs::write(&path, "Minimize\n obj: x\nEnd\n").expect("write fixture");
     let model = read_lp_file(&path).expect("read fixture");
     assert_eq!(model.name, "example");
+}
+
+#[test]
+fn stream_reader_preserves_read_errors() {
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("read failed"))
+        }
+    }
+
+    let err = read_lp(FailingReader).unwrap_err();
+    assert!(matches!(err, IoError::Io(_)));
+}
+
+#[test]
+fn file_reader_preserves_open_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("missing.lp");
+    let err = read_lp_file(path).unwrap_err();
+    assert!(matches!(err, IoError::Io(_)));
 }
 
 #[test]
