@@ -7,7 +7,7 @@ pub mod mps;
 pub mod nl;
 
 pub use error::IoError;
-pub use lp::{to_lp_string, write_lp};
+pub use lp::{read_lp, read_lp_file, to_lp_string, write_lp};
 pub use mps::{to_mps_string, write_mps};
 pub use nl::{
     Complementarity, DefinedVar, ImportedFunction, NlFormat, SuffixData, SuffixFlavour, SuffixKind,

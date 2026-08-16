@@ -24,4 +24,8 @@ pub enum IoError {
     InvalidNl { section: String, message: String },
     #[error("unsupported NL feature in {section}: {feature}")]
     UnsupportedNl { section: String, feature: String },
+    #[error("invalid LP file at {line}:{column}: {message}")]
+    InvalidLp { line: usize, column: usize, message: String },
+    #[error("unsupported LP feature in {section}: {feature}")]
+    UnsupportedLp { section: String, feature: String },
 }
