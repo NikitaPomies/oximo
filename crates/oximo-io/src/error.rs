@@ -4,7 +4,9 @@ use thiserror::Error;
 pub enum IoError {
     #[error("model has no objective")]
     NoObjective,
-    #[error("expected an affine expression in {location}, found nonlinear term: {term}")]
+    #[error(
+        "expected a linear or quadratic expression in {location}, found nonlinear term: {term}"
+    )]
     Nonlinear { location: String, term: String },
     #[error("second-order cone constraints cannot be represented in this format")]
     Conic,
