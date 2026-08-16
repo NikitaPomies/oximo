@@ -390,6 +390,7 @@ struct ParsedLp {
     binary: Vec<String>,
     semi: Vec<String>,
     vars: Vec<String>,
+    var_set: FxHashSet<String>,
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -474,7 +475,7 @@ fn parse_constraint_line(
             .split_once(':')
             .map_or((String::new(), pending.as_str()), |(n, b)| (n.trim().to_string(), b));
         let (expr, sense, rhs) = parse_row(body, *pending_line)?;
-        collect_vars(&expr, &mut p.vars);
+        collect_vars(&expr, &mut p.vars, &mut p.var_set);
         p.rows.push((name, expr, sense, rhs));
         pending.clear();
     }
@@ -580,9 +581,12 @@ fn build_model(
     if degree(&obj) > 2 {
         return Err(invalid_lp(1, 1, "higher-degree expressions are not valid CPLEX LP syntax"));
     }
-    collect_vars(&obj, &mut p.vars);
+    collect_vars(&obj, &mut p.vars, &mut p.var_set);
+    let general_names: FxHashSet<String> = p.general.iter().cloned().collect();
+    let binary_names: FxHashSet<String> = p.binary.iter().cloned().collect();
+    let semi_names: FxHashSet<String> = p.semi.iter().cloned().collect();
     for n in p.bounds.keys().chain(p.general.iter()).chain(p.binary.iter()).chain(p.semi.iter()) {
-        if !p.vars.contains(n) {
+        if p.var_set.insert(n.clone()) {
             p.vars.push(n.clone());
         }
     }
@@ -590,19 +594,19 @@ fn build_model(
     let mut vars = HashMap::new();
     for n in &p.vars {
         let (lb, mut ub) = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
-        if p.binary.contains(n) && !p.bounds.contains_key(n) {
+        if binary_names.contains(n) && !p.bounds.contains_key(n) {
             ub = 1.0;
         }
         if lb > ub {
             return Err(invalid_lp(1, 1, format!("inconsistent bounds for variable {n}")));
         }
-        let domain = if p.semi.contains(n) && p.general.contains(n) {
+        let domain = if semi_names.contains(n) && general_names.contains(n) {
             Domain::SemiInteger { threshold: lb }
-        } else if p.semi.contains(n) {
+        } else if semi_names.contains(n) {
             Domain::SemiContinuous { threshold: lb }
-        } else if p.binary.contains(n) {
+        } else if binary_names.contains(n) {
             Domain::Binary
-        } else if p.general.contains(n) {
+        } else if general_names.contains(n) {
             Domain::Integer
         } else {
             Domain::Real
@@ -654,14 +658,14 @@ fn build_model(
     Ok(m)
 }
 
-fn collect_vars(a: &Ast, vars: &mut Vec<String>) {
+fn collect_vars(a: &Ast, vars: &mut Vec<String>, seen: &mut FxHashSet<String>) {
     match a {
-        Ast::Var(v) if !vars.contains(v) => vars.push(v.clone()),
+        Ast::Var(v) if seen.insert(v.clone()) => vars.push(v.clone()),
         Ast::Add(a, b) | Ast::Sub(a, b) | Ast::Mul(a, b) | Ast::Div(a, b) => {
-            collect_vars(a, vars);
-            collect_vars(b, vars);
+            collect_vars(a, vars, seen);
+            collect_vars(b, vars, seen);
         }
-        Ast::Neg(a) | Ast::Pow(a, _) | Ast::Bracket(a) => collect_vars(a, vars),
+        Ast::Neg(a) | Ast::Pow(a, _) | Ast::Bracket(a) => collect_vars(a, vars, seen),
         Ast::Const(_) | Ast::Var(_) => {}
     }
 }
