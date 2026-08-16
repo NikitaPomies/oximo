@@ -408,6 +408,14 @@ fn has_comparison(text: &str) -> bool {
         || text.contains('=')
 }
 
+fn has_rhs(text: &str) -> bool {
+    let normalized = text.replace("=<", "<=").replace("=>", ">=").replace("==", "=");
+    ["<=", ">=", "<", ">", "="]
+        .iter()
+        .find_map(|operator| normalized.find(operator).map(|pos| pos + operator.len()))
+        .is_some_and(|end| !normalized[end..].trim().is_empty())
+}
+
 fn section(line: &str) -> Option<&'static str> {
     let s = line.trim().to_ascii_lowercase();
     match s.as_str() {
@@ -462,7 +470,7 @@ fn parse_constraint_line(
     }
     pending.push(' ');
     pending.push_str(line);
-    if has_comparison(pending) {
+    if has_comparison(pending) && has_rhs(pending) {
         let (name, body) = pending
             .split_once(':')
             .map_or((String::new(), pending.as_str()), |(n, b)| (n.trim().to_string(), b));
