@@ -81,6 +81,7 @@ Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Ma
 | Feature            | Behavior                                                           |
 |--------------------|--------------------------------------------------------------------|
 | Objective sense    | `Minimize` / `Maximize` keyword, no negation needed                |
+| Quadratic terms    | CPLEX bracket notation: objective `[Q]/2`, constraints `[q]`       |
 | Integer variables  | `General` section (integer/semi-integer), `Binaries` section       |
 | Semicont variables | `Semi-Continuous` section, threshold emitted as the lower bound    |
 | Bounds             | Free variables declared with `free`; default lb=0, ub=+inf omitted |
@@ -162,7 +163,7 @@ All functions return `Result<_, IoError>`:
 | Variant                       | Cause                                                                      |
 |-------------------------------|----------------------------------------------------------------------------|
 | `IoError::NoObjective`        | Model has no objective set                                                 |
-| `IoError::Nonlinear`          | Nonlinear node in an MPS/LP model (NL supports nonlinear bodies)           |
+| `IoError::Nonlinear`          | Unsupported nonlinear node in an MPS/LP model (LP accepts degree <= 2)     |
 | `IoError::UnsupportedNode(n)` | Node not representable in the target format, e.g. `Param` in NL            |
 | `IoError::InvalidNumber`      | Non-finite (NaN/Inf) constant while `nonfinite_strings` is off             |
 | `IoError::BinaryToString`     | `to_nl_string` used with binary output; use `write_nl_with` to a byte sink |
