@@ -65,6 +65,10 @@ fn constraint_rhs_can_continue_on_next_line() {
     let text = "Minimize\n obj: x\nSubject To\n c: x <=\n 5\nEnd\n";
     let model = read_lp(text.as_bytes()).expect("continued RHS should parse");
     assert_eq!(model.num_constraints(), 1);
+    let constraints = model.constraints();
+    let (sense, rhs) = constraints.algebraic()[0].as_single().expect("single row");
+    assert_eq!(sense, Sense::Le);
+    assert!((rhs - 5.0).abs() < f64::EPSILON);
 }
 
 #[test]
