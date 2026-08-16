@@ -79,12 +79,18 @@ enum Tok {
     Eq,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct Token {
+    kind: Tok,
+    column: usize,
+}
+
 fn invalid_lp(line: usize, column: usize, message: impl Into<String>) -> IoError {
     IoError::InvalidLp { line, column, message: message.into() }
 }
 
 #[expect(clippy::too_many_lines, reason = "tokenization")]
-fn lex(line: &str, line_no: usize) -> Result<Vec<Tok>, IoError> {
+fn lex(line: &str, line_no: usize) -> Result<Vec<Token>, IoError> {
     let chars: Vec<char> = line.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -206,27 +212,27 @@ fn lex(line: &str, line_no: usize) -> Result<Vec<Tok>, IoError> {
                 Tok::Word(chars[start..i].iter().collect())
             }
         };
-        out.push(tok);
+        out.push(Token { kind: tok, column: col });
     }
     Ok(out)
 }
 
 struct ExprParser {
-    toks: Vec<Tok>,
+    toks: Vec<Token>,
     pos: usize,
     line: usize,
 }
 
 impl ExprParser {
-    fn new(toks: Vec<Tok>, line: usize) -> Self {
+    fn new(toks: Vec<Token>, line: usize) -> Self {
         Self { toks, pos: 0, line }
     }
 
     fn peek(&self) -> Option<&Tok> {
-        self.toks.get(self.pos)
+        self.toks.get(self.pos).map(|token| &token.kind)
     }
 
-    fn take(&mut self) -> Option<Tok> {
+    fn take(&mut self) -> Option<Token> {
         let t = self.toks.get(self.pos).cloned();
         self.pos += usize::from(t.is_some());
         t
@@ -235,7 +241,8 @@ impl ExprParser {
     fn parse(mut self) -> Result<Ast, IoError> {
         let e = self.sum()?;
         if self.pos != self.toks.len() {
-            return Err(invalid_lp(self.line, self.pos + 1, "unexpected token"));
+            let column = self.toks.get(self.pos).map_or(self.pos + 1, |token| token.column);
+            return Err(invalid_lp(self.line, column, "unexpected token"));
         }
         Ok(e)
     }
@@ -298,17 +305,14 @@ impl ExprParser {
         if matches!(self.peek(), Some(Tok::Caret)) {
             self.take();
             let n = match self.take() {
-                Some(Tok::Number(x)) if x >= 0.0 && x.fract() == 0.0 => x
+                Some(Token { kind: Tok::Number(x), column }) if x >= 0.0 && x.fract() == 0.0 => x
                     .to_string()
                     .parse::<u32>()
-                    .map_err(|_| invalid_lp(self.line, self.pos, "power is too large"))?,
-                _ => {
-                    return Err(invalid_lp(
-                        self.line,
-                        self.pos + 1,
-                        "power must be a nonnegative integer",
-                    ));
+                    .map_err(|_| invalid_lp(self.line, column, "power is too large"))?,
+                Some(Token { column, .. }) => {
+                    return Err(invalid_lp(self.line, column, "power must be a nonnegative integer"));
                 }
+                None => return Err(invalid_lp(self.line, self.pos + 1, "power must be a nonnegative integer")),
             };
             a = Ast::Pow(Box::new(a), n);
         }
@@ -317,32 +321,37 @@ impl ExprParser {
 
     fn atom(&mut self) -> Result<Ast, IoError> {
         match self.take() {
-            Some(Tok::Number(x)) => Ok(Ast::Const(x)),
-            Some(Tok::Word(s)) => {
+            Some(Token { kind: Tok::Number(x), .. }) => Ok(Ast::Const(x)),
+            Some(Token { kind: Tok::Word(s), column }) => {
                 if s.eq_ignore_ascii_case("inf") || s.eq_ignore_ascii_case("infinity") {
-                    return Err(invalid_lp(
-                        self.line,
-                        self.pos,
-                        "infinity is valid only in bounds",
-                    ));
+                    return Err(invalid_lp(self.line, column, "infinity is valid only in bounds"));
                 }
                 Ok(Ast::Var(s))
             }
-            Some(Tok::LParen) => {
+            Some(Token { kind: Tok::LParen, .. }) => {
                 let e = self.sum()?;
-                if !matches!(self.take(), Some(Tok::RParen)) {
+                if let Some(token) = self.take() {
+                    if !matches!(token.kind, Tok::RParen) {
+                        return Err(invalid_lp(self.line, token.column, "missing ')'"));
+                    }
+                } else {
                     return Err(invalid_lp(self.line, self.pos, "missing ')'"));
                 }
                 Ok(e)
             }
-            Some(Tok::LBracket) => {
+            Some(Token { kind: Tok::LBracket, .. }) => {
                 let e = self.sum()?;
-                if !matches!(self.take(), Some(Tok::RBracket)) {
+                if let Some(token) = self.take() {
+                    if !matches!(token.kind, Tok::RBracket) {
+                        return Err(invalid_lp(self.line, token.column, "missing ']'"));
+                    }
+                } else {
                     return Err(invalid_lp(self.line, self.pos, "missing ']'"));
                 }
                 Ok(Ast::Bracket(Box::new(e)))
             }
-            _ => Err(invalid_lp(self.line, self.pos, "expected expression")),
+            Some(Token { column, .. }) => Err(invalid_lp(self.line, column, "expected expression")),
+            None => Err(invalid_lp(self.line, self.pos, "expected expression")),
         }
     }
 }
@@ -700,15 +709,15 @@ fn parse_row(body: &str, line: usize) -> Result<(Ast, Sense, f64), IoError> {
     Ok((lhs, sense, rhs))
 }
 
-fn bound_value(toks: &[Tok], pos: &mut usize) -> Option<f64> {
+fn bound_value(toks: &[Token], pos: &mut usize) -> Option<f64> {
     let mut sign = 1.0;
-    if matches!(toks.get(*pos), Some(Tok::Minus)) {
+    if matches!(toks.get(*pos).map(|token| &token.kind), Some(Tok::Minus)) {
         sign = -1.0;
         *pos += 1;
-    } else if matches!(toks.get(*pos), Some(Tok::Plus)) {
+    } else if matches!(toks.get(*pos).map(|token| &token.kind), Some(Tok::Plus)) {
         *pos += 1;
     }
-    let value = match toks.get(*pos)? {
+    let value = match &toks.get(*pos)?.kind {
         Tok::Word(x) if x.eq_ignore_ascii_case("inf") || x.eq_ignore_ascii_case("infinity") => {
             f64::INFINITY
         }
@@ -721,14 +730,16 @@ fn bound_value(toks: &[Tok], pos: &mut usize) -> Option<f64> {
 
 fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoError> {
     let toks = lex(line, line_no)?;
-    if toks.len() == 2 && matches!(&toks[1], Tok::Word(x) if x.eq_ignore_ascii_case("free")) {
-        if let Tok::Word(n) = &toks[0] {
+    if toks.len() == 2
+        && matches!(&toks[1].kind, Tok::Word(x) if x.eq_ignore_ascii_case("free"))
+    {
+        if let Tok::Word(n) = &toks[0].kind {
             p.bounds.insert(n.clone(), (f64::NEG_INFINITY, f64::INFINITY));
             return Ok(());
         }
     }
-    if let Tok::Word(n) = &toks[0] {
-        if matches!(toks.get(1), Some(Tok::Eq)) {
+    if let Tok::Word(n) = &toks[0].kind {
+        if matches!(toks.get(1).map(|token| &token.kind), Some(Tok::Eq)) {
             let mut i = 2;
             if let Some(v) = bound_value(&toks, &mut i)
                 && i == toks.len()
@@ -737,13 +748,13 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
                 return Ok(());
             }
         }
-        if matches!(toks.get(1), Some(Tok::Le | Tok::Ge)) {
+        if matches!(toks.get(1).map(|token| &token.kind), Some(Tok::Le | Tok::Ge)) {
             let mut i = 2;
             if let Some(v) = bound_value(&toks, &mut i)
                 && i == toks.len()
             {
                 let old = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
-                if matches!(toks[1], Tok::Le) {
+                if matches!(&toks[1].kind, Tok::Le) {
                     p.bounds.insert(n.clone(), (old.0, v));
                 } else {
                     p.bounds.insert(n.clone(), (v, old.1));
@@ -754,12 +765,12 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
     }
     let mut i = 0;
     if let Some(lo) = bound_value(&toks, &mut i)
-        && matches!(toks.get(i), Some(Tok::Le))
+        && matches!(toks.get(i).map(|token| &token.kind), Some(Tok::Le))
     {
         i += 1;
-        if let Some(Tok::Word(n)) = toks.get(i) {
+        if let Some(Token { kind: Tok::Word(n), .. }) = toks.get(i) {
             i += 1;
-            if matches!(toks.get(i), Some(Tok::Le)) {
+            if matches!(toks.get(i).map(|token| &token.kind), Some(Tok::Le)) {
                 i += 1;
                 if let Some(hi) = bound_value(&toks, &mut i)
                     && i == toks.len()
@@ -772,10 +783,10 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
     }
     let mut i = 0;
     if let Some(lo) = bound_value(&toks, &mut i)
-        && matches!(toks.get(i), Some(Tok::Le))
+        && matches!(toks.get(i).map(|token| &token.kind), Some(Tok::Le))
     {
         i += 1;
-        if let Some(Tok::Word(n)) = toks.get(i) {
+        if let Some(Token { kind: Tok::Word(n), .. }) = toks.get(i) {
             i += 1;
             if i == toks.len() {
                 let old = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));

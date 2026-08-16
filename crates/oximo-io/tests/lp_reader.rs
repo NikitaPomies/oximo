@@ -176,6 +176,15 @@ fn malformed_input_has_lp_diagnostic() {
 }
 
 #[test]
+fn parser_error_uses_offending_token_column() {
+    let err = read_lp("Minimize\n obj: x + * y\nEnd\n".as_bytes()).unwrap_err();
+    match err {
+        IoError::InvalidLp { column, .. } => assert_eq!(column, 6),
+        other => panic!("expected InvalidLp, got {other:?}"),
+    }
+}
+
+#[test]
 fn higher_degree_expression_is_invalid_lp_syntax() {
     let err = read_lp("Minimize\n obj: x^3\nEnd\n".as_bytes()).unwrap_err();
     assert!(matches!(err, IoError::InvalidLp { .. }));
