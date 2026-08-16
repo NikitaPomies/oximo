@@ -537,7 +537,7 @@ fn parse_sections(
         match current {
             "objective_min" | "objective_max" => objective_lines.push(line.clone()),
             "rows" => {
-                parse_constraint_line(line, line_no, &mut pending, &mut pending_line, &mut p)?
+                parse_constraint_line(line, line_no, &mut pending, &mut pending_line, &mut p)?;
             }
             "bounds" => parse_bound(line, line_no, &mut p)?,
             "general" => p.general.extend(line.split_whitespace().map(str::to_owned)),
