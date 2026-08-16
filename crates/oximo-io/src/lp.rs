@@ -386,7 +386,6 @@ struct ParsedLp {
     sense: Option<ObjectiveSense>,
     rows: Vec<(String, Ast, Sense, f64)>,
     bounds: HashMap<String, (f64, f64)>,
-    explicit_lower: HashSet<String>,
     general: Vec<String>,
     binary: Vec<String>,
     semi: Vec<String>,
@@ -590,10 +589,7 @@ fn build_model(
     let m = Model::new(model_name);
     let mut vars = HashMap::new();
     for n in &p.vars {
-        let (mut lb, mut ub) = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
-        if !p.explicit_lower.contains(n) && ub < 0.0 {
-            lb = f64::NEG_INFINITY;
-        }
+        let (lb, mut ub) = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
         if p.binary.contains(n) && !p.bounds.contains_key(n) {
             ub = 1.0;
         }
@@ -723,7 +719,6 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
     let toks = lex(line, line_no)?;
     if toks.len() == 2 && matches!(&toks[1], Tok::Word(x) if x.eq_ignore_ascii_case("free")) {
         if let Tok::Word(n) = &toks[0] {
-            p.explicit_lower.insert(n.clone());
             p.bounds.insert(n.clone(), (f64::NEG_INFINITY, f64::INFINITY));
             return Ok(());
         }
@@ -734,7 +729,6 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
             if let Some(v) = bound_value(&toks, &mut i)
                 && i == toks.len()
             {
-                p.explicit_lower.insert(n.clone());
                 p.bounds.insert(n.clone(), (v, v));
                 return Ok(());
             }
@@ -748,7 +742,6 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
                 if matches!(toks[1], Tok::Le) {
                     p.bounds.insert(n.clone(), (old.0, v));
                 } else {
-                    p.explicit_lower.insert(n.clone());
                     p.bounds.insert(n.clone(), (v, old.1));
                 }
                 return Ok(());
@@ -767,7 +760,6 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
                 if let Some(hi) = bound_value(&toks, &mut i)
                     && i == toks.len()
                 {
-                    p.explicit_lower.insert(n.clone());
                     p.bounds.insert(n.clone(), (lo, hi));
                     return Ok(());
                 }
@@ -783,7 +775,6 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
             i += 1;
             if i == toks.len() {
                 let old = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
-                p.explicit_lower.insert(n.clone());
                 p.bounds.insert(n.clone(), (lo, old.1));
                 return Ok(());
             }

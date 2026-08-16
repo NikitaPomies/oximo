@@ -77,11 +77,9 @@ fn unnamed_constraint_names_skip_explicit_names() {
 }
 
 #[test]
-fn negative_upper_bound_implies_free_lower_bound() {
-    let model = read_lp("Minimize\n obj: x\nBounds\n x <= -1\nEnd\n".as_bytes())
-        .expect("bound should parse");
-    assert!(model.variables()[0].lb.is_infinite() && model.variables()[0].lb.is_sign_negative());
-    assert!((model.variables()[0].ub + 1.0).abs() < f64::EPSILON);
+fn negative_upper_bound_without_lower_bound_is_invalid() {
+    let err = read_lp("Minimize\n obj: x\nBounds\n x <= -1\nEnd\n".as_bytes()).unwrap_err();
+    assert!(matches!(err, IoError::InvalidLp { .. }));
 }
 
 #[test]
