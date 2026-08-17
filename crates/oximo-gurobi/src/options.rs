@@ -296,6 +296,10 @@ impl GurobiOptions {
         self.presolve = Some(p);
         self
     }
+
+    pub(crate) fn has_non_convex(&self) -> bool {
+        self.int_params.iter().any(|(param, _)| *param == IntParam::NonConvex)
+    }
 }
 
 impl HasUniversal for GurobiOptions {
@@ -393,6 +397,12 @@ mod tests {
         // but our vec preserves the full call sequence.
         let o = GurobiOptions::default().seed(123).seed(99);
         assert_eq!(o.int_params, vec![(IntParam::Seed, 123), (IntParam::Seed, 99)]);
+    }
+
+    #[test]
+    fn detects_explicit_non_convex_setting() {
+        assert!(!GurobiOptions::default().has_non_convex());
+        assert!(GurobiOptions::default().non_convex(0).has_non_convex());
     }
 
     #[test]

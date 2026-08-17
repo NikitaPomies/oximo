@@ -112,14 +112,10 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     apply_initial_values(&gurobi_model, &vars, &gurobi_vars)?;
 
     apply_options(&mut gurobi_model, opts).map_err(map_gurobi_err)?;
-    if nonlinear_kind {
+    if nonlinear_kind && !opts.has_non_convex() {
         // Gurobi requires NonConvex=2 for general nonlinear constraints and
-        // bilinear non-convex objectives. Skip if the user already set it.
-        let current =
-            gurobi_model.get_param(gurobi_rs::param::NonConvex).map_err(map_gurobi_err)?;
-        if current < 2 {
-            gurobi_model.set_param(gurobi_rs::param::NonConvex, 2).map_err(map_gurobi_err)?;
-        }
+        // bilinear non-convex objectives. Preserve an explicit user setting.
+        gurobi_model.set_param(gurobi_rs::param::NonConvex, 2).map_err(map_gurobi_err)?;
     }
 
     Ok(Built {
