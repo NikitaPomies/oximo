@@ -5,6 +5,7 @@ use oximo_gurobi::{
     Callback, CallbackLocation, CallbackMask, CbResult, Gurobi, GurobiOptions, GurobiPresolve,
     Where,
 };
+use oximo_solver::{PersistentSolver, Solver};
 
 #[derive(Default)]
 struct Locations(Vec<CallbackLocation>);
@@ -49,9 +50,9 @@ fn callback_solve_uses_common_result_collection() {
         .expect("callback solve");
 
     assert!(result.has_solution());
-    assert!(!callback.0.is_empty(), "Gurobi did not invoke the callback");
-    for location in callback.0 {
-        assert!(mask.contains(location), "callback location {location:?} was not selected");
+    assert!(callback.0.contains(&CallbackLocation::Mip), "Gurobi did not invoke a MIP callback");
+    for location in &callback.0 {
+        assert!(mask.contains(*location), "callback location {location:?} was not selected");
     }
 }
 
@@ -75,4 +76,28 @@ fn callback_errors_are_solver_errors() {
         .solve_with_callback(&m, &GurobiOptions::default(), &mut callback)
         .expect_err("callback should fail");
     assert!(error.to_string().contains("Problem with callback"), "{error}");
+}
+
+#[test]
+fn persistent_callback_error_clears_and_rebuilds_resident_model() {
+    let m = Model::new("persistent_callback_error");
+    variable!(m, x, Bin);
+    objective!(m, Max, x);
+
+    let opts = GurobiOptions::default().presolve(GurobiPresolve::Off);
+    let mut solver = Gurobi.persistent();
+    let first = solver.solve(&m, &opts).expect("initial persistent solve");
+    assert!(first.has_solution());
+
+    let mut callback = FailingCallback;
+    let error =
+        solver.solve_with_callback(&m, &opts, &mut callback).expect_err("callback should fail");
+    assert!(error.to_string().contains("Problem with callback"), "{error}");
+
+    let cleared = solver.compute_iis().expect_err("callback failure should clear resident state");
+    assert!(cleared.to_string().contains("no resident model"), "{cleared}");
+
+    let recovered =
+        solver.solve(&m, &opts).expect("persistent solve should rebuild after callback failure");
+    assert!(recovered.has_solution());
 }
