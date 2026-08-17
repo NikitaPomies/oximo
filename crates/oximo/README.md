@@ -213,7 +213,7 @@ pub trait Solver {
 | --------------- | ------------------------------------------------------------ | ------- |
 | `highs`         | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
 | `io`            | NL, MPS, and LP file writers                                 | yes     |
-| `gurobi`        | Gurobi solver (requires licensed install)                    | no      |
+| `gurobi`        | Gurobi v13+ solver (requires licensed install)               | no      |
 | `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP solver                | no      |
 | `gams`          | GAMS bridge - solve type depends on the selected sub-solver  | no      |
 | `baron`         | BARON - Global non-convex solver (requires licensed install) | no      |
