@@ -497,6 +497,11 @@ fn append_tree(
             append_tree(ctx, arena, *exp, Some(op), tree)
         }
         ExprNode::Div(num, den) => {
+            if let Some(0.0) = as_const(arena, *den) {
+                return Err(SolverError::Backend(
+                    "division by zero: constant denominator is 0".into(),
+                ));
+            }
             let op = tree.push(Opcode::Divide, 0.0, parent)?;
             append_tree(ctx, arena, *num, Some(op), tree)?;
             append_tree(ctx, arena, *den, Some(op), tree)
