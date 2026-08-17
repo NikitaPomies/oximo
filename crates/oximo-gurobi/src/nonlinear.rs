@@ -1,5 +1,7 @@
 //! Lower nonlinear oximo expressions onto Gurobi 13 expression trees.
 
+use std::collections::HashMap;
+
 use gurobi_rs::Opcode;
 use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
@@ -8,6 +10,7 @@ use oximo_solver::SolverError;
 
 /// A value that can stay on Gurobi's direct linear/quadratic fast path, or a
 /// variable containing a native nonlinear expression-tree result.
+#[derive(Clone)]
 pub(crate) enum LoweredExpr {
     Linear(LinExpr),
     Quadratic(QuadExpr),
@@ -28,9 +31,24 @@ pub(crate) struct LoweringCtx<'a> {
     pub gurobi_vars: &'a [Var],
     pub aux_counter: u32,
     pub generated: Vec<GeneratedConstraint>,
+    quadratic_cache: HashMap<ExprId, Option<LoweredExpr>>,
+    materialized: HashMap<ExprId, Var>,
+    reference_counts: Vec<usize>,
 }
 
-impl LoweringCtx<'_> {
+impl<'a> LoweringCtx<'a> {
+    pub(crate) fn new(model: &'a mut Model, gurobi_vars: &'a [Var], aux_counter: u32) -> Self {
+        LoweringCtx {
+            model,
+            gurobi_vars,
+            aux_counter,
+            generated: Vec::new(),
+            quadratic_cache: HashMap::new(),
+            materialized: HashMap::new(),
+            reference_counts: Vec::new(),
+        }
+    }
+
     fn next_name(&mut self, tag: &str) -> String {
         let n = self.aux_counter;
         self.aux_counter = self.aux_counter.saturating_add(1);
@@ -201,8 +219,11 @@ fn try_mul(values: Vec<LoweredExpr>) -> Option<LoweredExpr> {
 fn try_quadratic(
     arena: &ExprArena,
     id: ExprId,
-    ctx: &LoweringCtx<'_>,
+    ctx: &mut LoweringCtx<'_>,
 ) -> Result<Option<LoweredExpr>, SolverError> {
+    if let Some(value) = ctx.quadratic_cache.get(&id) {
+        return Ok(value.clone());
+    }
     let value = match arena.get(id) {
         ExprNode::Const(c) => LoweredExpr::Linear(linear_constant(*c)),
         ExprNode::Param(p) => LoweredExpr::Linear(linear_constant(arena.param_value(*p))),
@@ -215,13 +236,17 @@ fn try_quadratic(
             LoweredExpr::Linear(e)
         }
         ExprNode::Neg(inner) => {
-            let Some(inner) = try_quadratic(arena, *inner, ctx)? else { return Ok(None) };
+            let Some(inner) = try_quadratic(arena, *inner, ctx)? else {
+                return Ok(cache_quadratic_none(ctx, id));
+            };
             try_scale(inner, -1.0)
         }
         ExprNode::Add(children) => {
             let mut acc = LoweredExpr::Linear(linear_constant(0.0));
             for child in children {
-                let Some(value) = try_quadratic(arena, *child, ctx)? else { return Ok(None) };
+                let Some(value) = try_quadratic(arena, *child, ctx)? else {
+                    return Ok(cache_quadratic_none(ctx, id));
+                };
                 acc = try_add(acc, value);
             }
             acc
@@ -229,54 +254,124 @@ fn try_quadratic(
         ExprNode::Mul(children) => {
             let mut values = Vec::with_capacity(children.len());
             for child in children {
-                let Some(value) = try_quadratic(arena, *child, ctx)? else { return Ok(None) };
+                let Some(value) = try_quadratic(arena, *child, ctx)? else {
+                    return Ok(cache_quadratic_none(ctx, id));
+                };
                 values.push(value);
             }
-            let Some(value) = try_mul(values) else { return Ok(None) };
+            let Some(value) = try_mul(values) else {
+                return Ok(cache_quadratic_none(ctx, id));
+            };
             value
         }
         ExprNode::Pow(base, exp) => {
-            let Some(alpha) = as_const(arena, *exp) else { return Ok(None) };
-            let Some(base) = try_quadratic(arena, *base, ctx)? else { return Ok(None) };
+            let Some(alpha) = as_const(arena, *exp) else {
+                return Ok(cache_quadratic_none(ctx, id));
+            };
+            let Some(base) = try_quadratic(arena, *base, ctx)? else {
+                return Ok(cache_quadratic_none(ctx, id));
+            };
             if alpha == 0.0 {
                 LoweredExpr::Linear(linear_constant(1.0))
             } else if (alpha - 1.0).abs() < f64::EPSILON {
                 base
             } else if (alpha - 2.0).abs() < f64::EPSILON {
-                let LoweredExpr::Linear(base) = base else { return Ok(None) };
+                let LoweredExpr::Linear(base) = base else {
+                    return Ok(cache_quadratic_none(ctx, id));
+                };
                 LoweredExpr::Quadratic(multiply_linears(&base, &base))
             } else {
-                return Ok(None);
+                return Ok(cache_quadratic_none(ctx, id));
             }
         }
         ExprNode::Div(num, den) => {
-            let Some(den) = as_const(arena, *den) else { return Ok(None) };
+            let Some(den) = as_const(arena, *den) else {
+                return Ok(cache_quadratic_none(ctx, id));
+            };
             if den == 0.0 {
                 return Err(SolverError::Backend(
                     "division by zero: constant denominator is 0".into(),
                 ));
             }
-            let Some(num) = try_quadratic(arena, *num, ctx)? else { return Ok(None) };
+            let Some(num) = try_quadratic(arena, *num, ctx)? else {
+                return Ok(cache_quadratic_none(ctx, id));
+            };
             try_scale(num, 1.0 / den)
         }
         ExprNode::Sin(_)
         | ExprNode::Cos(_)
         | ExprNode::Exp(_)
         | ExprNode::Log(_)
-        | ExprNode::Abs(_) => return Ok(None),
+        | ExprNode::Abs(_) => return Ok(cache_quadratic_none(ctx, id)),
     };
+    ctx.quadratic_cache.insert(id, Some(value.clone()));
     Ok(Some(value))
+}
+
+fn cache_quadratic_none(ctx: &mut LoweringCtx<'_>, id: ExprId) -> Option<LoweredExpr> {
+    ctx.quadratic_cache.insert(id, None);
+    None
+}
+
+fn for_each_child(node: &ExprNode, f: &mut impl FnMut(ExprId)) {
+    match node {
+        ExprNode::Add(children) | ExprNode::Mul(children) => {
+            for child in children {
+                f(*child);
+            }
+        }
+        ExprNode::Neg(inner)
+        | ExprNode::Sin(inner)
+        | ExprNode::Cos(inner)
+        | ExprNode::Exp(inner)
+        | ExprNode::Log(inner)
+        | ExprNode::Abs(inner) => f(*inner),
+        ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) => {
+            f(*base);
+            f(*exp);
+        }
+        ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. } => {}
+    }
+}
+
+fn reference_counts(arena: &ExprArena, root: ExprId) -> Vec<usize> {
+    let mut seen = vec![false; arena.len()];
+    let mut order = Vec::new();
+    let mut stack = vec![(root, false)];
+    while let Some((id, expanded)) = stack.pop() {
+        if expanded {
+            order.push(id);
+            continue;
+        }
+        if seen[id.index()] {
+            continue;
+        }
+        seen[id.index()] = true;
+        stack.push((id, true));
+        for_each_child(arena.get(id), &mut |child| stack.push((child, false)));
+    }
+
+    let mut counts = vec![0_usize; arena.len()];
+    counts[root.index()] = 1;
+    for id in order.into_iter().rev() {
+        let count = counts[id.index()];
+        for_each_child(arena.get(id), &mut |child| {
+            counts[child.index()] = counts[child.index()].saturating_add(count);
+        });
+    }
+    counts
 }
 
 struct TreeBuilder {
     opcode: Vec<i32>,
     data: Vec<f64>,
     parent: Vec<i32>,
+    materializing: Option<ExprId>,
 }
 
 impl TreeBuilder {
-    fn new() -> Self {
-        Self { opcode: Vec::new(), data: Vec::new(), parent: Vec::new() }
+    fn new(materializing: Option<ExprId>) -> Self {
+        Self { opcode: Vec::new(), data: Vec::new(), parent: Vec::new(), materializing }
     }
 
     fn push(
@@ -459,6 +554,26 @@ fn materialize_abs(
     Ok(result)
 }
 
+fn materialize_shared(
+    ctx: &mut LoweringCtx<'_>,
+    arena: &ExprArena,
+    id: ExprId,
+) -> Result<Var, SolverError> {
+    if let Some(&result) = ctx.materialized.get(&id) {
+        return Ok(result);
+    }
+    let result = if let Some(value) = try_quadratic(arena, id, ctx)? {
+        materialize_lowered(ctx, value)?
+    } else {
+        match arena.get(id) {
+            ExprNode::Abs(inner) => materialize_abs(ctx, arena, *inner)?,
+            _ => native_expr(ctx, arena, id)?,
+        }
+    };
+    ctx.materialized.insert(id, result);
+    Ok(result)
+}
+
 fn append_tree(
     ctx: &mut LoweringCtx<'_>,
     arena: &ExprArena,
@@ -466,6 +581,20 @@ fn append_tree(
     parent: Option<usize>,
     tree: &mut TreeBuilder,
 ) -> Result<usize, SolverError> {
+    if tree.materializing != Some(id) {
+        if let Some(&result) = ctx.materialized.get(&id) {
+            let index = ctx.model.var_index(&result).map_err(map_gurobi)?;
+            return tree.push(Opcode::Variable, f64::from(index), parent);
+        }
+        let shared = ctx.reference_counts.get(id.index()).copied().unwrap_or_default() > 1;
+        let leaf =
+            matches!(arena.get(id), ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_));
+        if shared && !leaf {
+            let result = materialize_shared(ctx, arena, id)?;
+            let index = ctx.model.var_index(&result).map_err(map_gurobi)?;
+            return tree.push(Opcode::Variable, f64::from(index), parent);
+        }
+    }
     match arena.get(id) {
         ExprNode::Const(c) => tree.push(Opcode::Constant, *c, parent),
         ExprNode::Param(p) => tree.push(Opcode::Constant, arena.param_value(*p), parent),
@@ -534,7 +663,7 @@ fn native_expr(
     id: ExprId,
 ) -> Result<Var, SolverError> {
     let result = ctx.new_aux("nl", f64::NEG_INFINITY, f64::INFINITY).map_err(map_gurobi)?;
-    let mut tree = TreeBuilder::new();
+    let mut tree = TreeBuilder::new(Some(id));
     append_tree(ctx, arena, id, None, &mut tree)?;
     let name = ctx.next_name("nl_def");
     let generated = ctx
@@ -542,6 +671,7 @@ fn native_expr(
         .add_genconstr_nl(&name, result, &tree.opcode, &tree.data, &tree.parent)
         .map_err(map_gurobi)?;
     ctx.generated.push(GeneratedConstraint::General(generated));
+    ctx.materialized.insert(id, result);
     Ok(result)
 }
 
@@ -553,6 +683,7 @@ pub(crate) fn lower(
     if let Some(value) = try_quadratic(arena, id, ctx)? {
         return Ok(value);
     }
+    ctx.reference_counts = reference_counts(arena, id);
     Ok(LoweredExpr::Var(native_expr(ctx, arena, id)?))
 }
 

@@ -638,12 +638,7 @@ fn add_nonlinear_constraint(
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
 ) -> Result<(Vec<GurobiRow>, Vec<GeneratedConstraint>), SolverError> {
-    let mut ctx = LoweringCtx {
-        model: gurobi_model,
-        gurobi_vars,
-        aux_counter: *aux_counter,
-        generated: Vec::new(),
-    };
+    let mut ctx = LoweringCtx::new(gurobi_model, gurobi_vars, *aux_counter);
     let lowered = lower(arena, lhs, &mut ctx)?;
     *aux_counter = ctx.aux_counter;
     let generated = std::mem::take(&mut ctx.generated);
@@ -726,12 +721,7 @@ fn set_objective(
         gurobi_model.set_objective(e, gurobi_sense).map_err(map_gurobi_err)?;
         return Ok((0.0, Vec::new()));
     }
-    let mut ctx = LoweringCtx {
-        model: gurobi_model,
-        gurobi_vars,
-        aux_counter: *aux_counter,
-        generated: Vec::new(),
-    };
+    let mut ctx = LoweringCtx::new(gurobi_model, gurobi_vars, *aux_counter);
     let lowered = lower(arena, obj_expr, &mut ctx)?;
     *aux_counter = ctx.aux_counter;
     ctx.model
