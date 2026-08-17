@@ -4,7 +4,7 @@
 
 use oximo_core::prelude::*;
 use oximo_gurobi::{Gurobi, GurobiOptions};
-use oximo_solver::Solver;
+use oximo_solver::{InfeasibilityDiagnosis, Solver};
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
@@ -101,4 +101,18 @@ fn soc_with_affine_members() {
     assert!(r.has_solution());
     let obj = r.objective().expect("obj");
     assert!(close(obj, 0.0, 1e-4), "obj = {obj}");
+}
+
+#[test]
+fn soc_iis_maps_the_generated_bound_sign_row() {
+    let m = Model::new("socp_iis_sign");
+    variable!(m, x);
+    variable!(m, t);
+    m.fix(x, 0.0);
+    m.fix(t, -1.0);
+    let cone = m.add_soc_constraint("cone", [x], t);
+    objective!(m, Min, x);
+
+    let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute SOC IIS");
+    assert!(iis.soc_constraints.contains(&cone), "cone missing from IIS: {iis:?}");
 }

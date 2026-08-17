@@ -2,7 +2,7 @@
 
 use oximo_core::prelude::*;
 use oximo_gurobi::{Gurobi, GurobiOptions};
-use oximo_solver::Solver;
+use oximo_solver::{InfeasibilityDiagnosis, Solver};
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
@@ -156,4 +156,15 @@ fn div_by_zero_constant_errors() {
 
     let err = Gurobi.solve(&m, &GurobiOptions::default()).expect_err("expected error");
     assert!(err.to_string().contains("division by zero"), "err = {err}");
+}
+
+#[test]
+fn nonlinear_iis_maps_generated_abs_definition() {
+    let m = Model::new("nl_iis_abs");
+    variable!(m, x);
+    let conflict = constraint!(m, impossible, x.abs() <= -1.0);
+    objective!(m, Min, x);
+
+    let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute nonlinear IIS");
+    assert!(iis.constraints.contains(&conflict));
 }
