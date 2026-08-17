@@ -451,18 +451,24 @@ fn add_constraints(
             } else {
                 nonlinear.push(index);
             }
-        } else if let Some(t) = extract_linear(arena, c.lhs) {
-            let mut expr = LinExpr::new();
-            for (v, coeff) in t.coeffs {
-                expr.add_term(coeff, gurobi_vars[v.index()]);
+        } else if c.is_range() {
+            if let Some(t) = extract_linear(arena, c.lhs) {
+                let mut expr = LinExpr::new();
+                for (v, coeff) in t.coeffs {
+                    expr.add_term(coeff, gurobi_vars[v.index()]);
+                }
+                ranges.push(PendingRange {
+                    index,
+                    name: c.name.to_string(),
+                    expr,
+                    lower: c.lower - t.constant,
+                    upper: c.upper - t.constant,
+                });
+            } else {
+                nonlinear.push(index);
             }
-            ranges.push(PendingRange {
-                index,
-                name: c.name.to_string(),
-                expr,
-                lower: c.lower - t.constant,
-                upper: c.upper - t.constant,
-            });
+        } else if c.lower.is_infinite() && c.upper.is_infinite() {
+            slots[index] = Some(ConstraintHandle { rows: Vec::new(), generated: Vec::new() });
         } else {
             nonlinear.push(index);
         }
@@ -627,10 +633,10 @@ fn add_comparison_rows(
     lower: f64,
     upper: f64,
 ) -> Result<Vec<GurobiRow>, SolverError> {
-    let senses = single.map_or_else(
-        || vec![(Sense::Ge, lower), (Sense::Le, upper)],
-        |(sense, rhs)| vec![(sense, rhs)],
-    );
+    let senses = single
+        .map_or_else(|| vec![(Sense::Ge, lower), (Sense::Le, upper)], |pair| vec![pair])
+        .into_iter()
+        .filter(|(_, rhs)| rhs.is_finite());
     senses
         .into_iter()
         .enumerate()
