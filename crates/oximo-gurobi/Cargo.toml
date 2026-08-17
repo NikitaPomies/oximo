@@ -16,7 +16,7 @@ benchmark-support = ["dep:rayon"]
 oximo-expr.workspace = true
 oximo-core.workspace = true
 oximo-solver.workspace = true
-grb = { workspace = true, features = ["gurobi12"] }
+gurobi-rs.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true
 rayon = { workspace = true, optional = true }

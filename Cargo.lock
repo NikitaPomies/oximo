@@ -87,9 +87,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.103"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "autocfg"
@@ -1082,42 +1082,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
-name = "grb"
-version = "3.0.1"
+name = "guro-sys"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9834f67c380d91552cfaa9ac309dde5b53c0d783254992ac37e4bcc12cfa2518"
+checksum = "c719ae97ba5186df64e76974ba3ad4d88e4c39f03495bba2871738d9f94a9003"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "gurobi-macro"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9290ea816ed945a7da7b718e7067a845ccaae72237af887c9b977be0fc0f2453"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.0",
+]
+
+[[package]]
+name = "gurobi-rs"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d89767c1c0886f862279124247369d5275fd650a623c98dcc2fab4eb3975657"
 dependencies = [
  "anyhow",
  "cfg-if",
  "cstr-enum",
  "csv",
  "fnv",
- "grb-macro",
- "grb-sys2",
+ "guro-sys",
+ "gurobi-macro",
  "proc-macro2",
  "quote",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "grb-macro"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70071e86d36b20a3f2280ef419a0efe9aa8c85b79c318b28a2b707e1ed52b0d0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "grb-sys2"
-version = "12.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae602a07b509e70fed9e88acc4b157087e310a1741ee674fe51e7e4aef06c92a"
-dependencies = [
- "anyhow",
 ]
 
 [[package]]
@@ -1677,7 +1677,7 @@ dependencies = [
 name = "oximo-gurobi"
 version = "0.5.1"
 dependencies = [
- "grb",
+ "gurobi-rs",
  "oximo-core",
  "oximo-expr",
  "oximo-solver",

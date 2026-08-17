@@ -1,5 +1,5 @@
-use grb::Model as GrbModel;
-use grb::parameter::{DoubleParam, IntParam, StrParam};
+use gurobi_rs::Model as GurobiModel;
+use gurobi_rs::parameter::{DoubleParam, IntParam, StrParam};
 use oximo_solver::{HasUniversal, UniversalOptions};
 
 /// Gurobi presolve level. Maps to the Gurobi `Presolve` parameter.
@@ -261,6 +261,28 @@ impl GurobiOptions {
         (str, job_id, JobID),
         (str, dummy, Dummy),
     );
+
+    // Gurobi 13 nonlinear-barrier, PDHG, and MIP-start parameters.
+    gurobi_params!(
+        (int, nl_bar_iter_limit, NLBarIterLimit),
+        (dbl, nl_bar_c_feas_tol, NLBarCFeasTol),
+        (dbl, nl_bar_d_feas_tol, NLBarDFeasTol),
+        (dbl, nl_bar_p_feas_tol, NLBarPFeasTol),
+        (dbl, pdhg_abs_tol, PDHGAbsTol),
+        (dbl, pdhg_conv_tol, PDHGConvTol),
+        (dbl, pdhg_rel_tol, PDHGRelTol),
+        (dbl, pdhg_iter_limit, PDHGIterLimit),
+        (int, pdhg_gpu, PDHGGPU),
+        (int, no_rel_heur_solutions, NoRelHeurSolutions),
+        (int, inherit_params, InheritParams),
+        (int, fix_vars_in_indicators, FixVarsInIndicators),
+        (dbl, start_time_limit, StartTimeLimit),
+        (dbl, start_work_limit, StartWorkLimit),
+        (dbl, improve_start_work, ImproveStartWork),
+        (int, master_knapsack_cuts, MasterKnapsackCuts),
+        (int, obj_pass_number, ObjPassNumber),
+        (int, optimality_target, OptimalityTarget),
+    );
 }
 
 impl GurobiOptions {
@@ -287,18 +309,18 @@ impl HasUniversal for GurobiOptions {
 }
 
 /// Apply typed [`GurobiOptions`] onto a live Gurobi model.
-pub(crate) fn apply(model: &mut GrbModel, o: &GurobiOptions) -> Result<(), grb::Error> {
+pub(crate) fn apply(model: &mut GurobiModel, o: &GurobiOptions) -> Result<(), gurobi_rs::Error> {
     if let Some(d) = o.universal.time_limit {
-        model.set_param(grb::param::TimeLimit, d.as_secs_f64())?;
+        model.set_param(gurobi_rs::param::TimeLimit, d.as_secs_f64())?;
     }
     if let Some(n) = o.universal.threads {
-        model.set_param(grb::param::Threads, i32::try_from(n).unwrap_or(i32::MAX))?;
+        model.set_param(gurobi_rs::param::Threads, i32::try_from(n).unwrap_or(i32::MAX))?;
     }
     if let Some(b) = o.universal.verbose {
-        model.set_param(grb::param::OutputFlag, i32::from(b))?;
+        model.set_param(gurobi_rs::param::OutputFlag, i32::from(b))?;
     }
     if let Some(g) = o.mip_gap {
-        model.set_param(grb::param::MIPGap, g)?;
+        model.set_param(gurobi_rs::param::MIPGap, g)?;
     }
     if let Some(p) = o.presolve {
         let v = match p {
@@ -307,7 +329,7 @@ pub(crate) fn apply(model: &mut GrbModel, o: &GurobiOptions) -> Result<(), grb::
             GurobiPresolve::Conservative => 1,
             GurobiPresolve::Aggressive => 2,
         };
-        model.set_param(grb::param::Presolve, v)?;
+        model.set_param(gurobi_rs::param::Presolve, v)?;
     }
     for (p, v) in &o.int_params {
         model.set_param(*p, *v)?;

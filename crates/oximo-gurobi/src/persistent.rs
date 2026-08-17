@@ -1,12 +1,13 @@
-use grb::prelude::*;
+use gurobi_rs::prelude::*;
 use oximo_core::{Model, ModelKind};
 use oximo_solver::{Iis, Snapshot, Solver, SolverError, SolverResult, snapshot};
 
 use crate::GurobiOptions;
 use crate::options::apply as apply_options;
 use crate::translate::{
-    Built, build, compute_iis_resident, default_env, map_grb_err, run_and_collect,
+    Built, build, compute_iis_resident, default_env, map_gurobi_err, run_and_collect,
 };
+use crate::{Callback, CallbackMask};
 
 /// The resident Gurobi model plus the baseline snapshot the fast path diffs against
 /// (`None` when the fast path is ineligible).
@@ -128,6 +129,84 @@ impl GurobiPersistent {
         let st = self.state.as_mut().expect("state present before solve");
         run_and_collect(&mut st.built, kind)
     }
+
+    fn solve_resident_with_callback<F>(
+        &mut self,
+        model: &Model,
+        opts: &GurobiOptions,
+        callback: &mut F,
+        mask: Option<CallbackMask>,
+    ) -> Result<SolverResult, SolverError>
+    where
+        F: Callback,
+    {
+        let kind = model.kind();
+        let mut updated = false;
+        if matches!(kind, ModelKind::LP | ModelKind::MILP) {
+            if let Some(st) = self.state.as_mut() {
+                if let Some(base) = st.snap.as_ref() {
+                    let snap = snapshot(model)?;
+                    if snap.fingerprint == base.fingerprint {
+                        push_deltas(&mut st.built, base, &snap, opts)?;
+                        st.snap = Some(snap);
+                        updated = true;
+                    }
+                }
+            }
+        }
+        if !updated {
+            self.rebuild(model, opts)?;
+        }
+        let st = self.state.as_mut().expect("state present before solve");
+        crate::translate::run_and_collect_with_callback(&mut st.built, kind, callback, mask)
+    }
+
+    /// Solve the resident model while receiving Gurobi callback events.
+    ///
+    /// # Errors
+    /// Returns a [`SolverError`] for model construction, callback, or Gurobi
+    /// optimization failures. On failure, the resident state is cleared.
+    pub fn solve_with_callback<F>(
+        &mut self,
+        model: &Model,
+        opts: &GurobiOptions,
+        callback: &mut F,
+    ) -> Result<SolverResult, SolverError>
+    where
+        F: Callback,
+    {
+        match self.solve_resident_with_callback(model, opts, callback, None) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.state = None;
+                Err(error)
+            }
+        }
+    }
+
+    /// Solve the resident model with only the selected callback locations.
+    ///
+    /// # Errors
+    /// Returns a [`SolverError`] for model construction, callback, or Gurobi
+    /// optimization failures. On failure, the resident state is cleared.
+    pub fn solve_with_callback_filtered<F>(
+        &mut self,
+        model: &Model,
+        opts: &GurobiOptions,
+        callback: &mut F,
+        locations: impl Into<CallbackMask>,
+    ) -> Result<SolverResult, SolverError>
+    where
+        F: Callback,
+    {
+        match self.solve_resident_with_callback(model, opts, callback, Some(locations.into())) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.state = None;
+                Err(error)
+            }
+        }
+    }
 }
 
 impl Solver for GurobiPersistent {
@@ -170,18 +249,24 @@ fn push_deltas(
             built
                 .model
                 .set_obj_attr(attr::Obj, &built.vars[i], snap.obj_costs[i])
-                .map_err(map_grb_err)?;
+                .map_err(map_gurobi_err)?;
         }
         if snap.lb[i].to_bits() != base.lb[i].to_bits() {
-            built.model.set_obj_attr(attr::LB, &built.vars[i], snap.lb[i]).map_err(map_grb_err)?;
+            built
+                .model
+                .set_obj_attr(attr::LB, &built.vars[i], snap.lb[i])
+                .map_err(map_gurobi_err)?;
         }
         if snap.ub[i].to_bits() != base.ub[i].to_bits() {
-            built.model.set_obj_attr(attr::UB, &built.vars[i], snap.ub[i]).map_err(map_grb_err)?;
+            built
+                .model
+                .set_obj_attr(attr::UB, &built.vars[i], snap.ub[i])
+                .map_err(map_gurobi_err)?;
         }
     }
     if snap.obj_constant.to_bits() != base.obj_constant.to_bits() {
-        built.model.set_attr(attr::ObjCon, snap.obj_constant).map_err(map_grb_err)?;
+        built.model.set_attr(attr::ObjCon, snap.obj_constant).map_err(map_gurobi_err)?;
     }
-    apply_options(&mut built.model, opts).map_err(map_grb_err)?;
+    apply_options(&mut built.model, opts).map_err(map_gurobi_err)?;
     Ok(())
 }

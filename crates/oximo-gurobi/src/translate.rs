@@ -1,7 +1,8 @@
 use std::time::Instant;
 
-use grb::expr::{LinExpr, QuadExpr};
-use grb::prelude::*;
+use gurobi_rs::constr::RangeExpr;
+use gurobi_rs::expr::{LinExpr, QuadExpr};
+use gurobi_rs::prelude::*;
 use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraint,
     SocConstraintId, VarId, Variable, var_name,
@@ -13,10 +14,10 @@ use oximo_solver::{
 use rustc_hash::FxHashMap;
 
 use crate::GurobiOptions;
-use crate::nonlinear::{LoweredExpr, LoweringCtx, lower};
+use crate::nonlinear::{GeneratedConstraint, LoweredExpr, LoweringCtx, lower};
 use crate::options::apply as apply_options;
 
-pub(crate) fn map_grb_err(e: grb::Error) -> SolverError {
+pub(crate) fn map_gurobi_err(e: gurobi_rs::Error) -> SolverError {
     SolverError::Backend(format!("Gurobi: {e}"))
 }
 
@@ -47,10 +48,10 @@ pub(crate) fn default_env() -> Result<Env, SolverError> {
 /// A built Gurobi model plus the handles needed to read its solution and to drive
 /// incremental re-solves.
 pub(crate) struct Built {
-    pub model: grb::Model,
-    pub vars: Vec<grb::Var>,
-    pub constrs: Vec<GrbRow>,
-    pub soc_rows: Vec<(grb::QConstr, LinearTerms)>,
+    pub model: gurobi_rs::Model,
+    pub vars: Vec<gurobi_rs::Var>,
+    pub constrs: Vec<ConstraintHandle>,
+    pub soc_rows: Vec<SocHandle>,
     pub obj_constant: f64,
     pub has_semi: bool,
 }
@@ -82,36 +83,47 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     let objective = model.objective();
     let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
 
-    let mut grb_model = grb::Model::with_env("oximo", env).map_err(map_grb_err)?;
+    let mut gurobi_model = gurobi_rs::Model::with_env("oximo", env).map_err(map_gurobi_err)?;
 
-    let gurobi_vars = add_variables(&mut grb_model, &vars)?;
+    let gurobi_vars = add_variables(&mut gurobi_model, &vars)?;
 
     // Aux-variable counter shared by the constraint and objective lowering so the
     // synthetic variable names stay unique across both.
     let mut aux_counter = 0_u32;
     let gurobi_constrs =
-        add_constraints(&arena, constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
-    let soc_rows = add_soc_rows(&arena, &vars, &socs, &mut grb_model, &gurobi_vars)?;
+        add_constraints(&arena, constraints, &mut gurobi_model, &gurobi_vars, &mut aux_counter)?;
+    let soc_rows = add_soc_rows(&arena, &vars, &socs, &mut gurobi_model, &gurobi_vars)?;
 
     let obj_constant = match objective.as_ref() {
-        Some(o) => {
-            set_objective(&arena, o.expr, o.sense, &mut grb_model, &gurobi_vars, &mut aux_counter)?
-        }
+        Some(o) => set_objective(
+            &arena,
+            o.expr,
+            o.sense,
+            &mut gurobi_model,
+            &gurobi_vars,
+            &mut aux_counter,
+        )?,
         None => 0.0,
     };
 
-    apply_options(&mut grb_model, opts).map_err(map_grb_err)?;
+    // Warm starts are assigned only after the full structural model has been
+    // built. This keeps the batch variable construction and the start vector
+    // compatible with Gurobi's pending-update rules.
+    apply_initial_values(&gurobi_model, &vars, &gurobi_vars)?;
+
+    apply_options(&mut gurobi_model, opts).map_err(map_gurobi_err)?;
     if nonlinear_kind {
         // Gurobi requires NonConvex=2 for general nonlinear constraints and
         // bilinear non-convex objectives. Skip if the user already set it.
-        let current = grb_model.get_param(grb::param::NonConvex).map_err(map_grb_err)?;
+        let current =
+            gurobi_model.get_param(gurobi_rs::param::NonConvex).map_err(map_gurobi_err)?;
         if current < 2 {
-            grb_model.set_param(grb::param::NonConvex, 2).map_err(map_grb_err)?;
+            gurobi_model.set_param(gurobi_rs::param::NonConvex, 2).map_err(map_gurobi_err)?;
         }
     }
 
     Ok(Built {
-        model: grb_model,
+        model: gurobi_model,
         vars: gurobi_vars,
         constrs: gurobi_constrs,
         soc_rows,
@@ -131,9 +143,35 @@ pub(crate) fn run_and_collect(
     kind: ModelKind,
 ) -> Result<SolverResult, SolverError> {
     let started = Instant::now();
-    built.model.optimize().map_err(map_grb_err)?;
-    let elapsed = started.elapsed();
+    built.model.optimize().map_err(map_gurobi_err)?;
+    collect_after_optimize(built, kind, started.elapsed())
+}
 
+/// Optimize with a user callback and collect results through the same path as
+/// an ordinary solve. Callback failures are surfaced as [`SolverError`].
+pub(crate) fn run_and_collect_with_callback<F>(
+    built: &mut Built,
+    kind: ModelKind,
+    callback: &mut F,
+    mask: Option<gurobi_rs::callback::CallbackMask>,
+) -> Result<SolverResult, SolverError>
+where
+    F: gurobi_rs::callback::Callback,
+{
+    let started = Instant::now();
+    match mask {
+        Some(mask) => built.model.optimize_with_callback_filtered(callback, mask),
+        None => built.model.optimize_with_callback(callback),
+    }
+    .map_err(map_gurobi_err)?;
+    collect_after_optimize(built, kind, started.elapsed())
+}
+
+fn collect_after_optimize(
+    built: &mut Built,
+    kind: ModelKind,
+    elapsed: std::time::Duration,
+) -> Result<SolverResult, SolverError> {
     let termination = map_status(&built.model)?;
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let iterations = built.model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
@@ -166,6 +204,22 @@ pub(crate) fn run_and_collect(
     })
 }
 
+/// Build, optimize with a callback, and collect the ordinary solver result.
+pub fn solve_with_callback<F>(
+    model: &Model,
+    opts: &GurobiOptions,
+    callback: &mut F,
+    mask: Option<gurobi_rs::callback::CallbackMask>,
+) -> Result<SolverResult, SolverError>
+where
+    F: gurobi_rs::callback::Callback,
+{
+    let kind = model.kind();
+    let env = default_env()?;
+    let mut built = build(model, opts, &env)?;
+    run_and_collect_with_callback(&mut built, kind, callback, mask)
+}
+
 /// Build `model`, solve it, and when Gurobi finds it infeasible compute an
 /// irreducible infeasible subsystem via Gurobi's `computeIIS`.
 ///
@@ -185,8 +239,8 @@ pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverErr
     let mut built = build(model, opts, &env)?;
     // Force a definite Infeasible/Unbounded verdict so we don't ask for an IIS on an
     // unbounded model.
-    built.model.set_param(grb::param::DualReductions, 0).map_err(map_grb_err)?;
-    built.model.optimize().map_err(map_grb_err)?;
+    built.model.set_param(gurobi_rs::param::DualReductions, 0).map_err(map_gurobi_err)?;
+    built.model.optimize().map_err(map_gurobi_err)?;
     compute_iis_resident(&mut built)
 }
 
@@ -212,13 +266,14 @@ pub(crate) fn compute_iis_resident(built: &mut Built) -> Result<Iis, SolverError
         // Dual reductions can leave "infeasible or unbounded". Turn them off just
         // for a disambiguating re-optimize, then restore the saved value so the
         // resident model's parameter state is unchanged for later solves.
-        let saved = built.model.get_param(grb::param::DualReductions).map_err(map_grb_err)?;
-        built.model.set_param(grb::param::DualReductions, 0).map_err(map_grb_err)?;
+        let saved =
+            built.model.get_param(gurobi_rs::param::DualReductions).map_err(map_gurobi_err)?;
+        built.model.set_param(gurobi_rs::param::DualReductions, 0).map_err(map_gurobi_err)?;
         let outcome = (|| {
-            built.model.optimize().map_err(map_grb_err)?;
+            built.model.optimize().map_err(map_gurobi_err)?;
             map_status(&built.model)
         })();
-        built.model.set_param(grb::param::DualReductions, saved).map_err(map_grb_err)?;
+        built.model.set_param(gurobi_rs::param::DualReductions, saved).map_err(map_gurobi_err)?;
         termination = outcome?;
     }
     if !termination.is_infeasible() {
@@ -227,7 +282,13 @@ pub(crate) fn compute_iis_resident(built: &mut Built) -> Result<Iis, SolverError
         )));
     }
 
-    built.model.compute_iis().map_err(map_grb_err)?;
+    built.model.compute_iis().map_err(map_gurobi_err)?;
+    let minimal = built.model.get_attr(attr::IISMinimal).map_err(map_gurobi_err)?;
+    if minimal != 1 {
+        return Err(SolverError::Backend(
+            "Gurobi IIS computation was interrupted or did not produce a minimal subsystem".into(),
+        ));
+    }
     read_iis(built)
 }
 
@@ -238,20 +299,37 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
     let model = &built.model;
     let mut iis = Iis::default();
 
-    for (i, row) in built.constrs.iter().enumerate() {
-        let in_iis = match row {
-            GrbRow::Lin(c) => model.get_obj_attr(attr::IISConstr, c),
-            GrbRow::Quad(q) => model.get_obj_attr(attr::IISQConstr, q),
+    for (i, handle) in built.constrs.iter().enumerate() {
+        let mut in_iis = false;
+        for row in &handle.rows {
+            let selected = match row {
+                GurobiRow::Lin(c) => model.get_obj_attr(attr::IISConstr, c),
+                GurobiRow::Quad(q) => model.get_obj_attr(attr::IISQConstr, q),
+            }
+            .map_err(map_gurobi_err)?;
+            in_iis |= selected != 0;
         }
-        .map_err(map_grb_err)?;
-        if in_iis != 0 {
+        for generated in &handle.generated {
+            let selected = match generated {
+                GeneratedConstraint::Linear(c) => model.get_obj_attr(attr::IISConstr, c),
+                GeneratedConstraint::Quadratic(q) => model.get_obj_attr(attr::IISQConstr, q),
+                GeneratedConstraint::General(g) => model.get_obj_attr(attr::IISGenConstr, g),
+            }
+            .map_err(map_gurobi_err)?;
+            in_iis |= selected != 0;
+        }
+        if in_iis {
             iis.constraints
                 .push(ConstraintId(u32::try_from(i).expect("constraint index fits u32")));
         }
     }
 
-    for (i, (qrow, _)) in built.soc_rows.iter().enumerate() {
-        if model.get_obj_attr(attr::IISQConstr, qrow).map_err(map_grb_err)? != 0 {
+    for (i, handle) in built.soc_rows.iter().enumerate() {
+        let quadratic =
+            model.get_obj_attr(attr::IISQConstr, &handle.quadratic).map_err(map_gurobi_err)?;
+        let sign =
+            model.get_obj_attr(attr::IISConstr, &handle.bound_sign).map_err(map_gurobi_err)?;
+        if quadratic != 0 || sign != 0 {
             iis.soc_constraints
                 .push(SocConstraintId(u32::try_from(i).expect("soc index fits u32")));
         }
@@ -260,10 +338,10 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
     // Only model variables are scanned.
     for (i, v) in built.vars.iter().enumerate() {
         let id = VarId(u32::try_from(i).expect("var index fits u32"));
-        if model.get_obj_attr(attr::IISLB, v).map_err(map_grb_err)? != 0 {
+        if model.get_obj_attr(attr::IISLB, v).map_err(map_gurobi_err)? != 0 {
             iis.var_bounds.push((id, VarBoundKind::Lower));
         }
-        if model.get_obj_attr(attr::IISUB, v).map_err(map_grb_err)? != 0 {
+        if model.get_obj_attr(attr::IISUB, v).map_err(map_gurobi_err)? != 0 {
             iis.var_bounds.push((id, VarBoundKind::Upper));
         }
     }
@@ -274,11 +352,10 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
 /// Add one Gurobi variable per model variable, in `VarId` order, applying its
 /// domain, bounds, and any warm-start value.
 fn add_variables(
-    grb_model: &mut grb::Model,
+    gurobi_model: &mut gurobi_rs::Model,
     vars: &[Variable],
-) -> Result<Vec<grb::Var>, SolverError> {
-    let mut gurobi_vars = Vec::with_capacity(vars.len());
-    for v in vars {
+) -> Result<Vec<gurobi_rs::Var>, SolverError> {
+    let specs = vars.iter().map(|v| {
         let vtype = match v.domain {
             Domain::Real => VarType::Continuous,
             Domain::Integer => VarType::Integer,
@@ -289,89 +366,168 @@ fn add_variables(
         // For a semi-continuous/semi-integer variable the gap floor (`threshold`)
         // is Gurobi's lower bound: the value is 0 or in `[lb, ub]`.
         let floor = v.domain.semi_threshold().unwrap_or(v.lb);
-        // `add_var!` expands the f64 bounds with an `as f64` cast.
-        #[expect(clippy::unnecessary_cast)]
-        let gvar = add_var!(grb_model, vtype, bounds: floor..v.ub, name: v.name.as_str())
-            .map_err(map_grb_err)?;
-        gurobi_vars.push(gvar);
-        if let Some(val) = v.initial {
-            grb_model.set_obj_attr(attr::Start, &gvar, val).map_err(map_grb_err)?;
-        }
-    }
-    Ok(gurobi_vars)
+        gurobi_rs::VarSpec::new(v.name.as_str(), vtype, 0.0, floor, v.ub, [])
+    });
+    gurobi_model.add_vars(specs).map_err(map_gurobi_err)
+}
+
+fn apply_initial_values(
+    gurobi_model: &gurobi_rs::Model,
+    vars: &[Variable],
+    gurobi_vars: &[gurobi_rs::Var],
+) -> Result<(), SolverError> {
+    let starts = vars
+        .iter()
+        .zip(gurobi_vars.iter().copied())
+        .filter_map(|(v, var)| v.initial.map(|value| (var, value)));
+    gurobi_model.set_obj_attr_batch(attr::Start, starts).map_err(map_gurobi_err)
 }
 
 /// Gurobi's handle for an added constraint, kept so its dual can be queried
 /// after the solve (`Pi` for linear rows, `QCPi` for quadratic rows).
-pub(crate) enum GrbRow {
-    Lin(grb::Constr),
-    Quad(grb::QConstr),
+pub(crate) enum GurobiRow {
+    Lin(gurobi_rs::Constr),
+    Quad(gurobi_rs::QConstr),
+}
+
+/// All native rows and generated definitions associated with one original
+/// algebraic constraint. A nonlinear range may have two comparison rows.
+pub(crate) struct ConstraintHandle {
+    pub rows: Vec<GurobiRow>,
+    pub generated: Vec<GeneratedConstraint>,
+}
+
+/// The native rows associated with one explicit second-order cone.
+///
+/// Squaring `||terms|| <= bound` also requires the generated `bound >= 0`
+/// side row. Both rows belong to the original cone for IIS reporting.
+pub(crate) struct SocHandle {
+    pub quadratic: gurobi_rs::QConstr,
+    pub bound_sign: gurobi_rs::Constr,
+    pub bound: LinearTerms,
 }
 
 /// Add every model constraint, returning the per-constraint row handle.
 /// Each constraint takes the linear fast path when its LHS is linear
 /// and falls back to the general lowering otherwise.
+#[expect(clippy::too_many_lines)]
 fn add_constraints(
     arena: &ExprArena,
     constraints: &[Constraint],
-    grb_model: &mut grb::Model,
-    gurobi_vars: &[grb::Var],
+    gurobi_model: &mut gurobi_rs::Model,
+    gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
-) -> Result<Vec<GrbRow>, SolverError> {
-    // One `GrbRow` per oximo constraint keeps `gurobi_constrs` 1:1 with
-    // `ConstraintId`, which `collect_solution` relies on to key duals. A
-    // two-sided range becomes a single native `add_range` row.
-    let mut gurobi_constrs: Vec<GrbRow> = Vec::with_capacity(constraints.len());
-    for c in constraints {
-        let name = c.name.as_str();
+) -> Result<Vec<ConstraintHandle>, SolverError> {
+    struct PendingSingle {
+        index: usize,
+        name: String,
+        expr: LinExpr,
+        sense: Sense,
+        rhs: f64,
+    }
+    struct PendingRange {
+        index: usize,
+        name: String,
+        expr: LinExpr,
+        lower: f64,
+        upper: f64,
+    }
+
+    let mut slots: Vec<Option<ConstraintHandle>> = (0..constraints.len()).map(|_| None).collect();
+    let mut singles = Vec::new();
+    let mut ranges = Vec::new();
+    let mut nonlinear = Vec::new();
+
+    for (index, c) in constraints.iter().enumerate() {
         if let Some((sense, rhs)) = c.as_single() {
             if let Some(t) = extract_linear(arena, c.lhs) {
-                let adjusted_rhs = rhs - t.constant;
                 let mut expr = LinExpr::new();
-                for (v, co) in t.coeffs {
-                    expr.add_term(co, gurobi_vars[v.index()]);
+                for (v, coeff) in t.coeffs {
+                    expr.add_term(coeff, gurobi_vars[v.index()]);
                 }
-                let constr = match sense {
-                    Sense::Le => grb_model.add_constr(name, c!(expr <= adjusted_rhs)),
-                    Sense::Ge => grb_model.add_constr(name, c!(expr >= adjusted_rhs)),
-                    Sense::Eq => grb_model.add_constr(name, c!(expr == adjusted_rhs)),
-                }
-                .map_err(map_grb_err)?;
-                gurobi_constrs.push(GrbRow::Lin(constr));
-            } else {
-                let row = add_nonlinear_constraint(
-                    arena,
-                    c.lhs,
+                singles.push(PendingSingle {
+                    index,
+                    name: c.name.to_string(),
+                    expr,
                     sense,
-                    rhs,
-                    name,
-                    grb_model,
-                    gurobi_vars,
-                    aux_counter,
-                )?;
-                gurobi_constrs.push(row);
+                    rhs: rhs - t.constant,
+                });
+            } else {
+                nonlinear.push(index);
             }
-        } else {
-            // Genuine two-sided range. Gurobi's `add_range` is linear-only.
-            let Some(t) = extract_linear(arena, c.lhs) else {
-                return Err(SolverError::Backend(format!(
-                    "Gurobi does not support a two-sided range on a nonlinear constraint ('{}')",
-                    c.name
-                )));
-            };
-            let lower = c.lower - t.constant;
-            let upper = c.upper - t.constant;
+        } else if let Some(t) = extract_linear(arena, c.lhs) {
             let mut expr = LinExpr::new();
-            for (v, co) in t.coeffs {
-                expr.add_term(co, gurobi_vars[v.index()]);
+            for (v, coeff) in t.coeffs {
+                expr.add_term(coeff, gurobi_vars[v.index()]);
             }
-            #[expect(clippy::unnecessary_cast)]
-            let (_slack, constr) =
-                grb_model.add_range(name, c!(expr in lower..upper)).map_err(map_grb_err)?;
-            gurobi_constrs.push(GrbRow::Lin(constr));
+            ranges.push(PendingRange {
+                index,
+                name: c.name.to_string(),
+                expr,
+                lower: c.lower - t.constant,
+                upper: c.upper - t.constant,
+            });
+        } else {
+            nonlinear.push(index);
         }
     }
-    Ok(gurobi_constrs)
+
+    let single_batch: Vec<_> = singles
+        .iter()
+        .map(|p| {
+            let expr = p.expr.clone();
+            let ineq = match p.sense {
+                Sense::Le => c!(expr <= p.rhs),
+                Sense::Ge => c!(expr >= p.rhs),
+                Sense::Eq => c!(expr == p.rhs),
+            };
+            (p.name.clone(), ineq)
+        })
+        .collect();
+    let single_handles = gurobi_model
+        .add_constrs(single_batch.iter().map(|(name, expr)| (name, expr.clone())))
+        .map_err(map_gurobi_err)?;
+    for (pending, handle) in singles.into_iter().zip(single_handles) {
+        slots[pending.index] =
+            Some(ConstraintHandle { rows: vec![GurobiRow::Lin(handle)], generated: Vec::new() });
+    }
+
+    let range_batch: Vec<_> = ranges
+        .iter()
+        .map(|p| {
+            (p.name.clone(), RangeExpr { expr: p.expr.clone().into(), lb: p.lower, ub: p.upper })
+        })
+        .collect();
+    let range_handles = gurobi_model
+        .add_ranges(range_batch.iter().map(|(name, expr)| (name, expr.clone())))
+        .map_err(map_gurobi_err)?;
+    for (pending, handle) in ranges.into_iter().zip(range_handles.1) {
+        slots[pending.index] =
+            Some(ConstraintHandle { rows: vec![GurobiRow::Lin(handle)], generated: Vec::new() });
+    }
+
+    for index in nonlinear {
+        let c = &constraints[index];
+        let (rows, generated) = add_nonlinear_constraint(
+            arena,
+            c.lhs,
+            c.as_single(),
+            c.lower,
+            c.upper,
+            c.name.as_str(),
+            gurobi_model,
+            gurobi_vars,
+            aux_counter,
+        )?;
+        slots[index] = Some(ConstraintHandle { rows, generated });
+    }
+
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.ok_or_else(|| SolverError::Backend("internal constraint batching error".into()))
+        })
+        .collect()
 }
 
 /// Lower each explicit SOC constraint `||terms||_2 <= bound` to the quadratic
@@ -385,9 +541,9 @@ fn add_soc_rows(
     arena: &ExprArena,
     vars: &[Variable],
     socs: &[SocConstraint],
-    grb_model: &mut grb::Model,
-    gurobi_vars: &[grb::Var],
-) -> Result<Vec<(grb::QConstr, LinearTerms)>, SolverError> {
+    gurobi_model: &mut gurobi_rs::Model,
+    gurobi_vars: &[gurobi_rs::Var],
+) -> Result<Vec<SocHandle>, SolverError> {
     let mut rows = Vec::with_capacity(socs.len());
     for (i, s) in socs.iter().enumerate() {
         let mut q = QuadExpr::new();
@@ -405,21 +561,28 @@ fn add_soc_rows(
                 .unwrap_or_else(|| "<nonlinear>".into()),
         })?;
         add_squared_affine(&mut q, &b, -1.0, gurobi_vars);
-        let qrow = grb_model.add_qconstr(s.name.as_str(), c!(q <= 0.0)).map_err(map_grb_err)?;
+        let qrow =
+            gurobi_model.add_qconstr(s.name.as_str(), c!(q <= 0.0)).map_err(map_gurobi_err)?;
 
         let mut e = LinExpr::new();
         for &(v, co) in &b.coeffs {
             e.add_term(co, gurobi_vars[v.index()]);
         }
         let sign_name = format!("{}_sign", s.name);
-        grb_model.add_constr(&sign_name, c!(e >= -b.constant)).map_err(map_grb_err)?;
-        rows.push((qrow, b));
+        let sign_row =
+            gurobi_model.add_constr(&sign_name, c!(e >= -b.constant)).map_err(map_gurobi_err)?;
+        rows.push(SocHandle { quadratic: qrow, bound_sign: sign_row, bound: b });
     }
     Ok(rows)
 }
 
 /// Expand `sign * (a'x + c)^2` into `q`.
-fn add_squared_affine(q: &mut QuadExpr, t: &LinearTerms, sign: f64, gurobi_vars: &[grb::Var]) {
+fn add_squared_affine(
+    q: &mut QuadExpr,
+    t: &LinearTerms,
+    sign: f64,
+    gurobi_vars: &[gurobi_rs::Var],
+) {
     for (i, &(vi, ci)) in t.coeffs.iter().enumerate() {
         q.add_qterm(sign * ci * ci, gurobi_vars[vi.index()], gurobi_vars[vi.index()]);
         for &(vj, cj) in &t.coeffs[i + 1..] {
@@ -438,54 +601,88 @@ fn add_squared_affine(q: &mut QuadExpr, t: &LinearTerms, sign: f64, gurobi_vars:
 fn add_nonlinear_constraint(
     arena: &ExprArena,
     lhs: ExprId,
-    sense: Sense,
-    rhs: f64,
+    single: Option<(Sense, f64)>,
+    lower_bound: f64,
+    upper: f64,
     name: &str,
-    grb_model: &mut grb::Model,
-    gurobi_vars: &[grb::Var],
+    gurobi_model: &mut gurobi_rs::Model,
+    gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
-) -> Result<GrbRow, SolverError> {
-    let mut ctx = LoweringCtx { model: grb_model, gurobi_vars, aux_counter: *aux_counter };
+) -> Result<(Vec<GurobiRow>, Vec<GeneratedConstraint>), SolverError> {
+    let mut ctx = LoweringCtx {
+        model: gurobi_model,
+        gurobi_vars,
+        aux_counter: *aux_counter,
+        generated: Vec::new(),
+    };
     let lowered = lower(arena, lhs, &mut ctx)?;
     *aux_counter = ctx.aux_counter;
-    let row = match lowered {
-        LoweredExpr::Linear(e) => GrbRow::Lin(
-            match sense {
-                Sense::Le => grb_model.add_constr(name, c!(e <= rhs)),
-                Sense::Ge => grb_model.add_constr(name, c!(e >= rhs)),
-                Sense::Eq => grb_model.add_constr(name, c!(e == rhs)),
+    let generated = std::mem::take(&mut ctx.generated);
+    drop(ctx);
+    let rows = add_comparison_rows(gurobi_model, name, &lowered, single, lower_bound, upper)?;
+    Ok((rows, generated))
+}
+
+fn add_comparison_rows(
+    model: &mut gurobi_rs::Model,
+    name: &str,
+    value: &LoweredExpr,
+    single: Option<(Sense, f64)>,
+    lower: f64,
+    upper: f64,
+) -> Result<Vec<GurobiRow>, SolverError> {
+    let senses = single.map_or_else(
+        || vec![(Sense::Ge, lower), (Sense::Le, upper)],
+        |(sense, rhs)| vec![(sense, rhs)],
+    );
+    senses
+        .into_iter()
+        .enumerate()
+        .map(|(i, (sense, rhs))| {
+            let row_name =
+                if i == 0 && single.is_some() { name.to_string() } else { format!("{name}_{i}") };
+            match value {
+                LoweredExpr::Linear(e) => {
+                    let row = match sense {
+                        Sense::Le => model.add_constr(&row_name, c!(e.clone() <= rhs)),
+                        Sense::Ge => model.add_constr(&row_name, c!(e.clone() >= rhs)),
+                        Sense::Eq => model.add_constr(&row_name, c!(e.clone() == rhs)),
+                    }
+                    .map_err(map_gurobi_err)?;
+                    Ok(GurobiRow::Lin(row))
+                }
+                LoweredExpr::Quadratic(e) => {
+                    let row = match sense {
+                        Sense::Le => model.add_qconstr(&row_name, c!(e.clone() <= rhs)),
+                        Sense::Ge => model.add_qconstr(&row_name, c!(e.clone() >= rhs)),
+                        Sense::Eq => model.add_qconstr(&row_name, c!(e.clone() == rhs)),
+                    }
+                    .map_err(map_gurobi_err)?;
+                    Ok(GurobiRow::Quad(row))
+                }
+                LoweredExpr::Var(v) => {
+                    let row = match sense {
+                        Sense::Le => model.add_constr(&row_name, c!(v <= rhs)),
+                        Sense::Ge => model.add_constr(&row_name, c!(v >= rhs)),
+                        Sense::Eq => model.add_constr(&row_name, c!(v == rhs)),
+                    }
+                    .map_err(map_gurobi_err)?;
+                    Ok(GurobiRow::Lin(row))
+                }
             }
-            .map_err(map_grb_err)?,
-        ),
-        LoweredExpr::Quadratic(e) => GrbRow::Quad(
-            match sense {
-                Sense::Le => grb_model.add_qconstr(name, c!(e <= rhs)),
-                Sense::Ge => grb_model.add_qconstr(name, c!(e >= rhs)),
-                Sense::Eq => grb_model.add_qconstr(name, c!(e == rhs)),
-            }
-            .map_err(map_grb_err)?,
-        ),
-        LoweredExpr::Var(v) => GrbRow::Lin(
-            match sense {
-                Sense::Le => grb_model.add_constr(name, c!(v <= rhs)),
-                Sense::Ge => grb_model.add_constr(name, c!(v >= rhs)),
-                Sense::Eq => grb_model.add_constr(name, c!(v == rhs)),
-            }
-            .map_err(map_grb_err)?,
-        ),
-    };
-    Ok(row)
+        })
+        .collect()
 }
 
 fn set_objective(
     arena: &ExprArena,
     obj_expr: ExprId,
     sense: ObjectiveSense,
-    grb_model: &mut grb::Model,
-    gurobi_vars: &[grb::Var],
+    gurobi_model: &mut gurobi_rs::Model,
+    gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
 ) -> Result<f64, SolverError> {
-    let grb_sense = match sense {
+    let gurobi_sense = match sense {
         ObjectiveSense::Minimize => ModelSense::Minimize,
         ObjectiveSense::Maximize => ModelSense::Maximize,
     };
@@ -497,13 +694,20 @@ fn set_objective(
         // Gurobi's set_objective absorbs LinExpr offsets into ObjCon, so we do
         // not need to track the constant separately.
         e.add_constant(t.constant);
-        grb_model.set_objective(e, grb_sense).map_err(map_grb_err)?;
+        gurobi_model.set_objective(e, gurobi_sense).map_err(map_gurobi_err)?;
         return Ok(0.0);
     }
-    let mut ctx = LoweringCtx { model: grb_model, gurobi_vars, aux_counter: *aux_counter };
+    let mut ctx = LoweringCtx {
+        model: gurobi_model,
+        gurobi_vars,
+        aux_counter: *aux_counter,
+        generated: Vec::new(),
+    };
     let lowered = lower(arena, obj_expr, &mut ctx)?;
     *aux_counter = ctx.aux_counter;
-    grb_model.set_objective(lowered.into_expr_for_objective(), grb_sense).map_err(map_grb_err)?;
+    gurobi_model
+        .set_objective(lowered.into_expr_for_objective(), gurobi_sense)
+        .map_err(map_gurobi_err)?;
     Ok(0.0)
 }
 
@@ -527,10 +731,10 @@ type Collected = (
 
 fn collect_solution(
     kind: ModelKind,
-    model: &mut grb::Model,
-    vars: &[grb::Var],
-    constrs: &[GrbRow],
-    soc_rows: &[(grb::QConstr, LinearTerms)],
+    model: &mut gurobi_rs::Model,
+    vars: &[gurobi_rs::Var],
+    constrs: &[ConstraintHandle],
+    soc_rows: &[SocHandle],
     obj_constant: f64,
 ) -> Collected {
     // A primal point exists only when Gurobi actually stored one. `SolCount` is
@@ -558,13 +762,21 @@ fn collect_solution(
 
     let mut dual = FxHashMap::default();
     dual.reserve(constrs.len());
-    for (i, row) in constrs.iter().enumerate() {
-        let pi = match row {
-            GrbRow::Lin(c) => model.get_obj_attr(attr::Pi, c),
-            GrbRow::Quad(q) => model.get_obj_attr(attr::QCPi, q),
-        };
-        if let Ok(pi) = pi {
-            dual.insert(ConstraintId(u32::try_from(i).unwrap()), pi);
+    for (i, handle) in constrs.iter().enumerate() {
+        let mut value = 0.0;
+        let mut available = false;
+        for row in &handle.rows {
+            let pi = match row {
+                GurobiRow::Lin(c) => model.get_obj_attr(attr::Pi, c),
+                GurobiRow::Quad(q) => model.get_obj_attr(attr::QCPi, q),
+            };
+            if let Ok(pi) = pi {
+                value += pi;
+                available = true;
+            }
+        }
+        if available {
+            dual.insert(ConstraintId(u32::try_from(i).unwrap()), value);
         }
     }
 
@@ -574,10 +786,11 @@ fn collect_solution(
     let mut soc_dual = FxHashMap::default();
     soc_dual.reserve(soc_rows.len());
     let primal = &solutions[0].primal;
-    for (i, (qrow, bound)) in soc_rows.iter().enumerate() {
-        if let Ok(pi) = model.get_obj_attr(attr::QCPi, qrow) {
-            let b_val = bound.constant
-                + bound
+    for (i, handle) in soc_rows.iter().enumerate() {
+        if let Ok(pi) = model.get_obj_attr(attr::QCPi, &handle.quadratic) {
+            let b_val = handle.bound.constant
+                + handle
+                    .bound
                     .coeffs
                     .iter()
                     .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
@@ -591,8 +804,8 @@ fn collect_solution(
 
 /// Collect the `n` pooled primal points, best first.
 fn collect_pool(
-    model: &mut grb::Model,
-    vars: &[grb::Var],
+    model: &mut gurobi_rs::Model,
+    vars: &[gurobi_rs::Var],
     obj_constant: f64,
     n: i32,
 ) -> Vec<SolutionPoint> {
@@ -611,7 +824,7 @@ fn collect_pool(
     // `SolutionNumber` selects which one `Xn` / `PoolObjVal` report.
     let mut out = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
     for k in 0..n {
-        if model.set_param(grb::param::SolutionNumber, k).is_err() {
+        if model.set_param(gurobi_rs::param::SolutionNumber, k).is_err() {
             break;
         }
         let Ok(vals) = model.get_obj_attr_batch(attr::Xn, vars.iter().copied()) else {
@@ -633,8 +846,8 @@ fn index_map(vals: &[f64]) -> FxHashMap<VarId, f64> {
     map
 }
 
-fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
-    let status = model.get_attr(attr::Status).map_err(map_grb_err)?;
+fn map_status(model: &gurobi_rs::Model) -> Result<TerminationStatus, SolverError> {
+    let status = model.get_attr(attr::Status).map_err(map_gurobi_err)?;
     Ok(match status {
         Status::Optimal => TerminationStatus::Optimal,
         Status::Infeasible => TerminationStatus::Infeasible,
@@ -644,10 +857,18 @@ fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
         Status::TimeLimit => TerminationStatus::TimeLimit,
         Status::IterationLimit => TerminationStatus::IterationLimit,
         Status::NodeLimit => TerminationStatus::NodeLimit,
+        Status::Interrupted
+        | Status::CutOff
+        | Status::SolutionLimit
+        | Status::UserObjLimit
+        | Status::WorkLimit
+        | Status::MemLimit => TerminationStatus::Interrupted,
+        Status::LocallyOptimal => TerminationStatus::LocallyOptimal,
+        Status::LocallyInfeasible => TerminationStatus::Other("LocallyInfeasible".into()),
         // Gurobi could not meet optimality tolerances but holds a feasible point.
         Status::SubOptimal => TerminationStatus::Feasible,
         Status::Loaded => TerminationStatus::NotSolved,
-        _ => TerminationStatus::Other(format!("Status: {status:?}")),
+        Status::InProgress => TerminationStatus::Other("Status: InProgress".into()),
     })
 }
 
