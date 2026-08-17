@@ -2,15 +2,29 @@
 
 use oximo_core::prelude::*;
 use oximo_gurobi::{
-    Callback, CallbackLocation, CallbackMask, CbResult, Gurobi, GurobiOptions, Where,
+    Callback, CallbackLocation, CallbackMask, CbResult, Gurobi, GurobiOptions, GurobiPresolve,
+    Where,
 };
 
 #[derive(Default)]
-struct Counter(usize);
+struct Locations(Vec<CallbackLocation>);
 
-impl Callback for Counter {
-    fn callback(&mut self, _where: Where) -> CbResult {
-        self.0 += 1;
+impl Callback for Locations {
+    fn callback(&mut self, where_: Where) -> CbResult {
+        let location = match where_ {
+            Where::Polling(_) => CallbackLocation::Polling,
+            Where::PreSolve(_) => CallbackLocation::PreSolve,
+            Where::Simplex(_) => CallbackLocation::Simplex,
+            Where::MIP(_) => CallbackLocation::Mip,
+            Where::MIPSol(_) => CallbackLocation::MipSol,
+            Where::MIPNode(_) => CallbackLocation::MipNode,
+            Where::Message(_) => CallbackLocation::Message,
+            Where::Barrier(_) => CallbackLocation::Barrier,
+            Where::MultiObj(_) => CallbackLocation::MultiObj,
+            Where::IIS(_) => CallbackLocation::Iis,
+            _ => return Err(std::io::Error::other("unexpected callback location").into()),
+        };
+        self.0.push(location);
         Ok(())
     }
 }
@@ -22,19 +36,23 @@ fn callback_solve_uses_common_result_collection() {
     constraint!(m, cap, sum!(x[i] for i in 0..4) <= 2.0);
     objective!(m, Max, sum!(x[i] for i in 0..4));
 
-    let mut callback = Counter::default();
+    let mut callback = Locations::default();
     let mut solver = Gurobi;
+    let mask = CallbackMask::from(CallbackLocation::Polling) | CallbackLocation::Mip;
     let result = solver
         .solve_with_callback_filtered(
             &m,
-            &GurobiOptions::default(),
+            &GurobiOptions::default().presolve(GurobiPresolve::Off),
             &mut callback,
-            CallbackMask::from(CallbackLocation::Polling) | CallbackLocation::Mip,
+            mask,
         )
         .expect("callback solve");
 
     assert!(result.has_solution());
-    assert!(callback.0 > 0, "Gurobi did not invoke the callback");
+    assert!(!callback.0.is_empty(), "Gurobi did not invoke the callback");
+    for location in callback.0 {
+        assert!(mask.contains(location), "callback location {location:?} was not selected");
+    }
 }
 
 struct FailingCallback;
