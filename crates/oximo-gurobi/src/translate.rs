@@ -787,17 +787,19 @@ fn collect_solution(
     // Available only under `QCPDual=1`.
     let mut soc_dual = FxHashMap::default();
     soc_dual.reserve(soc_rows.len());
-    let primal = &solutions[0].primal;
-    for (i, handle) in soc_rows.iter().enumerate() {
-        if let Ok(pi) = model.get_obj_attr(attr::QCPi, &handle.quadratic) {
-            let b_val = handle.bound.constant
-                + handle
-                    .bound
-                    .coeffs
-                    .iter()
-                    .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
-                    .sum::<f64>();
-            soc_dual.insert(SocConstraintId(u32::try_from(i).unwrap()), 2.0 * b_val * pi.abs());
+    if let Some(first) = solutions.first() {
+        let primal = &first.primal;
+        for (i, handle) in soc_rows.iter().enumerate() {
+            if let Ok(pi) = model.get_obj_attr(attr::QCPi, &handle.quadratic) {
+                let b_val = handle.bound.constant
+                    + handle
+                        .bound
+                        .coeffs
+                        .iter()
+                        .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
+                        .sum::<f64>();
+                soc_dual.insert(SocConstraintId(u32::try_from(i).unwrap()), 2.0 * b_val * pi.abs());
+            }
         }
     }
 
@@ -814,12 +816,7 @@ fn collect_pool(
     // Single point (and the only path for LP/continuous models):
     // read the incumbent directly via `X` / `ObjVal`.
     if n <= 1 {
-        let primal = model
-            .get_obj_attr_batch(attr::X, vars.iter().copied())
-            .map(|v| index_map(&v))
-            .unwrap_or_default();
-        let objective = model.get_attr(attr::ObjVal).ok().map(|v| v + obj_constant);
-        return vec![SolutionPoint { primal, objective }];
+        return vec![collect_incumbent(model, vars, obj_constant)];
     }
 
     // A MIP solution pool. Gurobi sorts it best-first.
@@ -835,7 +832,23 @@ fn collect_pool(
         let objective = model.get_attr(attr::PoolObjVal).ok().map(|v| v + obj_constant);
         out.push(SolutionPoint { primal: index_map(&vals), objective });
     }
+    if out.is_empty() {
+        out.push(collect_incumbent(model, vars, obj_constant));
+    }
     out
+}
+
+fn collect_incumbent(
+    model: &mut gurobi_rs::Model,
+    vars: &[gurobi_rs::Var],
+    obj_constant: f64,
+) -> SolutionPoint {
+    let primal = model
+        .get_obj_attr_batch(attr::X, vars.iter().copied())
+        .map(|v| index_map(&v))
+        .unwrap_or_default();
+    let objective = model.get_attr(attr::ObjVal).ok().map(|v| v + obj_constant);
+    SolutionPoint { primal, objective }
 }
 
 /// Map a dense per-variable value array (in `VarId` order) to a sparse map.
