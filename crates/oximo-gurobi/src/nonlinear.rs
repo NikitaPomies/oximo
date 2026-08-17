@@ -311,15 +311,27 @@ fn append_sum(
     parent: Option<usize>,
     tree: &mut TreeBuilder,
 ) -> Result<usize, SolverError> {
-    if let Some((&last, rest)) = ids.split_last() {
-        if rest.is_empty() {
-            return append_tree(ctx, arena, last, parent, tree);
+    match ids {
+        [] => tree.push(Opcode::Constant, 0.0, parent),
+        [id] => append_tree(ctx, arena, *id, parent, tree),
+        _ => {
+            let mut operators = Vec::with_capacity(ids.len() - 1);
+            let mut current_parent = tree.push(Opcode::Plus, 0.0, parent)?;
+            operators.push(current_parent);
+            for _ in 1..ids.len() - 1 {
+                current_parent = tree.push(Opcode::Plus, 0.0, Some(current_parent))?;
+                operators.push(current_parent);
+            }
+
+            append_tree(ctx, arena, ids[0], Some(current_parent), tree)?;
+            if ids.len() > 2 {
+                append_tree(ctx, arena, ids[1], Some(current_parent), tree)?;
+                for (id, op) in ids[2..ids.len() - 1].iter().zip(operators.iter().rev().skip(1)) {
+                    append_tree(ctx, arena, *id, Some(*op), tree)?;
+                }
+            }
+            append_tree(ctx, arena, ids[ids.len() - 1], Some(operators[0]), tree)
         }
-        let op = tree.push(Opcode::Plus, 0.0, parent)?;
-        append_sum(ctx, arena, rest, Some(op), tree)?;
-        append_tree(ctx, arena, last, Some(op), tree)
-    } else {
-        tree.push(Opcode::Constant, 0.0, parent)
     }
 }
 
@@ -330,15 +342,27 @@ fn append_product(
     parent: Option<usize>,
     tree: &mut TreeBuilder,
 ) -> Result<usize, SolverError> {
-    if let Some((&last, rest)) = ids.split_last() {
-        if rest.is_empty() {
-            return append_tree(ctx, arena, last, parent, tree);
+    match ids {
+        [] => tree.push(Opcode::Constant, 1.0, parent),
+        [id] => append_tree(ctx, arena, *id, parent, tree),
+        _ => {
+            let mut operators = Vec::with_capacity(ids.len() - 1);
+            let mut current_parent = tree.push(Opcode::Multiply, 0.0, parent)?;
+            operators.push(current_parent);
+            for _ in 1..ids.len() - 1 {
+                current_parent = tree.push(Opcode::Multiply, 0.0, Some(current_parent))?;
+                operators.push(current_parent);
+            }
+
+            append_tree(ctx, arena, ids[0], Some(current_parent), tree)?;
+            if ids.len() > 2 {
+                append_tree(ctx, arena, ids[1], Some(current_parent), tree)?;
+                for (id, op) in ids[2..ids.len() - 1].iter().zip(operators.iter().rev().skip(1)) {
+                    append_tree(ctx, arena, *id, Some(*op), tree)?;
+                }
+            }
+            append_tree(ctx, arena, ids[ids.len() - 1], Some(operators[0]), tree)
         }
-        let op = tree.push(Opcode::Multiply, 0.0, parent)?;
-        append_product(ctx, arena, rest, Some(op), tree)?;
-        append_tree(ctx, arena, last, Some(op), tree)
-    } else {
-        tree.push(Opcode::Constant, 1.0, parent)
     }
 }
 
@@ -353,11 +377,13 @@ fn append_linear_parts(
     parent: Option<usize>,
     tree: &mut TreeBuilder,
 ) -> Result<usize, SolverError> {
-    let Some((last, rest)) = parts.split_last() else {
-        return tree.push(Opcode::Constant, 0.0, parent);
-    };
-    if rest.is_empty() {
-        return match last {
+    fn append_part(
+        ctx: &mut LoweringCtx<'_>,
+        part: &LinearPart,
+        parent: Option<usize>,
+        tree: &mut TreeBuilder,
+    ) -> Result<usize, SolverError> {
+        match part {
             LinearPart::Constant(c) => tree.push(Opcode::Constant, *c, parent),
             LinearPart::Term(var, coeff) => {
                 let op = tree.push(Opcode::Multiply, 0.0, parent)?;
@@ -365,18 +391,31 @@ fn append_linear_parts(
                 let index = ctx.model.var_index(var).map_err(map_gurobi)?;
                 tree.push(Opcode::Variable, f64::from(index), Some(op))
             }
-        };
+        }
     }
-    let op = tree.push(Opcode::Plus, 0.0, parent)?;
-    append_linear_parts(ctx, rest, Some(op), tree)?;
-    match last {
-        LinearPart::Constant(c) => tree.push(Opcode::Constant, *c, Some(op)),
-        LinearPart::Term(_, coeff) => {
-            let mul = tree.push(Opcode::Multiply, 0.0, Some(op))?;
-            tree.push(Opcode::Constant, *coeff, Some(mul))?;
-            let LinearPart::Term(var, _) = last else { unreachable!() };
-            let index = ctx.model.var_index(var).map_err(map_gurobi)?;
-            tree.push(Opcode::Variable, f64::from(index), Some(mul))
+
+    match parts {
+        [] => tree.push(Opcode::Constant, 0.0, parent),
+        [part] => append_part(ctx, part, parent, tree),
+        _ => {
+            let mut operators = Vec::with_capacity(parts.len() - 1);
+            let mut current_parent = tree.push(Opcode::Plus, 0.0, parent)?;
+            operators.push(current_parent);
+            for _ in 1..parts.len() - 1 {
+                current_parent = tree.push(Opcode::Plus, 0.0, Some(current_parent))?;
+                operators.push(current_parent);
+            }
+
+            append_part(ctx, &parts[0], Some(current_parent), tree)?;
+            if parts.len() > 2 {
+                append_part(ctx, &parts[1], Some(current_parent), tree)?;
+                for (part, op) in
+                    parts[2..parts.len() - 1].iter().zip(operators.iter().rev().skip(1))
+                {
+                    append_part(ctx, part, Some(*op), tree)?;
+                }
+            }
+            append_part(ctx, &parts[parts.len() - 1], Some(operators[0]), tree)
         }
     }
 }
