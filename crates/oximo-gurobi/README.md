@@ -2,9 +2,11 @@
 
 Gurobi backend for [oximo](https://github.com/oximo-rs/oximo).
 
-Wraps the [`grb`](https://crates.io/crates/grb) crate (`gurobi12` feature). Supports `LP`, `MILP`, `QP`, `MIQP`, `NLP`, and `MINLP` model kinds. Nonlinear expressions (`Pow`, `Sin`, `Cos`, `Exp`, `Log`, `Abs`, bilinear `Mul`) are lowered to auxiliary variables wired together with Gurobi's native `add_genconstr_*` and `add_qconstr` APIs. `NonConvex = 2` is enabled automatically when needed.
+Uses the [`gurobi-rs`](https://crates.io/crates/gurobi-rs) crate with its `gurobi13` feature.
 
-Gurobi v13.0+ works with the `gurobi12` feature, which is the default for this crate. For more information see [grb/issue#31](https://github.com/ykrist/rust-grb/issues/31). To use older versions, enable the `gurobi11` feature instead (see [grb docs](https://docs.rs/grb/latest/grb/#features) for details).
+Gurobi 13.0+ is required.
+Nonlinear expressions are represented by Gurobi 13 preorder expression trees with checked opcode/data/parent arrays.
+`NonConvex = 2` is enabled automatically when needed.
 
 ## Requirements
 
@@ -12,7 +14,7 @@ Gurobi v13.0+ works with the `gurobi12` feature, which is the default for this c
 
 1. Download and install [Gurobi](https://www.gurobi.com/downloads/) for your platform.
 2. Obtain a license and activate it by using `grbgetkey <key>`.
-3. Set `GUROBI_HOME` to the Gurobi install directory (the `grb` crate uses this to locate headers and the shared library).
+3. Set `GUROBI_HOME` to the Gurobi install directory (`gurobi-rs` uses this to locate headers and the shared library).
 
 ```sh
 # Linux example
@@ -66,6 +68,35 @@ println!("primal      = {:?}", result.primal_status);
 println!("obj         = {:?}", result.objective());
 ```
 
+## Callbacks
+
+The backend re-exports the typed callback surface. Ordinary and callback solves share result collection, and callback failures are returned as `SolverError` values. Use `CallbackMask` to restrict registration locations:
+
+```rust,ignore
+use oximo_gurobi::{Callback, CallbackMask, CallbackLocation, CbResult, Gurobi, GurobiOptions, Where};
+
+struct Progress;
+impl Callback for Progress {
+    fn callback(&mut self, where_: Where) -> CbResult {
+        // inspect `where_` using gurobi-rs callback contexts
+        let _ = where_;
+        Ok(())
+    }
+}
+
+let mut progress = Progress;
+let mut solver = Gurobi;
+let result = solver.solve_with_callback_filtered(
+    &m,
+    &GurobiOptions::default(),
+    &mut progress,
+    CallbackMask::from(CallbackLocation::Polling) | CallbackLocation::Mip,
+)?;
+```
+
+Persistent handles expose the corresponding `solve_with_callback` and
+`solve_with_callback_filtered` methods.
+
 Run the bundled example:
 
 ```sh
@@ -115,6 +146,9 @@ a transparent rebuild, so results always match a cold solve.
 | `.numeric_focus(i32)`          | int    | `NumericFocus`   |
 | `.log_file(impl Into<String>)` | str    | `LogFile`        |
 | `.mem_limit(f64)`              | double | `MemLimit`       |
+
+For Gurobi 13's Primal-Dual Hybrid Gradient method, use
+`GurobiOptions::default().method(oximo_gurobi::GRB_METHOD_PDHG)` (see [Installing and Running GPU-enabled Gurobi](https://support.gurobi.com/hc/en-us/articles/43498824105873-Installing-and-Running-GPU-enabled-Gurobi)).
 
 Full list of supported parameters is in [src/options.rs](src/options.rs). See the [Gurobi parameter reference](https://docs.gurobi.com/projects/optimizer/en/current/reference/parameters.html) for semantics.
 

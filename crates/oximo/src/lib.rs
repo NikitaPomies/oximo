@@ -24,7 +24,10 @@ pub use oximo_highs::{HighsMethod, HighsOptions, HighsPresolve};
 
 #[cfg(feature = "gurobi")]
 #[cfg_attr(docsrs, doc(cfg(feature = "gurobi")))]
-pub use oximo_gurobi::{GurobiOptions, GurobiPersistent, GurobiPresolve};
+pub use oximo_gurobi::{
+    Callback, CallbackLocation, CallbackMask, CbResult, GRB_METHOD_PDHG, GurobiOptions,
+    GurobiPersistent, GurobiPresolve, Opcode, Status, Where,
+};
 
 #[cfg(feature = "mosek")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mosek")))]
@@ -73,7 +76,10 @@ pub mod prelude {
 
     #[cfg(feature = "gurobi")]
     #[cfg_attr(docsrs, doc(cfg(feature = "gurobi")))]
-    pub use oximo_gurobi::{GurobiOptions, GurobiPersistent, GurobiPresolve};
+    pub use oximo_gurobi::{
+        Callback, CallbackLocation, CallbackMask, CbResult, GRB_METHOD_PDHG, GurobiOptions,
+        GurobiPersistent, GurobiPresolve, Opcode, Status, Where,
+    };
 
     #[cfg(feature = "mosek")]
     #[cfg_attr(docsrs, doc(cfg(feature = "mosek")))]
