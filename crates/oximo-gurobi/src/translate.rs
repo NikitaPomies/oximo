@@ -492,37 +492,46 @@ fn add_constraints(
         }
     }
 
+    let mut single_names = Vec::with_capacity(singles.len());
+    let mut single_indices = Vec::with_capacity(singles.len());
     let single_batch: Vec<_> = singles
-        .iter()
+        .into_iter()
         .map(|p| {
-            let expr = p.expr.clone();
-            let ineq = match p.sense {
+            single_names.push(p.name);
+            single_indices.push(p.index);
+            let expr = p.expr;
+            match p.sense {
                 Sense::Le => c!(expr <= p.rhs),
                 Sense::Ge => c!(expr >= p.rhs),
                 Sense::Eq => c!(expr == p.rhs),
-            };
-            (p.name.clone(), ineq)
+            }
         })
         .collect();
+    let single_batch_iter = single_batch.into_iter();
     let single_handles = gurobi_model
-        .add_constrs(single_batch.iter().map(|(name, expr)| (name, expr.clone())))
+        .add_constrs(single_names.iter().zip(single_batch_iter))
         .map_err(map_gurobi_err)?;
-    for (pending, handle) in singles.into_iter().zip(single_handles) {
-        slots[pending.index] =
+    for (index, handle) in single_indices.into_iter().zip(single_handles) {
+        slots[index] =
             Some(ConstraintHandle { rows: vec![GurobiRow::Lin(handle)], generated: Vec::new() });
     }
 
+    let mut range_names = Vec::with_capacity(ranges.len());
+    let mut range_indices = Vec::with_capacity(ranges.len());
     let range_batch: Vec<_> = ranges
-        .iter()
+        .into_iter()
         .map(|p| {
-            (p.name.clone(), RangeExpr { expr: p.expr.clone().into(), lb: p.lower, ub: p.upper })
+            range_names.push(p.name);
+            range_indices.push(p.index);
+            RangeExpr { expr: p.expr.into(), lb: p.lower, ub: p.upper }
         })
         .collect();
+    let range_batch_iter = range_batch.into_iter();
     let range_handles = gurobi_model
-        .add_ranges(range_batch.iter().map(|(name, expr)| (name, expr.clone())))
+        .add_ranges(range_names.iter().zip(range_batch_iter))
         .map_err(map_gurobi_err)?;
-    for (pending, handle) in ranges.into_iter().zip(range_handles.1) {
-        slots[pending.index] =
+    for (index, handle) in range_indices.into_iter().zip(range_handles.1) {
+        slots[index] =
             Some(ConstraintHandle { rows: vec![GurobiRow::Lin(handle)], generated: Vec::new() });
     }
 
