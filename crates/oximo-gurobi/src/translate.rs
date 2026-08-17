@@ -51,6 +51,7 @@ pub(crate) struct Built {
     pub model: gurobi_rs::Model,
     pub vars: Vec<gurobi_rs::Var>,
     pub constrs: Vec<ConstraintHandle>,
+    pub objective_generated: Vec<GeneratedConstraint>,
     pub soc_rows: Vec<SocHandle>,
     pub obj_constant: f64,
     pub has_semi: bool,
@@ -94,7 +95,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         add_constraints(&arena, constraints, &mut gurobi_model, &gurobi_vars, &mut aux_counter)?;
     let soc_rows = add_soc_rows(&arena, &vars, &socs, &mut gurobi_model, &gurobi_vars)?;
 
-    let obj_constant = match objective.as_ref() {
+    let (obj_constant, objective_generated) = match objective.as_ref() {
         Some(o) => set_objective(
             &arena,
             o.expr,
@@ -103,7 +104,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
             &gurobi_vars,
             &mut aux_counter,
         )?,
-        None => 0.0,
+        None => (0.0, Vec::new()),
     };
 
     // Warm starts are assigned only after the full structural model has been
@@ -122,6 +123,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         model: gurobi_model,
         vars: gurobi_vars,
         constrs: gurobi_constrs,
+        objective_generated,
         soc_rows,
         obj_constant,
         has_semi,
@@ -306,17 +308,20 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
             in_iis |= selected != 0;
         }
         for generated in &handle.generated {
-            let selected = match generated {
-                GeneratedConstraint::Linear(c) => model.get_obj_attr(attr::IISConstr, c),
-                GeneratedConstraint::Quadratic(q) => model.get_obj_attr(attr::IISQConstr, q),
-                GeneratedConstraint::General(g) => model.get_obj_attr(attr::IISGenConstr, g),
-            }
-            .map_err(map_gurobi_err)?;
-            in_iis |= selected != 0;
+            in_iis |= generated_selected(model, generated)?;
         }
         if in_iis {
             iis.constraints
                 .push(ConstraintId(u32::try_from(i).expect("constraint index fits u32")));
+        }
+    }
+
+    for generated in &built.objective_generated {
+        if generated_selected(model, generated)? {
+            return Err(SolverError::Backend(
+                "Gurobi IIS includes an objective-generated definition that cannot be mapped to an original model member"
+                    .into(),
+            ));
         }
     }
 
@@ -343,6 +348,19 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
     }
 
     Ok(iis)
+}
+
+fn generated_selected(
+    model: &gurobi_rs::Model,
+    generated: &GeneratedConstraint,
+) -> Result<bool, SolverError> {
+    let selected = match generated {
+        GeneratedConstraint::Linear(c) => model.get_obj_attr(attr::IISConstr, c),
+        GeneratedConstraint::Quadratic(q) => model.get_obj_attr(attr::IISQConstr, q),
+        GeneratedConstraint::General(g) => model.get_obj_attr(attr::IISGenConstr, g),
+    }
+    .map_err(map_gurobi_err)?;
+    Ok(selected != 0)
 }
 
 /// Add one Gurobi variable per model variable, in `VarId` order, applying its
@@ -683,7 +701,7 @@ fn set_objective(
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
-) -> Result<f64, SolverError> {
+) -> Result<(f64, Vec<GeneratedConstraint>), SolverError> {
     let gurobi_sense = match sense {
         ObjectiveSense::Minimize => ModelSense::Minimize,
         ObjectiveSense::Maximize => ModelSense::Maximize,
@@ -697,7 +715,7 @@ fn set_objective(
         // not need to track the constant separately.
         e.add_constant(t.constant);
         gurobi_model.set_objective(e, gurobi_sense).map_err(map_gurobi_err)?;
-        return Ok(0.0);
+        return Ok((0.0, Vec::new()));
     }
     let mut ctx = LoweringCtx {
         model: gurobi_model,
@@ -707,10 +725,12 @@ fn set_objective(
     };
     let lowered = lower(arena, obj_expr, &mut ctx)?;
     *aux_counter = ctx.aux_counter;
-    gurobi_model
+    ctx.model
         .set_objective(lowered.into_expr_for_objective(), gurobi_sense)
         .map_err(map_gurobi_err)?;
-    Ok(0.0)
+    let generated = std::mem::take(&mut ctx.generated);
+    drop(ctx);
+    Ok((0.0, generated))
 }
 
 /// Build `(solutions, reduced_costs, dual, soc_dual)` from a solved Gurobi
