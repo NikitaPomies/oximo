@@ -831,6 +831,32 @@ fn expression<'a>(
     expr
 }
 
+fn unique_mps_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    fallback_prefix: &str,
+    reserved: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut used: HashSet<String> = reserved.into_iter().map(str::to_owned).collect();
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let base: String =
+                name.chars().map(|ch| if ch.is_whitespace() { '_' } else { ch }).collect();
+            let base =
+                if base.is_empty() { format!("{fallback_prefix}{}", index + 1) } else { base };
+            let mut candidate = base.clone();
+            let mut suffix = 1;
+            while used.contains(&candidate) {
+                candidate = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            used.insert(candidate.clone());
+            candidate
+        })
+        .collect()
+}
+
 fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
     for column in &data.columns {
         if column.lower > column.upper {
@@ -941,7 +967,9 @@ pub fn read_mps_file_with(
 /// MPS only represents linear LP / MILP. Nonlinear expressions in the
 /// objective or constraints raise [`IoError::Nonlinear`], second-order cone
 /// constraints [`IoError::Conic`]. The objective row is named `OBJ`.
-/// Constraint rows take their oximo names.
+/// Variable and constraint names have whitespace replaced by underscores and
+/// are made unique within their respective MPS namespaces. The generated
+/// objective row reserves the name `OBJ`.
 ///
 /// # Errors
 ///
@@ -959,6 +987,8 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
+    let variable_names = unique_mps_names(vars.iter().map(|v| v.name.as_str()), "C", []);
+    let row_names = unique_mps_names(constraints.iter().map(|c| c.name.as_str()), "R", ["OBJ"]);
 
     let obj_terms = extract_linear(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
         location: "the objective".into(),
@@ -983,9 +1013,9 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     for (v, c) in &obj_terms.coeffs {
         col_index.entry(*v).or_default().push(("OBJ", *c));
     }
-    for (constr, terms) in constraints.iter().zip(con_terms.iter()) {
+    for (row_name, terms) in row_names.iter().zip(con_terms.iter()) {
         for (v, coef) in &terms.coeffs {
-            col_index.entry(*v).or_default().push((constr.name.as_str(), *coef));
+            col_index.entry(*v).or_default().push((row_name.as_str(), *coef));
         }
     }
 
@@ -1011,7 +1041,7 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     writeln!(out, "ROWS")?;
     writeln!(out, " N  OBJ")?;
-    for c in constraints {
+    for (c, row_name) in constraints.iter().zip(row_names.iter()) {
         let tag = match c.as_single() {
             Some((Sense::Le, _)) => 'L',
             Some((Sense::Ge, _)) => 'G',
@@ -1022,12 +1052,12 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             // `N` row (no RHS) rather than an `L` row with a `+inf` bound.
             None => 'N',
         };
-        writeln!(out, " {tag}  {}", c.name)?;
+        writeln!(out, " {tag}  {row_name}")?;
     }
 
     writeln!(out, "COLUMNS")?;
     let mut int_open = false;
-    for v in vars.iter() {
+    for (v, column_name) in vars.iter().zip(variable_names.iter()) {
         // Binary and semi-integer columns carry their integrality via bounds.
         let needs_marker = matches!(v.domain, Domain::Integer);
         if needs_marker && !int_open {
@@ -1039,10 +1069,10 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         }
         if let Some(entries) = col_index.get(&v.id) {
             for (row_name, coef) in entries {
-                writeln!(out, "    {:<10}{:<10}{}", v.name, row_name, coef)?;
+                writeln!(out, "    {column_name:<10} {row_name:<10} {coef}")?;
             }
         } else {
-            writeln!(out, "    {:<10}{:<10}0", v.name, "OBJ")?;
+            writeln!(out, "    {column_name:<10} {:<10} 0", "OBJ")?;
         }
     }
     if int_open {
@@ -1054,7 +1084,7 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     if obj_constant != 0.0 {
         writeln!(out, "    RHS       OBJ       {}", -obj_constant)?;
     }
-    for (c, t) in constraints.iter().zip(con_terms.iter()) {
+    for ((c, row_name), t) in constraints.iter().zip(row_names.iter()).zip(con_terms.iter()) {
         // A range row's RHS is its upper bound (it is an `L` row), the `RANGES`
         // section then widens it down to the lower bound.
         let rhs = match c.as_single() {
@@ -1065,63 +1095,63 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         };
         let adjusted = rhs - t.constant;
         if adjusted != 0.0 {
-            writeln!(out, "    RHS       {:<10}{}", c.name, adjusted)?;
+            writeln!(out, "    RHS       {row_name:<10} {adjusted}")?;
         }
     }
 
     if constraints.iter().any(Constraint::is_range) {
         writeln!(out, "RANGES")?;
-        for c in constraints {
+        for (c, row_name) in constraints.iter().zip(row_names.iter()) {
             if c.is_range() {
-                writeln!(out, "    RNG       {:<10}{}", c.name, c.upper - c.lower)?;
+                writeln!(out, "    RNG       {row_name:<10} {}", c.upper - c.lower)?;
             }
         }
     }
 
     writeln!(out, "BOUNDS")?;
-    for v in vars.iter() {
+    for (v, column_name) in vars.iter().zip(variable_names.iter()) {
         let lb = v.lb;
         let ub = v.ub;
         if matches!(v.domain, Domain::Binary) {
-            writeln!(out, " BV BND       {}", v.name)?;
+            writeln!(out, " BV BND       {column_name}")?;
             if lb != 0.0 {
-                writeln!(out, " LO BND       {:<10}{}", v.name, lb)?;
+                writeln!(out, " LO BND       {column_name:<10} {lb}")?;
             }
             if (ub - 1.0).abs() >= f64::EPSILON {
-                writeln!(out, " UP BND       {:<10}{}", v.name, ub)?;
+                writeln!(out, " UP BND       {column_name:<10} {ub}")?;
             }
             continue;
         }
         if let Some(thr) = v.domain.semi_threshold() {
-            writeln!(out, " LO BND       {:<10}{}", v.name, thr)?;
+            writeln!(out, " LO BND       {column_name:<10} {thr}")?;
             let semi_ub = if ub.is_finite() { ub } else { 1e30 };
             // `is_integer()` distinguishes the two semi domains here.
             let code = if v.domain.is_integer() { "SI" } else { "SC" };
-            writeln!(out, " {code} BND       {:<10}{}", v.name, semi_ub)?;
+            writeln!(out, " {code} BND       {column_name:<10} {semi_ub}")?;
             continue;
         }
         if lb.is_finite() && (lb - ub).abs() < f64::EPSILON {
-            writeln!(out, " FX BND       {:<10}{lb}", v.name)?;
+            writeln!(out, " FX BND       {column_name:<10} {lb}")?;
             continue;
         }
         let infinite_lo = lb == f64::NEG_INFINITY;
         let infinite_hi = ub == f64::INFINITY;
         match (infinite_lo, infinite_hi) {
-            (true, true) => writeln!(out, " FR BND       {}", v.name)?,
+            (true, true) => writeln!(out, " FR BND       {column_name}")?,
             (true, false) => {
-                writeln!(out, " MI BND       {}", v.name)?;
-                writeln!(out, " UP BND       {:<10}{}", v.name, ub)?;
+                writeln!(out, " MI BND       {column_name}")?;
+                writeln!(out, " UP BND       {column_name:<10} {ub}")?;
             }
             (false, true) => {
                 if lb != 0.0 {
-                    writeln!(out, " LO BND       {:<10}{}", v.name, lb)?;
+                    writeln!(out, " LO BND       {column_name:<10} {lb}")?;
                 }
             }
             (false, false) => {
                 if lb != 0.0 {
-                    writeln!(out, " LO BND       {:<10}{}", v.name, lb)?;
+                    writeln!(out, " LO BND       {column_name:<10} {lb}")?;
                 }
-                writeln!(out, " UP BND       {:<10}{}", v.name, ub)?;
+                writeln!(out, " UP BND       {column_name:<10} {ub}")?;
             }
         }
     }

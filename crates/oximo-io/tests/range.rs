@@ -21,12 +21,14 @@ fn range_model() -> Model {
 #[test]
 fn mps_emits_ranges_section() {
     let s = to_mps_string(&range_model()).expect("mps writer");
+    let has =
+        |fields: &[&str]| s.lines().any(|line| line.split_whitespace().eq(fields.iter().copied()));
     // The range is an `L` row whose RHS is the upper bound
-    assert!(s.contains(" L  band"), "{s}");
-    assert!(s.contains("RHS       band      4"), "{s}");
+    assert!(has(&["L", "band"]), "{s}");
+    assert!(has(&["RHS", "band", "4"]), "{s}");
     // widened down to the lower bound by RANGES: R = upper - lower = 3.
     assert!(s.contains("RANGES"), "{s}");
-    assert!(s.contains("RNG       band      3"), "{s}");
+    assert!(has(&["RNG", "band", "3"]), "{s}");
 }
 
 #[test]

@@ -141,6 +141,34 @@ fn writer_round_trips_max_binary_semi_range_and_unused_variables() {
 }
 
 #[test]
+fn writer_sanitizes_and_uniquifies_mps_names() {
+    let model = Model::new("name roundtrip");
+    let spaced = model.__var("x one").build();
+    let tabbed = model.__var("x\tone").build();
+    let underscored = model.__var("x_one").build();
+    let unnamed = model.__var("").build();
+    model.__add_constraint("OBJ", spaced.le(1.0));
+    model.__add_constraint("limit one", tabbed.ge(2.0));
+    model.__add_constraint("limit_one", underscored.eq(3.0));
+    model.__add_constraint("", unnamed.le(4.0));
+    model.__minimize(spaced + tabbed + underscored + unnamed);
+
+    let text = to_mps_string(&model).expect("write MPS");
+    let imported = read_mps(text.as_bytes()).expect("read sanitized MPS");
+
+    let variable_names: Vec<_> =
+        imported.variables().iter().map(|variable| variable.name.to_string()).collect();
+    assert_eq!(variable_names, ["x_one", "x_one_1", "x_one_2", "C4"]);
+    let constraint_names: Vec<_> = imported
+        .constraints()
+        .algebraic()
+        .iter()
+        .map(|constraint| constraint.name.to_string())
+        .collect();
+    assert_eq!(constraint_names, ["OBJ_1", "limit_one", "limit_one_1", "R4"]);
+}
+
+#[test]
 fn reads_quadratic_objective_matrix_once() {
     let text = r"
 NAME qp
