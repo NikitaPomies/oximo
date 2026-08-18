@@ -51,18 +51,23 @@ println!("{mps}");
 
 ### MPS
 
-Fixed-format MPS (fixed-column, 10-char field width). Widely supported by commercial and open-source solvers.
+Whitespace-delimited MPS, compatible with conventional fixed-column files whose names do not contain spaces.
+Widely supported by commercial and open-source solvers.
 
-| Feature           | Behavior                                                                                                                       |
-|-------------------|--------------------------------------------------------------------------------------------------------------------------------|
-| Objective row     | Named `OBJ`, maximization models are negated with a `* sense: maximize` comment so re-importers can recover the original sense |
-| Integer variables | Wrapped in `INTORG`/`INTEND` markers                                                                                           |
-| Semicont variables| `LO` (threshold) + upper-bound semi marker: `SC` for semi-continuous, `SI` for semi-integer                                    |
-| Bounds            | `FR` (free), `MI`+`UP` (lower=-inf), `LO`/`UP` as needed. Default lb=0 omitted                                                 |
-| Constant terms    | Objective constant written to `RHS OBJ`, constraint constants folded into `RHS`                                                |
+| Feature            | Behavior                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| Objective sense    | Written with `OBJSENSE`                                                                             |
+| Linear models      | `ROWS`, `COLUMNS`, `RHS`, `RANGES`, bounds, integer markers, binary and semi domains                |
+| Quadratic import   | `QUADOBJ`, `QMATRIX`, `QCMATRIX`, and `QSECTION`. Gurobi or CPLEX constraint scaling is selectable. |
+| Quadratic export   | `QUADOBJ`/`QCMATRIX` for Gurobi and CPLEX, `QSECTION` for MOSEK                                     |
+| Unsupported import | SOS and indicator sections return `IoError::UnsupportedMps`                                         |
+| Constant terms     | Objective constants use `RHS OBJ`, constraint constants are folded into `RHS`                       |
 
 ```rust,ignore
-use oximo_io::{write_mps, to_mps_string};
+use oximo_io::{
+    MpsQuadraticFormat, MpsReadOptions, MpsWriteOptions, read_mps_file, read_mps_with,
+    to_mps_string, to_mps_string_with, write_mps,
+};
 use std::fs::File;
 use std::io::BufWriter;
 
@@ -72,6 +77,17 @@ let s = to_mps_string(&model)?;
 // To file
 let mut f = BufWriter::new(File::create("model.mps")?);
 write_mps(&model, &mut f)?;
+
+// Read a file with the default Gurobi quadratic-constraint convention.
+let imported = read_mps_file("model.mps")?;
+
+// Select CPLEX scaling when importing QCMATRIX/QSECTION constraints.
+let options = MpsReadOptions { quadratic_format: MpsQuadraticFormat::Cplex };
+let imported_cplex = read_mps_with(s.as_bytes(), &options)?;
+
+// Export quadratic sections in a solver-compatible dialect.
+let write_options = MpsWriteOptions { quadratic_format: MpsQuadraticFormat::Mosek };
+let quadratic_mps = to_mps_string_with(&model, &write_options)?;
 ```
 
 ### LP (CPLEX LP format)
@@ -79,7 +95,7 @@ write_mps(&model, &mut f)?;
 Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Maximize`, `Subject To`, `Bounds` (non-default only), `General`, `Binaries`, `Semi-Continuous`, `End`.
 
 | Feature            | Behavior                                                           |
-|--------------------|--------------------------------------------------------------------|
+| ------------------ | ------------------------------------------------------------------ |
 | Objective sense    | `Minimize` / `Maximize` keyword, no negation needed                |
 | Quadratic terms    | CPLEX bracket notation: objective `[Q]/2`, constraints `[q]`       |
 | Integer variables  | `General` section (integer/semi-integer), `Binaries` section       |
@@ -107,7 +123,7 @@ let imported = oximo_io::read_lp(s.as_bytes())?;
 The standard format for sharing nonlinear and mixed-integer models. Unlike MPS/LP, it carries full nonlinear expressions, emitted as prefix (Polish) opcode trees.
 
 | Feature              | Behavior                                                                |
-|----------------------|-------------------------------------------------------------------------|
+| -------------------- | ----------------------------------------------------------------------- |
 | Nonlinear bodies     | Linear part goes to `J`/`G`; nonlinear residual to `C`/`O` opcode trees |
 | Supported operators  | `+ - * /`, negation, `pow`, `abs`, `sin`, `cos`, `exp`, `log` (natural) |
 | Output encoding      | ASCII (default) or binary, via `WriteOptions::format`                   |
@@ -161,7 +177,7 @@ model.
 All functions return `Result<_, IoError>`:
 
 | Variant                       | Cause                                                                      |
-|-------------------------------|----------------------------------------------------------------------------|
+| ----------------------------- | -------------------------------------------------------------------------- |
 | `IoError::NoObjective`        | Model has no objective set                                                 |
 | `IoError::Nonlinear`          | Unsupported nonlinear node in an MPS/LP model (LP accepts degree <= 2)     |
 | `IoError::UnsupportedNode(n)` | Node not representable in the target format, e.g. `Param` in NL            |
@@ -172,6 +188,8 @@ All functions return `Result<_, IoError>`:
 | `IoError::UnsupportedNl`      | Semantics not representable by the core model                              |
 | `IoError::InvalidLp`          | Invalid LP input, with line and column                                     |
 | `IoError::UnsupportedLp`      | LP semantics not representable by oximo's core model                       |
+| `IoError::InvalidMps`         | Invalid MPS input, with line and column                                    |
+| `IoError::UnsupportedMps`     | MPS semantics not representable by oximo's core model                      |
 
 ## License
 
