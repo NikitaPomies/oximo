@@ -212,7 +212,7 @@ pub trait Solver {
 | Feature         | What it adds                                                 | Default |
 | --------------- | ------------------------------------------------------------ | ------- |
 | `highs`         | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
-| `io`            | NL, MPS, and LP file writers                                 | yes     |
+| `io`            | NL, MPS, and LP file readers and writers                     | yes     |
 | `gurobi`        | Gurobi v13+ solver (requires licensed install)               | no      |
 | `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP solver                | no      |
 | `gams`          | GAMS bridge - solve type depends on the selected sub-solver  | no      |
@@ -268,7 +268,7 @@ for i in 0..result.result_count() {
 | `oximo-macros`   | `variable!`, `constraint!`, `objective!` and other macros |
 | `oximo-autodiff` | Gradients, sparse Jacobians/Hessians via Enzyme           |
 | `oximo-solver`   | `Solver` trait, `SolverResult`, `SolverOptions`           |
-| `oximo-io`       | MPS, LP and NL writers                                    |
+| `oximo-io`       | MPS, LP and NL readers and writers                        |
 | `oximo-highs`    | HiGHS backend                                             |
 | `oximo-gurobi`   | Gurobi backend                                            |
 | `oximo-mosek`    | MOSEK 11.2 backend                                       |
