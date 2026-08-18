@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use oximo_core::{Constraint, Domain, Model, ModelKind, ObjectiveSense, Sense, var_name};
@@ -722,93 +722,114 @@ fn check_section_transition(
     Ok(())
 }
 
-fn parse_mps(text: &str, fallback_name: &str, options: MpsReadOptions) -> Result<Model, IoError> {
+fn parse_mps_line(
+    data: &mut ParsedMps,
+    section: &mut Section,
+    saw_name: &mut bool,
+    line: &str,
+    line_no: usize,
+    options: MpsReadOptions,
+) -> Result<(), IoError> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if trimmed.starts_with('*') {
+        if data.sense.is_none() {
+            data.legacy_sense = parse_legacy_sense(trimmed).or(data.legacy_sense);
+        }
+        return Ok(());
+    }
+    if data.seen_sections & SEEN_END != 0 {
+        return Err(invalid_mps(line_no, 1, "content after ENDATA"));
+    }
+    let items = fields(line);
+    if let Some(first) = items.first() {
+        let keyword = first.text.to_ascii_uppercase();
+        if items.len() == 1 && matches!(keyword.as_str(), "SOS" | "INDICATORS") {
+            return Err(IoError::UnsupportedMps {
+                section: keyword,
+                feature: "not represented by oximo-core".into(),
+            });
+        }
+    }
+    if let Some(next) = header(&items, section) {
+        if matches!(next, Section::Name) {
+            if *saw_name {
+                return Err(invalid_mps(line_no, 1, "duplicate NAME section"));
+            }
+            *saw_name = true;
+            if items.len() > 1 {
+                data.name = items[1..].iter().map(|field| field.text).collect::<Vec<_>>().join(" ");
+            }
+            return Ok(());
+        }
+        if !*saw_name {
+            return Err(invalid_mps(line_no, 1, "the first data line must be NAME"));
+        }
+        check_section_transition(section, &next, line_no)?;
+        if data.intorg && !matches!(next, Section::Columns) {
+            return Err(invalid_mps(line_no, 1, "missing INTEND marker before COLUMNS ends"));
+        }
+        match &next {
+            Section::ObjSense if items.len() == 2 => {
+                data.sense = Some(objective_sense(&items[1], line_no)?);
+            }
+            Section::Rows => data.seen_sections |= SEEN_ROWS,
+            Section::Columns => data.seen_sections |= SEEN_COLUMNS,
+            Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
+                begin_quadratic_section(data, &next, line_no)?;
+            }
+            Section::End => data.seen_sections |= SEEN_END,
+            _ => {}
+        }
+        *section = next;
+        return Ok(());
+    }
+    if !*saw_name {
+        return Err(invalid_mps(line_no, 1, "the first data line must be NAME"));
+    }
+    match section {
+        Section::ObjSense => {
+            if items.len() != 1 {
+                return Err(invalid_mps(line_no, 1, "OBJSENSE data requires one field"));
+            }
+            data.sense = Some(objective_sense(&items[0], line_no)?);
+        }
+        Section::Rows => parse_row(data, &items, line_no)?,
+        Section::Columns => parse_columns(data, &items, line_no)?,
+        Section::Rhs => parse_rhs(data, &items, line_no)?,
+        Section::Ranges => parse_ranges(data, &items, line_no)?,
+        Section::Bounds => parse_bound(data, &items, line_no)?,
+        Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
+            parse_quadratic_record(data, section, &items, line_no, options)?;
+        }
+        Section::Name => return Err(invalid_mps(line_no, 1, "expected NAME header")),
+        Section::End => unreachable!(),
+    }
+    Ok(())
+}
+
+fn parse_mps<R: BufRead>(
+    mut input: R,
+    fallback_name: &str,
+    options: MpsReadOptions,
+) -> Result<Model, IoError> {
     let mut data = ParsedMps::new(fallback_name);
     let mut section = Section::Name;
     let mut saw_name = false;
-    for (offset, raw_line) in text.lines().enumerate() {
-        let line_no = offset + 1;
-        let line = raw_line.trim_end_matches('\r');
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let mut line_buffer = String::new();
+    let mut last_line = 0;
+    loop {
+        line_buffer.clear();
+        if input.read_line(&mut line_buffer)? == 0 {
+            break;
         }
-        if trimmed.starts_with('*') {
-            if data.sense.is_none() {
-                data.legacy_sense = parse_legacy_sense(trimmed).or(data.legacy_sense);
-            }
-            continue;
-        }
-        if data.seen_sections & SEEN_END != 0 {
-            return Err(invalid_mps(line_no, 1, "content after ENDATA"));
-        }
-        let items = fields(line);
-        if let Some(first) = items.first() {
-            let keyword = first.text.to_ascii_uppercase();
-            if items.len() == 1 && matches!(keyword.as_str(), "SOS" | "INDICATORS") {
-                return Err(IoError::UnsupportedMps {
-                    section: keyword,
-                    feature: "not represented by oximo-core".into(),
-                });
-            }
-        }
-        if let Some(next) = header(&items, &section) {
-            if matches!(next, Section::Name) {
-                if saw_name {
-                    return Err(invalid_mps(line_no, 1, "duplicate NAME section"));
-                }
-                saw_name = true;
-                if items.len() > 1 {
-                    data.name =
-                        items[1..].iter().map(|field| field.text).collect::<Vec<_>>().join(" ");
-                }
-                continue;
-            }
-            if !saw_name {
-                return Err(invalid_mps(line_no, 1, "the first data line must be NAME"));
-            }
-            check_section_transition(&section, &next, line_no)?;
-            if data.intorg && !matches!(next, Section::Columns) {
-                return Err(invalid_mps(line_no, 1, "missing INTEND marker before COLUMNS ends"));
-            }
-            match &next {
-                Section::ObjSense if items.len() == 2 => {
-                    data.sense = Some(objective_sense(&items[1], line_no)?);
-                }
-                Section::Rows => data.seen_sections |= SEEN_ROWS,
-                Section::Columns => data.seen_sections |= SEEN_COLUMNS,
-                Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
-                    begin_quadratic_section(&mut data, &next, line_no)?;
-                }
-                Section::End => data.seen_sections |= SEEN_END,
-                _ => {}
-            }
-            section = next;
-            continue;
-        }
-        if !saw_name {
-            return Err(invalid_mps(line_no, 1, "the first data line must be NAME"));
-        }
-        match &section {
-            Section::ObjSense => {
-                if items.len() != 1 {
-                    return Err(invalid_mps(line_no, 1, "OBJSENSE data requires one field"));
-                }
-                data.sense = Some(objective_sense(&items[0], line_no)?);
-            }
-            Section::Rows => parse_row(&mut data, &items, line_no)?,
-            Section::Columns => parse_columns(&mut data, &items, line_no)?,
-            Section::Rhs => parse_rhs(&mut data, &items, line_no)?,
-            Section::Ranges => parse_ranges(&mut data, &items, line_no)?,
-            Section::Bounds => parse_bound(&mut data, &items, line_no)?,
-            Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
-                parse_quadratic_record(&mut data, &section, &items, line_no, options)?;
-            }
-            Section::Name => return Err(invalid_mps(line_no, 1, "expected NAME header")),
-            Section::End => unreachable!(),
-        }
+        last_line += 1;
+        let line = line_buffer.trim_end_matches(['\r', '\n']);
+        parse_mps_line(&mut data, &mut section, &mut saw_name, line, last_line, options)?;
     }
-    let last_line = text.lines().count().max(1);
+    let last_line = last_line.max(1);
     if data.intorg {
         return Err(invalid_mps(last_line, 1, "missing INTEND marker"));
     }
@@ -945,10 +966,8 @@ pub fn read_mps<R: Read>(input: R) -> Result<Model, IoError> {
 /// # Errors
 ///
 /// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
-pub fn read_mps_with<R: Read>(mut input: R, options: &MpsReadOptions) -> Result<Model, IoError> {
-    let mut text = String::new();
-    input.read_to_string(&mut text)?;
-    parse_mps(&text, "mps_model", *options)
+pub fn read_mps_with<R: Read>(input: R, options: &MpsReadOptions) -> Result<Model, IoError> {
+    parse_mps(BufReader::new(input), "mps_model", *options)
 }
 
 /// Read an MPS file with default options.
@@ -970,10 +989,8 @@ pub fn read_mps_file_with(
     options: &MpsReadOptions,
 ) -> Result<Model, IoError> {
     let path = path.as_ref();
-    let mut text = String::new();
-    File::open(path)?.read_to_string(&mut text)?;
     let fallback = path.file_stem().and_then(|name| name.to_str()).unwrap_or("mps_model");
-    parse_mps(&text, fallback, *options)
+    parse_mps(BufReader::new(File::open(path)?), fallback, *options)
 }
 
 /// Write `model` to `out` in fixed-format MPS.
