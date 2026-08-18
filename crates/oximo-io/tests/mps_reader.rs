@@ -1,0 +1,278 @@
+use std::io::{self, Read};
+
+use oximo_core::prelude::*;
+use oximo_expr::extract_quadratic;
+use oximo_io::{
+    IoError, MpsQuadraticFormat, MpsReadOptions, read_mps, read_mps_file, read_mps_with,
+    to_mps_string,
+};
+
+fn close(left: f64, right: f64) -> bool {
+    (left - right).abs() < 1e-12
+}
+
+fn quadratic_terms(model: &Model, objective: bool) -> oximo_expr::QuadraticTerms {
+    let arena = model.arena();
+    let expr = if objective {
+        model.try_objective().expect("objective").expr
+    } else {
+        model.constraints().algebraic()[0].lhs
+    };
+    extract_quadratic(&arena, expr).expect("quadratic expression")
+}
+
+#[test]
+fn reads_linear_milp_ranges_defaults_and_duplicate_coefficients() {
+    let text = r"
+* comment
+NAME mixed
+OBJSENSE MAX
+ROWS
+ N obj
+ L cap
+ G floor
+ N free_row
+COLUMNS
+ marker 'MARKER' 'INTORG'
+ x obj 1D0 cap 2
+ x obj 2
+ marker 'MARKER' 'INTEND'
+ y floor 1 free_row -1
+RHS
+ rhs cap 10 floor 3
+ rhs obj -5
+RANGES
+ rng cap 4
+BOUNDS
+ FR bnd y
+ENDATA
+";
+    let model = read_mps(text.as_bytes()).expect("MPS should parse");
+    assert_eq!(model.name, "mixed");
+    assert_eq!(model.num_variables(), 2);
+    assert_eq!(model.num_constraints(), 3);
+    assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Maximize);
+    assert!(matches!(model.variables()[0].domain, Domain::Integer));
+    assert!(close(model.variables()[0].lb, 0.0));
+    assert!(close(model.variables()[0].ub, 1.0));
+    assert!(model.variables()[1].lb.is_infinite() && model.variables()[1].lb.is_sign_negative());
+
+    let objective = quadratic_terms(&model, true);
+    assert_eq!(objective.linear, vec![(model.variables()[0].id, 3.0)]);
+    assert!(close(objective.constant, 5.0));
+    let constraints = model.constraints();
+    assert!(close(constraints.algebraic()[0].lower, 6.0));
+    assert!(close(constraints.algebraic()[0].upper, 10.0));
+    assert!(constraints.algebraic()[2].lower.is_infinite());
+    assert!(constraints.algebraic()[2].upper.is_infinite());
+}
+
+#[test]
+fn legacy_sense_is_fallback_and_objsense_takes_precedence() {
+    let legacy = "* sense: maximize\nNAME old\nROWS\n N obj\nCOLUMNS\n x obj 1\nENDATA\n";
+    let model = read_mps(legacy.as_bytes()).expect("legacy sense");
+    assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Maximize);
+
+    let standard =
+        "* sense: maximize\nNAME current\nOBJSENSE MIN\nROWS\n N obj\nCOLUMNS\n x obj 1\nENDATA\n";
+    let model = read_mps(standard.as_bytes()).expect("standard sense");
+    assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Minimize);
+}
+
+#[test]
+fn reads_bound_types_and_semi_domains() {
+    let text = r"
+NAME domains
+ROWS
+ N obj
+COLUMNS
+ a obj 1
+ b obj 1
+ c obj 1
+ d obj 1
+ e obj 1
+BOUNDS
+ BV bnd a
+ LI bnd b -2
+ UI bnd b 7
+ LO bnd c 2
+ SC bnd c 10
+ LO bnd d 1
+ SI bnd d 5
+ FX bnd e 4
+ENDATA
+";
+    let model = read_mps(text.as_bytes()).expect("domains");
+    let vars = model.variables();
+    assert!(matches!(vars[0].domain, Domain::Binary));
+    assert!(matches!(vars[1].domain, Domain::Integer));
+    assert_eq!((vars[1].lb, vars[1].ub), (-2.0, 7.0));
+    assert!(matches!(vars[2].domain, Domain::SemiContinuous { threshold: 2.0 }));
+    assert!(close(vars[2].ub, 10.0));
+    assert!(matches!(vars[3].domain, Domain::SemiInteger { threshold: 1.0 }));
+    assert_eq!((vars[4].lb, vars[4].ub), (4.0, 4.0));
+}
+
+#[test]
+fn writer_round_trips_max_binary_semi_range_and_unused_variables() {
+    let model = Model::new("roundtrip");
+    variable!(model, x <= 8.0);
+    variable!(model, b, Binary);
+    variable!(model, s <= 10.0, SemiCont(2.0));
+    variable!(model, unused);
+    let _ = unused;
+    model.__add_constraint_interval("range", x + b, 1.0, 6.0);
+    objective!(model, Max, 2.0 * x + b + s + 4.0);
+
+    let text = to_mps_string(&model).expect("write MPS");
+    assert!(text.contains("OBJSENSE\n MAX"), "{text}");
+    assert!(text.lines().any(|line| line.contains("BV BND") && line.contains('b')), "{text}");
+    assert!(text.lines().any(|line| line.contains("unused") && line.contains("OBJ")), "{text}");
+
+    let imported = read_mps(text.as_bytes()).expect("read writer output");
+    assert_eq!(imported.num_variables(), 4);
+    assert_eq!(imported.variables()[3].name, "unused");
+    assert!(matches!(imported.variables()[1].domain, Domain::Binary));
+    assert!(matches!(imported.variables()[2].domain, Domain::SemiContinuous { threshold: 2.0 }));
+    assert_eq!(imported.try_objective().expect("objective").sense, ObjectiveSense::Maximize);
+    let constraints = imported.constraints();
+    assert_eq!((constraints.algebraic()[0].lower, constraints.algebraic()[0].upper), (1.0, 6.0));
+    assert!(close(quadratic_terms(&imported, true).constant, 4.0));
+}
+
+#[test]
+fn reads_quadratic_objective_matrix_once() {
+    let text = r"
+NAME qp
+ROWS
+ N obj
+COLUMNS
+ x obj 1
+ y obj 1
+QMATRIX
+ x x 10
+ x y 2
+ y x 2
+ y y 2
+ENDATA
+";
+    let model = read_mps(text.as_bytes()).expect("QMATRIX");
+    let q = quadratic_terms(&model, true);
+    assert_eq!(q.hessian.len(), 3);
+    assert!(q.hessian.iter().any(|(_, _, value)| close(*value, 10.0)));
+    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 2.0)));
+    assert!(q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 2.0)));
+}
+
+#[test]
+fn reads_quadobj_triangular_objective() {
+    let text =
+        "NAME qp\nROWS\n N obj\nCOLUMNS\n x obj 0\n y obj 0\nQUADOBJ\n x x 8\n x y 3\nENDATA\n";
+    let model = read_mps(text.as_bytes()).expect("QUADOBJ");
+    let q = quadratic_terms(&model, true);
+    assert!(q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 8.0)));
+    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 3.0)));
+}
+
+#[test]
+fn quadratic_constraint_scaling_is_configurable() {
+    let text = r"
+NAME qcp
+ROWS
+ N obj
+ L q
+COLUMNS
+ x q 1
+ y q 1
+RHS
+ rhs q 1
+QCMATRIX q
+ x x 10
+ x y 2
+ y x 2
+ y y 2
+ENDATA
+";
+    let gurobi = read_mps(text.as_bytes()).expect("Gurobi scaling");
+    let gurobi_q = quadratic_terms(&gurobi, false);
+    assert!(gurobi_q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 20.0)));
+    assert!(gurobi_q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 4.0)));
+
+    let options = MpsReadOptions { quadratic_format: MpsQuadraticFormat::Cplex };
+    let cplex = read_mps_with(text.as_bytes(), &options).expect("CPLEX scaling");
+    let cplex_q = quadratic_terms(&cplex, false);
+    assert!(cplex_q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 10.0)));
+    assert!(cplex_q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 2.0)));
+}
+
+#[test]
+fn qsection_supports_objective_and_constraint_targets() {
+    let objective = "NAME q\nROWS\n N cost\nCOLUMNS\n x cost 0\nQSECTION cost\n x x 6\nENDATA\n";
+    let model = read_mps(objective.as_bytes()).expect("objective QSECTION");
+    assert!(close(quadratic_terms(&model, true).hessian[0].2, 6.0));
+
+    let constraint =
+        "NAME q\nROWS\n N obj\n L row\nCOLUMNS\n x row 0\nQSECTION row\n x x 3\nENDATA\n";
+    let model = read_mps(constraint.as_bytes()).expect("constraint QSECTION");
+    assert!(close(quadratic_terms(&model, false).hessian[0].2, 6.0));
+}
+
+#[test]
+fn feasibility_mps_gets_zero_minimization_objective() {
+    let text = "NAME feasible\nROWS\n G row\nCOLUMNS\n x row 1\nENDATA\n";
+    let model = read_mps(text.as_bytes()).expect("feasibility MPS");
+    assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Minimize);
+    let objective = quadratic_terms(&model, true);
+    assert!(objective.linear.is_empty());
+    assert!(close(objective.constant, 0.0));
+}
+
+#[test]
+fn file_reader_uses_name_then_file_stem_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let named = dir.path().join("fallback.mps");
+    std::fs::write(&named, "NAME explicit\nROWS\n N obj\nCOLUMNS\n x obj 0\nENDATA\n")
+        .expect("fixture");
+    assert_eq!(read_mps_file(&named).expect("named").name, "explicit");
+
+    std::fs::write(&named, "NAME\nROWS\n N obj\nCOLUMNS\n x obj 0\nENDATA\n").expect("fixture");
+    assert_eq!(read_mps_file(&named).expect("fallback").name, "fallback");
+}
+
+#[test]
+fn rejects_unsupported_sections_and_multiple_vectors() {
+    for section in ["SOS", "INDICATORS"] {
+        let text = format!("NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\n{section}\nENDATA\n");
+        assert!(matches!(read_mps(text.as_bytes()), Err(IoError::UnsupportedMps { .. })));
+    }
+    let vectors = "NAME bad\nROWS\n N obj\n L row\nCOLUMNS\n x row 1\nRHS\n first row 1\n second row 2\nENDATA\n";
+    assert!(matches!(read_mps(vectors.as_bytes()), Err(IoError::UnsupportedMps { .. })));
+}
+
+#[test]
+fn malformed_inputs_return_mps_diagnostics() {
+    for text in [
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x missing 1\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n mark 'MARKER' 'INTORG'\n x obj 1\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj NaN\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 1\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 1\nENDATA\nBOUNDS\n",
+    ] {
+        assert!(matches!(read_mps(text.as_bytes()), Err(IoError::InvalidMps { .. })), "{text}");
+    }
+}
+
+#[test]
+fn stream_and_file_io_errors_are_preserved() {
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("read failed"))
+        }
+    }
+
+    assert!(matches!(read_mps(FailingReader), Err(IoError::Io(_))));
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert!(matches!(read_mps_file(dir.path().join("missing.mps")), Err(IoError::Io(_))));
+}
