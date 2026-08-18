@@ -54,14 +54,14 @@ println!("{mps}");
 Whitespace-delimited MPS, compatible with conventional fixed-column files whose names do not contain spaces.
 Widely supported by commercial and open-source solvers.
 
-| Feature            | Behavior                                                                                            |
-| ------------------ | --------------------------------------------------------------------------------------------------- |
-| Objective sense    | Written with `OBJSENSE`                                                                             |
-| Linear models      | `ROWS`, `COLUMNS`, `RHS`, `RANGES`, bounds, integer markers, binary and semi domains                |
-| Quadratic import   | `QUADOBJ`, `QMATRIX`, `QCMATRIX`, and `QSECTION`. Gurobi or CPLEX constraint scaling is selectable. |
-| Quadratic export   | `QUADOBJ`/`QCMATRIX` for Gurobi and CPLEX, `QSECTION` for MOSEK                                     |
-| Unsupported import | SOS and indicator sections return `IoError::UnsupportedMps`                                         |
-| Constant terms     | Objective constants use `RHS OBJ`, constraint constants are folded into `RHS`                       |
+| Feature            | Behavior                                                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Objective sense    | Written with `OBJSENSE`                                                                                    |
+| Linear models      | `ROWS`, `COLUMNS`, `RHS`, `RANGES`, bounds, integer markers, binary and semi domains                       |
+| Quadratic import   | `QUADOBJ`, `QMATRIX`, `QCMATRIX`, and `QSECTION`. Gurobi, CPLEX or MOSEK constraint scaling is selectable. |
+| Quadratic export   | `QUADOBJ`/`QCMATRIX` for Gurobi and CPLEX, `QSECTION` for MOSEK                                            |
+| Unsupported import | SOS and indicator sections return `IoError::UnsupportedMps`                                                |
+| Constant terms     | Objective constants use `RHS OBJ`, constraint constants are folded into `RHS`                              |
 
 ```rust,ignore
 use oximo_io::{
