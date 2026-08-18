@@ -4,10 +4,12 @@
 //! problems. It is a common lingua franca for exchanging models between tools.
 //!
 //! [`read_mps`] and [`read_mps_file`] import whitespace-delimited MPS files.
-//! [`write_mps`] exports the linear subset to any `std::io::Write`.
+//! [`write_mps`] exports linear and quadratic models to any `std::io::Write`.
 //!
 //! References:
 //! - "MPS file format," lp_solve. <https://lpsolve.sourceforge.net/5.5/mps-format.htm> (accessed May 09, 2026).
+//! - Gurobi, "Model File Formats." <https://docs.gurobi.com/projects/optimizer/en/current/reference/fileformats/modelformats.html>
+//! - IBM ILOG CPLEX, "Quadratically constrained programs (QCP) in MPS files." <https://www.ibm.com/docs/en/cofz/12.9.0?topic=extensions-quadratically-constrained-programs-qcp-in-mps-files>
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -15,7 +17,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use oximo_core::{Constraint, Domain, Model, ModelKind, ObjectiveSense, Sense, var_name};
-use oximo_expr::{Expr, LinearTerms, VarId, describe_nonlinear_term, extract_linear};
+use oximo_expr::{Expr, QuadraticTerms, VarId, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::FxHashMap;
 
 use crate::error::IoError;
@@ -33,12 +35,21 @@ pub enum MpsQuadraticFormat {
     Gurobi,
     /// CPLEX-compatible quadratic-constraint scaling.
     Cplex,
+    /// MOSEK-compatible `QSECTION` layout and scaling.
+    Mosek,
 }
 
 /// Options controlling MPS import.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MpsReadOptions {
     /// How ambiguous quadratic-constraint matrix coefficients are scaled.
+    pub quadratic_format: MpsQuadraticFormat,
+}
+
+/// Options controlling MPS export.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MpsWriteOptions {
+    /// Solver-compatible layout and scaling for quadratic sections.
     pub quadratic_format: MpsQuadraticFormat,
 }
 
@@ -596,7 +607,7 @@ fn quadratic_coefficient(
     objective: bool,
     value: f64,
 ) -> f64 {
-    if objective || format == MpsQuadraticFormat::Cplex {
+    if objective || format != MpsQuadraticFormat::Gurobi {
         if diagonal { value / 2.0 } else { value }
     } else if diagonal {
         value
@@ -892,6 +903,42 @@ fn unique_mps_names<'a>(
         .collect()
 }
 
+fn write_quadratic_section<W: Write>(
+    out: &mut W,
+    header: &str,
+    terms: &QuadraticTerms,
+    variable_names: &[String],
+    format: MpsQuadraticFormat,
+    objective: bool,
+) -> Result<(), IoError> {
+    writeln!(out, "{header}")?;
+    for &(left, right, hessian) in &terms.hessian {
+        let (first, second) = if objective {
+            // Gurobi and MOSEK document lower-triangular objective records.
+            // CPLEX's QUADOBJ convention uses the upper triangle.
+            if format == MpsQuadraticFormat::Cplex && left.index() > right.index() {
+                (right, left)
+            } else {
+                (left, right)
+            }
+        } else if left.index() <= right.index() {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        let left_name = &variable_names[first.index()];
+        let right_name = &variable_names[second.index()];
+        let coefficient =
+            if objective || format != MpsQuadraticFormat::Gurobi { hessian } else { hessian / 2.0 };
+        writeln!(out, "    {left_name:<10} {right_name:<10} {coefficient}")?;
+        if !objective && format != MpsQuadraticFormat::Mosek && first != second {
+            // Gurobi and CPLEX require QCMATRIX to contain a symmetric Q.
+            writeln!(out, "    {right_name:<10} {left_name:<10} {coefficient}")?;
+        }
+    }
+    Ok(())
+}
+
 fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
     for column in &data.columns {
         if column.lower > column.upper {
@@ -995,9 +1042,10 @@ pub fn read_mps_file_with(
 
 /// Write `model` to `out` in fixed-format MPS.
 ///
-/// MPS only represents linear LP / MILP. Nonlinear expressions in the
-/// objective or constraints raise [`IoError::Nonlinear`], second-order cone
-/// constraints [`IoError::Conic`]. The objective row is named `OBJ`.
+/// MPS represents linear and quadratic LP/MILP/QP/QCP models. Higher-degree
+/// or otherwise nonlinear expressions in the objective or constraints raise
+/// [`IoError::Nonlinear`]. Second-order cone constraints raise [`IoError::Conic`].
+/// The objective row is named `OBJ`.
 /// Variable and constraint names have whitespace replaced by underscores and
 /// are made unique within their respective MPS namespaces. The generated
 /// objective row reserves the name `OBJ`.
@@ -1006,8 +1054,25 @@ pub fn read_mps_file_with(
 ///
 /// Returns [`IoError`] if there is an error writing the MPS data or if the model contains unsupported features.
 ///
-#[expect(clippy::too_many_lines)]
 pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
+    write_mps_with(model, out, &MpsWriteOptions::default())
+}
+
+/// Write `model` to `out` with explicit quadratic MPS options.
+///
+/// `Gurobi` and `Cplex` emit `QUADOBJ` plus `QCMATRIX` sections. `Mosek` emits
+/// `QSECTION` sections for the objective and quadratic constraints.
+///
+/// # Errors
+///
+/// Returns [`IoError`] if the model contains unsupported expressions or writing
+/// the output fails.
+#[expect(clippy::too_many_lines)]
+pub fn write_mps_with<W: Write>(
+    model: &Model,
+    out: &mut W,
+    options: &MpsWriteOptions,
+) -> Result<(), IoError> {
     if model.num_soc_constraints() > 0
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
     {
@@ -1021,17 +1086,18 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     let variable_names = unique_mps_names(vars.iter().map(|v| v.name.as_str()), "C", []);
     let row_names = unique_mps_names(constraints.iter().map(|c| c.name.as_str()), "R", ["OBJ"]);
 
-    let obj_terms = extract_linear(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
-        location: "the objective".into(),
-        term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
-            .unwrap_or_else(|| "<nonlinear>".into()),
-    })?;
+    let obj_terms =
+        extract_quadratic(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
+            location: "the objective".into(),
+            term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
 
-    // Pre-compute constraint linear terms once, reused for COLUMNS and RHS.
-    let con_terms: Vec<LinearTerms> = constraints
+    // Pre-compute quadratic terms once, reused for COLUMNS, RHS, and quadratic sections.
+    let con_terms: Vec<QuadraticTerms> = constraints
         .iter()
         .map(|c| {
-            extract_linear(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+            extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
                 location: format!("constraint {:?}", c.name),
                 term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
                     .unwrap_or_else(|| "<nonlinear>".into()),
@@ -1041,11 +1107,11 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     // Build column index: VarId to [(row_name, coef)] in row order (OBJ first, then constraints).
     let mut col_index: FxHashMap<VarId, Vec<(&str, f64)>> = FxHashMap::default();
-    for (v, c) in &obj_terms.coeffs {
+    for (v, c) in &obj_terms.linear {
         col_index.entry(*v).or_default().push(("OBJ", *c));
     }
     for (row_name, terms) in row_names.iter().zip(con_terms.iter()) {
-        for (v, coef) in &terms.coeffs {
+        for (v, coef) in &terms.linear {
             col_index.entry(*v).or_default().push((row_name.as_str(), *coef));
         }
     }
@@ -1187,6 +1253,41 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         }
     }
 
+    if !obj_terms.hessian.is_empty() {
+        let header = if options.quadratic_format == MpsQuadraticFormat::Mosek {
+            "QSECTION OBJ"
+        } else {
+            "QUADOBJ"
+        };
+        write_quadratic_section(
+            out,
+            header,
+            &obj_terms,
+            &variable_names,
+            options.quadratic_format,
+            true,
+        )?;
+    }
+    for (row_name, terms) in row_names.iter().zip(con_terms.iter()) {
+        if terms.hessian.is_empty() {
+            continue;
+        }
+        let header = match options.quadratic_format {
+            MpsQuadraticFormat::Mosek => format!("QSECTION {row_name}"),
+            MpsQuadraticFormat::Gurobi | MpsQuadraticFormat::Cplex => {
+                format!("QCMATRIX {row_name}")
+            }
+        };
+        write_quadratic_section(
+            out,
+            &header,
+            terms,
+            &variable_names,
+            options.quadratic_format,
+            false,
+        )?;
+    }
+
     writeln!(out, "ENDATA")?;
     Ok(())
 }
@@ -1201,7 +1302,21 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 ///
 /// Panics if the MPS writer internal buffer does not produce valid UTF-8 data.
 pub fn to_mps_string(model: &Model) -> Result<String, IoError> {
+    to_mps_string_with(model, &MpsWriteOptions::default())
+}
+
+/// Convenience: render the MPS into a `String` with explicit export options.
+///
+/// # Errors
+///
+/// Returns [`IoError`] if the model contains unsupported expressions or writing
+/// the output fails.
+///
+/// # Panics
+///
+/// Panics if the MPS writer produces non-UTF-8 output.
+pub fn to_mps_string_with(model: &Model, options: &MpsWriteOptions) -> Result<String, IoError> {
     let mut buf = Vec::new();
-    write_mps(model, &mut buf)?;
+    write_mps_with(model, &mut buf, options)?;
     Ok(String::from_utf8(buf).expect("MPS writer emits ASCII"))
 }

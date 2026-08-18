@@ -3,8 +3,8 @@ use std::io::{self, Read};
 use oximo_core::prelude::*;
 use oximo_expr::extract_quadratic;
 use oximo_io::{
-    IoError, MpsQuadraticFormat, MpsReadOptions, read_mps, read_mps_file, read_mps_with,
-    to_mps_string,
+    IoError, MpsQuadraticFormat, MpsReadOptions, MpsWriteOptions, read_mps, read_mps_file,
+    read_mps_with, to_mps_string, to_mps_string_with,
 };
 
 fn close(left: f64, right: f64) -> bool {
@@ -165,6 +165,71 @@ fn writer_round_trips_max_binary_semi_range_and_unused_variables() {
     let constraints = imported.constraints();
     assert_eq!((constraints.algebraic()[0].lower, constraints.algebraic()[0].upper), (1.0, 6.0));
     assert!(close(quadratic_terms(&imported, true).constant, 4.0));
+}
+
+#[test]
+fn writer_round_trips_quadratic_objective_and_constraints_for_mps_dialects() {
+    let model = Model::new("quadratic roundtrip");
+    let x = model.__var("x").bounds(-2.0, 4.0).build();
+    let y = model.__var("y").bounds(-3.0, 5.0).build();
+    model.__add_constraint("q", (x * x + 2.0 * x * y + y * y).le(10.0));
+    model.__minimize(3.0 * x * x + 4.0 * x * y + y * y + x);
+
+    let expected_objective = quadratic_terms(&model, true);
+    let expected_constraint = quadratic_terms(&model, false);
+    for format in [MpsQuadraticFormat::Gurobi, MpsQuadraticFormat::Cplex, MpsQuadraticFormat::Mosek]
+    {
+        let options = MpsWriteOptions { quadratic_format: format };
+        let text = to_mps_string_with(&model, &options).expect("write quadratic MPS");
+        let expected_header = match format {
+            MpsQuadraticFormat::Mosek => "QSECTION",
+            MpsQuadraticFormat::Gurobi | MpsQuadraticFormat::Cplex => "QUADOBJ",
+        };
+        assert!(text.contains(expected_header), "{text}");
+        if format == MpsQuadraticFormat::Gurobi {
+            assert!(
+                text.contains("y          x"),
+                "Gurobi QUADOBJ must use lower triangle:\n{text}"
+            );
+            assert!(text.matches("x          y").count() >= 1);
+            assert!(text.matches("y          x").count() >= 1);
+        } else if format == MpsQuadraticFormat::Cplex {
+            assert!(
+                text.contains("x          y"),
+                "CPLEX QUADOBJ must use upper triangle:\n{text}"
+            );
+            assert!(text.matches("x          y").count() >= 1);
+            assert!(text.matches("y          x").count() >= 1);
+        } else {
+            assert!(
+                text.contains("y          x"),
+                "MOSEK QSECTION must use lower triangle:\n{text}"
+            );
+        }
+        let imported = read_mps_with(text.as_bytes(), &MpsReadOptions { quadratic_format: format })
+            .expect("read quadratic MPS");
+        let actual_objective = quadratic_terms(&imported, true);
+        let actual_constraint = quadratic_terms(&imported, false);
+        assert_eq!(actual_objective.hessian.len(), expected_objective.hessian.len());
+        assert_eq!(actual_constraint.hessian.len(), expected_constraint.hessian.len());
+        for (actual, expected) in actual_objective.hessian.iter().zip(&expected_objective.hessian) {
+            assert_eq!(actual.0, expected.0);
+            assert_eq!(actual.1, expected.1);
+            assert!(
+                close(actual.2, expected.2),
+                "{format:?} objective: actual={actual:?} expected={expected:?}"
+            );
+        }
+        for (actual, expected) in actual_constraint.hessian.iter().zip(&expected_constraint.hessian)
+        {
+            assert_eq!(actual.0, expected.0);
+            assert_eq!(actual.1, expected.1);
+            assert!(
+                close(actual.2, expected.2),
+                "{format:?} constraint: actual={actual:?} expected={expected:?}"
+            );
+        }
+    }
 }
 
 #[test]
