@@ -1,24 +1,940 @@
 //! MPS file format import and export.
 //!
-//! MPS is a widely supported text format for linear optimization problems. It can
-//! represent LP and MILP models, but not nonlinear or conic problems. The format is
-//! somewhat idiosyncratic and has some limitations (e.g. only one objective row
-//! named `OBJ`, no native support for free variables), but is a common lingua franca for
-//! exchanging linear models between tools.
+//! MPS is a widely supported text format for linear and quadratic optimization
+//! problems. It is a common lingua franca for exchanging models between tools.
 //!
-//! This module provides functions to write an oximo [`Model`] to MPS format.
-//! The main function is [`write_mps`], which writes to any `std::io::Write`.
+//! [`read_mps`] and [`read_mps_file`] import whitespace-delimited MPS files.
+//! [`write_mps`] exports the linear subset to any `std::io::Write`.
 //!
 //! References:
 //! - "MPS file format," lp_solve. <https://lpsolve.sourceforge.net/5.5/mps-format.htm> (accessed May 09, 2026).
 
-use std::io::Write;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::Path;
 
-use oximo_core::{Constraint, Model, ModelKind, ObjectiveSense, Sense, var_name};
-use oximo_expr::{LinearTerms, VarId, describe_nonlinear_term, extract_linear};
+use oximo_core::{Constraint, Domain, Model, ModelKind, ObjectiveSense, Sense, var_name};
+use oximo_expr::{Expr, LinearTerms, VarId, describe_nonlinear_term, extract_linear};
 use rustc_hash::FxHashMap;
 
 use crate::error::IoError;
+
+/// Coefficient convention used by quadratic-constraint MPS sections.
+///
+/// Objective sections always use the conventional `0.5 * x' Q x` scaling.
+/// Gurobi-style `QCMATRIX` and constraint `QSECTION` records instead encode
+/// polynomial coefficients directly, whereas CPLEX-style records use the
+/// objective/Hessian convention.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MpsQuadraticFormat {
+    /// Gurobi-compatible quadratic-constraint scaling.
+    #[default]
+    Gurobi,
+    /// CPLEX-compatible quadratic-constraint scaling.
+    Cplex,
+}
+
+/// Options controlling MPS import.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MpsReadOptions {
+    /// How ambiguous quadratic-constraint matrix coefficients are scaled.
+    pub quadratic_format: MpsQuadraticFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowKind {
+    Free,
+    Greater,
+    Less,
+    Equal,
+}
+
+struct ParsedRow {
+    name: String,
+    kind: RowKind,
+    lower: f64,
+    upper: f64,
+    linear: FxHashMap<usize, f64>,
+    quadratic: FxHashMap<(usize, usize), f64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColumnKind {
+    Continuous,
+    Integer,
+    Binary,
+    SemiContinuous,
+    SemiInteger,
+}
+
+struct ParsedColumn {
+    name: String,
+    lower: f64,
+    upper: f64,
+    kind: ColumnKind,
+    default_bounds: bool,
+    lower_explicit: bool,
+    marker_placement: MarkerPlacement,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MarkerPlacement {
+    #[default]
+    Unseen,
+    Outside,
+    Inside,
+    Mixed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+enum SectionRank {
+    Name,
+    ObjSense,
+    Rows,
+    Columns,
+    Rhs,
+    Ranges,
+    Bounds,
+    Quadratic,
+    End,
+}
+
+#[derive(Clone, Debug)]
+enum Section {
+    Name,
+    ObjSense,
+    Rows,
+    Columns,
+    Rhs,
+    Ranges,
+    Bounds,
+    QuadObj,
+    QMatrix,
+    QcMatrix(String),
+    QSec(String),
+    End,
+}
+
+impl Section {
+    fn rank(&self) -> SectionRank {
+        match self {
+            Self::Name => SectionRank::Name,
+            Self::ObjSense => SectionRank::ObjSense,
+            Self::Rows => SectionRank::Rows,
+            Self::Columns => SectionRank::Columns,
+            Self::Rhs => SectionRank::Rhs,
+            Self::Ranges => SectionRank::Ranges,
+            Self::Bounds => SectionRank::Bounds,
+            Self::QuadObj | Self::QMatrix | Self::QcMatrix(_) | Self::QSec(_) => {
+                SectionRank::Quadratic
+            }
+            Self::End => SectionRank::End,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Name => "NAME",
+            Self::ObjSense => "OBJSENSE",
+            Self::Rows => "ROWS",
+            Self::Columns => "COLUMNS",
+            Self::Rhs => "RHS",
+            Self::Ranges => "RANGES",
+            Self::Bounds => "BOUNDS",
+            Self::QuadObj => "QUADOBJ",
+            Self::QMatrix => "QMATRIX",
+            Self::QcMatrix(_) => "QCMATRIX",
+            Self::QSec(_) => "QSECTION",
+            Self::End => "ENDATA",
+        }
+    }
+}
+
+struct Field<'a> {
+    text: &'a str,
+    column: usize,
+}
+
+struct ParsedMps {
+    name: String,
+    objective_row: Option<String>,
+    sense: Option<ObjectiveSense>,
+    legacy_sense: Option<ObjectiveSense>,
+    rows: Vec<ParsedRow>,
+    row_index: FxHashMap<String, usize>,
+    columns: Vec<ParsedColumn>,
+    column_index: FxHashMap<String, usize>,
+    objective_linear: Vec<f64>,
+    objective_quadratic: FxHashMap<(usize, usize), f64>,
+    objective_constant: f64,
+    intorg: bool,
+    rhs_vector: Option<String>,
+    range_vector: Option<String>,
+    bounds_vector: Option<String>,
+    objective_quadratic_source: Option<&'static str>,
+    quadratic_rows: HashSet<String>,
+    seen_sections: u8,
+}
+
+const SEEN_ROWS: u8 = 1;
+const SEEN_COLUMNS: u8 = 2;
+const SEEN_END: u8 = 4;
+
+impl ParsedMps {
+    fn new(fallback_name: &str) -> Self {
+        Self {
+            name: fallback_name.to_owned(),
+            objective_row: None,
+            sense: None,
+            legacy_sense: None,
+            rows: Vec::new(),
+            row_index: FxHashMap::default(),
+            columns: Vec::new(),
+            column_index: FxHashMap::default(),
+            objective_linear: Vec::new(),
+            objective_quadratic: FxHashMap::default(),
+            objective_constant: 0.0,
+            intorg: false,
+            rhs_vector: None,
+            range_vector: None,
+            bounds_vector: None,
+            objective_quadratic_source: None,
+            quadratic_rows: HashSet::new(),
+            seen_sections: 0,
+        }
+    }
+
+    fn add_column(&mut self, name: &str, inside_marker: bool) -> usize {
+        let index = if let Some(index) = self.column_index.get(name) {
+            *index
+        } else {
+            let index = self.columns.len();
+            self.columns.push(ParsedColumn {
+                name: name.to_owned(),
+                lower: 0.0,
+                upper: f64::INFINITY,
+                kind: ColumnKind::Continuous,
+                default_bounds: true,
+                lower_explicit: false,
+                marker_placement: MarkerPlacement::Unseen,
+            });
+            self.column_index.insert(name.to_owned(), index);
+            self.objective_linear.push(0.0);
+            index
+        };
+        let column = &mut self.columns[index];
+        if inside_marker {
+            column.marker_placement = match column.marker_placement {
+                MarkerPlacement::Unseen | MarkerPlacement::Inside => MarkerPlacement::Inside,
+                MarkerPlacement::Outside | MarkerPlacement::Mixed => MarkerPlacement::Mixed,
+            };
+            column.kind = ColumnKind::Integer;
+            if column.default_bounds {
+                column.upper = 1.0;
+            }
+        } else {
+            column.marker_placement = match column.marker_placement {
+                MarkerPlacement::Unseen | MarkerPlacement::Outside => MarkerPlacement::Outside,
+                MarkerPlacement::Inside | MarkerPlacement::Mixed => MarkerPlacement::Mixed,
+            };
+        }
+        index
+    }
+}
+
+fn invalid_mps(line: usize, column: usize, message: impl Into<String>) -> IoError {
+    IoError::InvalidMps { line, column, message: message.into() }
+}
+
+fn fields(line: &str) -> Vec<Field<'_>> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (offset, ch) in line.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(begin) = start.take() {
+                out.push(Field { text: &line[begin..offset], column: begin + 1 });
+            }
+        } else if start.is_none() {
+            start = Some(offset);
+        }
+    }
+    if let Some(begin) = start {
+        out.push(Field { text: &line[begin..], column: begin + 1 });
+    }
+    out
+}
+
+fn parse_number(field: &Field<'_>, line: usize) -> Result<f64, IoError> {
+    let normalized;
+    let text = if field.text.contains(['d', 'D']) {
+        normalized = field.text.replace(['d', 'D'], "E");
+        normalized.as_str()
+    } else {
+        field.text
+    };
+    let value = text
+        .parse::<f64>()
+        .map_err(|_| invalid_mps(line, field.column, format!("invalid number {:?}", field.text)))?;
+    if !value.is_finite() {
+        return Err(invalid_mps(line, field.column, "numeric fields must be finite"));
+    }
+    Ok(value)
+}
+
+fn objective_sense(field: &Field<'_>, line: usize) -> Result<ObjectiveSense, IoError> {
+    match field.text.to_ascii_uppercase().as_str() {
+        "MIN" | "MINIMIZE" => Ok(ObjectiveSense::Minimize),
+        "MAX" | "MAXIMIZE" => Ok(ObjectiveSense::Maximize),
+        _ => Err(invalid_mps(line, field.column, "objective sense must be MIN or MAX")),
+    }
+}
+
+fn parse_legacy_sense(line: &str) -> Option<ObjectiveSense> {
+    let comment = line.trim_start_matches('*').trim();
+    let value = comment.strip_prefix("sense:").or_else(|| comment.strip_prefix("SENSE:"))?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "minimize" | "min" => Some(ObjectiveSense::Minimize),
+        "maximize" | "max" => Some(ObjectiveSense::Maximize),
+        _ => None,
+    }
+}
+
+fn header(items: &[Field<'_>], current: &Section) -> Option<Section> {
+    let first = items.first()?.text.to_ascii_uppercase();
+    match (first.as_str(), items.len()) {
+        ("NAME", _) if matches!(current, Section::Name) => Some(Section::Name),
+        ("OBJSENSE", 1 | 2) => Some(Section::ObjSense),
+        ("ROWS", 1) => Some(Section::Rows),
+        ("COLUMNS", 1) => Some(Section::Columns),
+        ("RHS", 1) => Some(Section::Rhs),
+        ("RANGES", 1) => Some(Section::Ranges),
+        ("BOUNDS", 1) => Some(Section::Bounds),
+        ("QUADOBJ", 1) => Some(Section::QuadObj),
+        ("QMATRIX", 1) => Some(Section::QMatrix),
+        ("QCMATRIX", 2) => Some(Section::QcMatrix(items[1].text.to_owned())),
+        ("QSECTION", 2) => Some(Section::QSec(items[1].text.to_owned())),
+        ("ENDATA", 1) => Some(Section::End),
+        _ => None,
+    }
+}
+
+fn select_vector(
+    selected: &mut Option<String>,
+    candidate: Option<&Field<'_>>,
+    section: &str,
+) -> Result<(), IoError> {
+    let Some(candidate) = candidate else { return Ok(()) };
+    if let Some(existing) = selected {
+        if existing != candidate.text {
+            return Err(IoError::UnsupportedMps {
+                section: section.into(),
+                feature: format!(
+                    "multiple data vectors ({existing:?} and {:?}) are not supported",
+                    candidate.text
+                ),
+            });
+        }
+    } else {
+        *selected = Some(candidate.text.to_owned());
+    }
+    Ok(())
+}
+
+fn parse_row(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
+    if items.len() < 2 {
+        return Err(invalid_mps(line, 1, "ROWS records require a sense and row name"));
+    }
+    let name = items[1].text;
+    if data.objective_row.as_deref() == Some(name) || data.row_index.contains_key(name) {
+        return Err(invalid_mps(line, items[1].column, format!("duplicate row name {name:?}")));
+    }
+    let kind = match items[0].text.to_ascii_uppercase().as_str() {
+        "N" => RowKind::Free,
+        "G" => RowKind::Greater,
+        "L" => RowKind::Less,
+        "E" => RowKind::Equal,
+        _ => {
+            return Err(invalid_mps(line, items[0].column, "row sense must be N, G, L, or E"));
+        }
+    };
+    if kind == RowKind::Free && data.objective_row.is_none() {
+        data.objective_row = Some(name.to_owned());
+        return Ok(());
+    }
+    let (lower, upper) = match kind {
+        RowKind::Free => (f64::NEG_INFINITY, f64::INFINITY),
+        RowKind::Greater => (0.0, f64::INFINITY),
+        RowKind::Less => (f64::NEG_INFINITY, 0.0),
+        RowKind::Equal => (0.0, 0.0),
+    };
+    let index = data.rows.len();
+    data.rows.push(ParsedRow {
+        name: name.to_owned(),
+        kind,
+        lower,
+        upper,
+        linear: FxHashMap::default(),
+        quadratic: FxHashMap::default(),
+    });
+    data.row_index.insert(name.to_owned(), index);
+    Ok(())
+}
+
+fn parse_coefficient(
+    data: &mut ParsedMps,
+    column: usize,
+    row: &Field<'_>,
+    value: &Field<'_>,
+    line: usize,
+) -> Result<(), IoError> {
+    let value = parse_number(value, line)?;
+    if data.objective_row.as_deref() == Some(row.text) {
+        data.objective_linear[column] += value;
+        return Ok(());
+    }
+    let row_index = data.row_index.get(row.text).copied().ok_or_else(|| {
+        invalid_mps(line, row.column, format!("unknown ROWS name {:?}", row.text))
+    })?;
+    *data.rows[row_index].linear.entry(column).or_insert(0.0) += value;
+    Ok(())
+}
+
+fn unquote_marker(value: &str) -> String {
+    value.trim_matches(|c| c == '\'' || c == '"').to_ascii_uppercase()
+}
+
+fn parse_columns(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
+    if items.len() == 3 && unquote_marker(items[1].text) == "MARKER" {
+        match unquote_marker(items[2].text).as_str() {
+            "INTORG" if !data.intorg => data.intorg = true,
+            "INTEND" if data.intorg => data.intorg = false,
+            "INTORG" => return Err(invalid_mps(line, items[2].column, "nested INTORG marker")),
+            "INTEND" => {
+                return Err(invalid_mps(line, items[2].column, "INTEND without INTORG"));
+            }
+            _ => return Err(invalid_mps(line, items[2].column, "unknown MARKER value")),
+        }
+        return Ok(());
+    }
+    if items.len() != 3 && items.len() != 5 {
+        return Err(invalid_mps(line, 1, "COLUMNS records require three or five fields"));
+    }
+    let column = data.add_column(items[0].text, data.intorg);
+    let column_data = &data.columns[column];
+    if column_data.marker_placement == MarkerPlacement::Mixed {
+        return Err(invalid_mps(
+            line,
+            items[0].column,
+            format!("integer column {:?} also appears outside INTORG/INTEND", items[0].text),
+        ));
+    }
+    parse_coefficient(data, column, &items[1], &items[2], line)?;
+    if items.len() == 5 {
+        parse_coefficient(data, column, &items[3], &items[4], line)?;
+    }
+    Ok(())
+}
+
+fn parse_rhs_value(
+    data: &mut ParsedMps,
+    row: &Field<'_>,
+    value: &Field<'_>,
+    line: usize,
+) -> Result<(), IoError> {
+    let value = parse_number(value, line)?;
+    if data.objective_row.as_deref() == Some(row.text) {
+        data.objective_constant = -value;
+        return Ok(());
+    }
+    let index = data.row_index.get(row.text).copied().ok_or_else(|| {
+        invalid_mps(line, row.column, format!("unknown ROWS name {:?}", row.text))
+    })?;
+    let parsed_row = &mut data.rows[index];
+    match parsed_row.kind {
+        RowKind::Greater => parsed_row.lower = value,
+        RowKind::Less => parsed_row.upper = value,
+        RowKind::Equal => {
+            parsed_row.lower = value;
+            parsed_row.upper = value;
+        }
+        RowKind::Free => {
+            return Err(invalid_mps(line, row.column, "a free N row cannot have an RHS"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_rhs(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
+    let (vector, pairs): (Option<&Field<'_>>, &[Field<'_>]) = match items.len() {
+        2 | 4 => (None, items),
+        3 | 5 => (Some(&items[0]), &items[1..]),
+        _ => return Err(invalid_mps(line, 1, "RHS records require two to five fields")),
+    };
+    select_vector(&mut data.rhs_vector, vector, "RHS")?;
+    for pair in pairs.chunks_exact(2) {
+        parse_rhs_value(data, &pair[0], &pair[1], line)?;
+    }
+    Ok(())
+}
+
+fn parse_range_value(
+    data: &mut ParsedMps,
+    row: &Field<'_>,
+    value: &Field<'_>,
+    line: usize,
+) -> Result<(), IoError> {
+    let value = parse_number(value, line)?;
+    let index = data.row_index.get(row.text).copied().ok_or_else(|| {
+        invalid_mps(line, row.column, format!("unknown ROWS name {:?}", row.text))
+    })?;
+    let parsed_row = &mut data.rows[index];
+    match parsed_row.kind {
+        RowKind::Greater => parsed_row.upper = parsed_row.lower + value.abs(),
+        RowKind::Less => parsed_row.lower = parsed_row.upper - value.abs(),
+        RowKind::Equal if value >= 0.0 => parsed_row.upper = parsed_row.lower + value,
+        RowKind::Equal => parsed_row.lower = parsed_row.upper + value,
+        RowKind::Free => {
+            return Err(invalid_mps(line, row.column, "a free N row cannot have a range"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_ranges(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
+    let (vector, pairs): (Option<&Field<'_>>, &[Field<'_>]) = match items.len() {
+        2 | 4 => (None, items),
+        3 | 5 => (Some(&items[0]), &items[1..]),
+        _ => return Err(invalid_mps(line, 1, "RANGES records require two to five fields")),
+    };
+    select_vector(&mut data.range_vector, vector, "RANGES")?;
+    for pair in pairs.chunks_exact(2) {
+        parse_range_value(data, &pair[0], &pair[1], line)?;
+    }
+    Ok(())
+}
+
+fn parse_bound(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
+    if items.len() != 3 && items.len() != 4 {
+        return Err(invalid_mps(line, 1, "BOUNDS records require three or four fields"));
+    }
+    select_vector(&mut data.bounds_vector, Some(&items[1]), "BOUNDS")?;
+    let column_index = data.column_index.get(items[2].text).copied().ok_or_else(|| {
+        invalid_mps(line, items[2].column, format!("unknown column {:?}", items[2].text))
+    })?;
+    let bound_type = items[0].text.to_ascii_uppercase();
+    let value = items.get(3).map(|field| parse_number(field, line)).transpose()?;
+    let column = &mut data.columns[column_index];
+    if column.default_bounds && column.kind == ColumnKind::Integer {
+        column.upper = f64::INFINITY;
+    }
+    column.default_bounds = false;
+    match (bound_type.as_str(), value) {
+        ("PL", None) => column.upper = f64::INFINITY,
+        ("MI", None) => {
+            column.lower = f64::NEG_INFINITY;
+            column.lower_explicit = true;
+        }
+        ("FR", None | Some(_)) => {
+            column.lower = f64::NEG_INFINITY;
+            column.upper = f64::INFINITY;
+            column.lower_explicit = true;
+        }
+        ("BV", None | Some(_)) => {
+            column.lower = 0.0;
+            column.upper = 1.0;
+            column.kind = ColumnKind::Binary;
+            column.lower_explicit = true;
+        }
+        ("FX", Some(value)) => {
+            column.lower = value;
+            column.upper = value;
+            column.lower_explicit = true;
+        }
+        ("UP", Some(value)) => column.upper = value,
+        ("LO", Some(value)) => {
+            column.lower = value;
+            column.lower_explicit = true;
+        }
+        ("LI", Some(value)) => {
+            column.lower = value;
+            column.kind = ColumnKind::Integer;
+            column.lower_explicit = true;
+        }
+        ("UI", Some(value)) => {
+            column.upper = value;
+            column.kind = ColumnKind::Integer;
+        }
+        ("SC", Some(value)) => {
+            if !column.lower_explicit {
+                column.lower = 1.0;
+            }
+            column.upper = value;
+            column.kind = ColumnKind::SemiContinuous;
+        }
+        ("SI", Some(value)) => {
+            if !column.lower_explicit {
+                column.lower = 1.0;
+            }
+            column.upper = value;
+            column.kind = ColumnKind::SemiInteger;
+        }
+        _ => {
+            return Err(invalid_mps(
+                line,
+                items[0].column,
+                format!("invalid {bound_type} bound record"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn quadratic_coefficient(
+    format: MpsQuadraticFormat,
+    diagonal: bool,
+    objective: bool,
+    value: f64,
+) -> f64 {
+    if objective || format == MpsQuadraticFormat::Cplex {
+        if diagonal { value / 2.0 } else { value }
+    } else if diagonal {
+        value
+    } else {
+        2.0 * value
+    }
+}
+
+fn parse_quadratic_record(
+    data: &mut ParsedMps,
+    section: &Section,
+    items: &[Field<'_>],
+    line: usize,
+    options: MpsReadOptions,
+) -> Result<(), IoError> {
+    if items.len() != 3 {
+        return Err(invalid_mps(line, 1, "quadratic records require three fields"));
+    }
+    let left = data.column_index.get(items[0].text).copied().ok_or_else(|| {
+        invalid_mps(line, items[0].column, format!("unknown column {:?}", items[0].text))
+    })?;
+    let right = data.column_index.get(items[1].text).copied().ok_or_else(|| {
+        invalid_mps(line, items[1].column, format!("unknown column {:?}", items[1].text))
+    })?;
+    if matches!(section, Section::QMatrix | Section::QcMatrix(_)) && left > right {
+        return Ok(());
+    }
+    let pair = if left <= right { (left, right) } else { (right, left) };
+    let value = parse_number(&items[2], line)?;
+    let objective = match section {
+        Section::QuadObj | Section::QMatrix => true,
+        Section::QSec(name) => data.objective_row.as_deref() == Some(name.as_str()),
+        Section::QcMatrix(_) => false,
+        _ => unreachable!("quadratic parser called outside quadratic section"),
+    };
+    let coefficient =
+        quadratic_coefficient(options.quadratic_format, left == right, objective, value);
+    if objective {
+        *data.objective_quadratic.entry(pair).or_insert(0.0) += coefficient;
+        return Ok(());
+    }
+    let (Section::QcMatrix(row_name) | Section::QSec(row_name)) = section else { unreachable!() };
+    let row = data.row_index.get(row_name).copied().ok_or_else(|| {
+        invalid_mps(line, 1, format!("quadratic section names unknown row {row_name:?}"))
+    })?;
+    *data.rows[row].quadratic.entry(pair).or_insert(0.0) += coefficient;
+    Ok(())
+}
+
+fn begin_quadratic_section(
+    data: &mut ParsedMps,
+    section: &Section,
+    line: usize,
+) -> Result<(), IoError> {
+    let source = section.name();
+    let objective = match section {
+        Section::QuadObj | Section::QMatrix => true,
+        Section::QSec(name) => data.objective_row.as_deref() == Some(name.as_str()),
+        Section::QcMatrix(_) => false,
+        _ => return Ok(()),
+    };
+    if objective {
+        if let Some(existing) = data.objective_quadratic_source {
+            return Err(invalid_mps(
+                line,
+                1,
+                format!("objective quadratic data already supplied by {existing}"),
+            ));
+        }
+        data.objective_quadratic_source = Some(source);
+        return Ok(());
+    }
+    let (Section::QcMatrix(row_name) | Section::QSec(row_name)) = section else { unreachable!() };
+    if !data.row_index.contains_key(row_name) {
+        return Err(invalid_mps(
+            line,
+            1,
+            format!("quadratic section names unknown row {row_name:?}"),
+        ));
+    }
+    if !data.quadratic_rows.insert(row_name.clone()) {
+        return Err(invalid_mps(
+            line,
+            1,
+            format!("duplicate quadratic section for row {row_name:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn check_section_transition(
+    previous: &Section,
+    next: &Section,
+    line: usize,
+) -> Result<(), IoError> {
+    if next.rank() < previous.rank() {
+        return Err(invalid_mps(
+            line,
+            1,
+            format!("{} section appears after {}", next.name(), previous.name()),
+        ));
+    }
+    if next.rank() == previous.rank()
+        && !matches!(next.rank(), SectionRank::Quadratic)
+        && !matches!((previous, next), (Section::Name, Section::Name))
+    {
+        return Err(invalid_mps(line, 1, format!("duplicate {} section", next.name())));
+    }
+    Ok(())
+}
+
+fn parse_mps(text: &str, fallback_name: &str, options: MpsReadOptions) -> Result<Model, IoError> {
+    let mut data = ParsedMps::new(fallback_name);
+    let mut section = Section::Name;
+    let mut saw_name = false;
+    for (offset, raw_line) in text.lines().enumerate() {
+        let line_no = offset + 1;
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('*') {
+            if data.sense.is_none() {
+                data.legacy_sense = parse_legacy_sense(trimmed).or(data.legacy_sense);
+            }
+            continue;
+        }
+        if data.seen_sections & SEEN_END != 0 {
+            return Err(invalid_mps(line_no, 1, "content after ENDATA"));
+        }
+        let items = fields(line);
+        if let Some(first) = items.first() {
+            let keyword = first.text.to_ascii_uppercase();
+            if items.len() == 1 && matches!(keyword.as_str(), "SOS" | "INDICATORS") {
+                return Err(IoError::UnsupportedMps {
+                    section: keyword,
+                    feature: "not represented by oximo-core".into(),
+                });
+            }
+        }
+        if let Some(next) = header(&items, &section) {
+            if matches!(next, Section::Name) {
+                if saw_name {
+                    return Err(invalid_mps(line_no, 1, "duplicate NAME section"));
+                }
+                saw_name = true;
+                if items.len() > 1 {
+                    data.name =
+                        items[1..].iter().map(|field| field.text).collect::<Vec<_>>().join(" ");
+                }
+                continue;
+            }
+            if !saw_name {
+                return Err(invalid_mps(line_no, 1, "the first data line must be NAME"));
+            }
+            check_section_transition(&section, &next, line_no)?;
+            if data.intorg && !matches!(next, Section::Columns) {
+                return Err(invalid_mps(line_no, 1, "missing INTEND marker before COLUMNS ends"));
+            }
+            match &next {
+                Section::ObjSense if items.len() == 2 => {
+                    data.sense = Some(objective_sense(&items[1], line_no)?);
+                }
+                Section::Rows => data.seen_sections |= SEEN_ROWS,
+                Section::Columns => data.seen_sections |= SEEN_COLUMNS,
+                Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
+                    begin_quadratic_section(&mut data, &next, line_no)?;
+                }
+                Section::End => data.seen_sections |= SEEN_END,
+                _ => {}
+            }
+            section = next;
+            continue;
+        }
+        if !saw_name {
+            return Err(invalid_mps(line_no, 1, "the first data line must be NAME"));
+        }
+        match &section {
+            Section::ObjSense => {
+                if items.len() != 1 {
+                    return Err(invalid_mps(line_no, 1, "OBJSENSE data requires one field"));
+                }
+                data.sense = Some(objective_sense(&items[0], line_no)?);
+            }
+            Section::Rows => parse_row(&mut data, &items, line_no)?,
+            Section::Columns => parse_columns(&mut data, &items, line_no)?,
+            Section::Rhs => parse_rhs(&mut data, &items, line_no)?,
+            Section::Ranges => parse_ranges(&mut data, &items, line_no)?,
+            Section::Bounds => parse_bound(&mut data, &items, line_no)?,
+            Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
+                parse_quadratic_record(&mut data, &section, &items, line_no, options)?;
+            }
+            Section::Name => return Err(invalid_mps(line_no, 1, "expected NAME header")),
+            Section::End => unreachable!(),
+        }
+    }
+    let last_line = text.lines().count().max(1);
+    if data.intorg {
+        return Err(invalid_mps(last_line, 1, "missing INTEND marker"));
+    }
+    if data.seen_sections & SEEN_ROWS == 0 {
+        return Err(invalid_mps(last_line, 1, "missing ROWS section"));
+    }
+    if data.seen_sections & SEEN_COLUMNS == 0 {
+        return Err(invalid_mps(last_line, 1, "missing COLUMNS section"));
+    }
+    if data.seen_sections & SEEN_END == 0 {
+        return Err(invalid_mps(last_line, 1, "missing ENDATA"));
+    }
+    build_mps_model(data)
+}
+
+fn expression<'a>(
+    model: &'a Model,
+    variables: &[Expr<'a>],
+    linear: impl IntoIterator<Item = (usize, f64)>,
+    quadratic: impl IntoIterator<Item = ((usize, usize), f64)>,
+    constant: f64,
+) -> Expr<'a> {
+    let mut expr = model.__constant(constant);
+    for (column, coefficient) in linear {
+        if coefficient != 0.0 {
+            expr = expr + coefficient * variables[column];
+        }
+    }
+    for ((left, right), coefficient) in quadratic {
+        if coefficient != 0.0 {
+            expr = expr + coefficient * variables[left] * variables[right];
+        }
+    }
+    expr
+}
+
+fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
+    for column in &data.columns {
+        if column.lower > column.upper {
+            return Err(invalid_mps(
+                1,
+                1,
+                format!("inconsistent bounds for column {:?}", column.name),
+            ));
+        }
+        if matches!(column.kind, ColumnKind::SemiContinuous | ColumnKind::SemiInteger)
+            && (!column.lower.is_finite() || column.lower < 0.0)
+        {
+            return Err(invalid_mps(
+                1,
+                1,
+                format!("invalid semi-domain threshold for column {:?}", column.name),
+            ));
+        }
+    }
+    for row in &data.rows {
+        if row.lower > row.upper {
+            return Err(invalid_mps(1, 1, format!("inconsistent range for row {:?}", row.name)));
+        }
+    }
+    let model = Model::new(data.name);
+    let mut variables = Vec::with_capacity(data.columns.len());
+    for column in &data.columns {
+        let domain = match column.kind {
+            ColumnKind::Continuous => Domain::Real,
+            ColumnKind::Integer => Domain::Integer,
+            ColumnKind::Binary => Domain::Binary,
+            ColumnKind::SemiContinuous => Domain::SemiContinuous { threshold: column.lower },
+            ColumnKind::SemiInteger => Domain::SemiInteger { threshold: column.lower },
+        };
+        variables.push(
+            model
+                .__var(column.name.clone())
+                .bounds(column.lower, column.upper)
+                .domain(domain)
+                .build(),
+        );
+    }
+    for row in data.rows {
+        let expr = expression(&model, &variables, row.linear, row.quadratic, 0.0);
+        model.__add_constraint_interval(row.name, expr, row.lower, row.upper);
+    }
+    let objective = expression(
+        &model,
+        &variables,
+        data.objective_linear.into_iter().enumerate(),
+        data.objective_quadratic,
+        data.objective_constant,
+    );
+    match data.sense.or(data.legacy_sense).unwrap_or(ObjectiveSense::Minimize) {
+        ObjectiveSense::Minimize => model.__minimize(objective),
+        ObjectiveSense::Maximize => model.__maximize(objective),
+    }
+    Ok(model)
+}
+
+/// Read an MPS byte stream with default options.
+///
+/// # Errors
+///
+/// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
+pub fn read_mps<R: Read>(input: R) -> Result<Model, IoError> {
+    read_mps_with(input, &MpsReadOptions::default())
+}
+
+/// Read an MPS byte stream with explicit import options.
+///
+/// # Errors
+///
+/// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
+pub fn read_mps_with<R: Read>(mut input: R, options: &MpsReadOptions) -> Result<Model, IoError> {
+    let mut text = String::new();
+    input.read_to_string(&mut text)?;
+    parse_mps(&text, "mps_model", *options)
+}
+
+/// Read an MPS file with default options.
+///
+/// # Errors
+///
+/// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
+pub fn read_mps_file(path: impl AsRef<Path>) -> Result<Model, IoError> {
+    read_mps_file_with(path, &MpsReadOptions::default())
+}
+
+/// Read an MPS file with explicit import options.
+///
+/// # Errors
+///
+/// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
+pub fn read_mps_file_with(
+    path: impl AsRef<Path>,
+    options: &MpsReadOptions,
+) -> Result<Model, IoError> {
+    let path = path.as_ref();
+    let mut text = String::new();
+    File::open(path)?.read_to_string(&mut text)?;
+    let fallback = path.file_stem().and_then(|name| name.to_str()).unwrap_or("mps_model");
+    parse_mps(&text, fallback, *options)
+}
 
 /// Write `model` to `out` in fixed-format MPS.
 ///
@@ -73,8 +989,6 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         }
     }
 
-    // Per the MPS spec, max problems are negated, since most solvers assume
-    // minimization. Tag the sense in a comment so re-importers can recover it.
     writeln!(out, "* OXIMO MPS export")?;
     writeln!(
         out,
@@ -85,6 +999,15 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         }
     )?;
     writeln!(out, "NAME          {}", model.name)?;
+    writeln!(out, "OBJSENSE")?;
+    writeln!(
+        out,
+        " {}",
+        match objective.sense {
+            ObjectiveSense::Minimize => "MIN",
+            ObjectiveSense::Maximize => "MAX",
+        }
+    )?;
 
     writeln!(out, "ROWS")?;
     writeln!(out, " N  OBJ")?;
@@ -105,8 +1028,8 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     writeln!(out, "COLUMNS")?;
     let mut int_open = false;
     for v in vars.iter() {
-        // Semi-integer columns carry their integrality via the `SI` bound
-        let needs_marker = v.domain.is_integer() && v.domain.semi_threshold().is_none();
+        // Binary and semi-integer columns carry their integrality via bounds.
+        let needs_marker = matches!(v.domain, Domain::Integer);
         if needs_marker && !int_open {
             writeln!(out, "    MARKER                 'MARKER'                 'INTORG'")?;
             int_open = true;
@@ -118,6 +1041,8 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             for (row_name, coef) in entries {
                 writeln!(out, "    {:<10}{:<10}{}", v.name, row_name, coef)?;
             }
+        } else {
+            writeln!(out, "    {:<10}{:<10}0", v.name, "OBJ")?;
         }
     }
     if int_open {
@@ -157,6 +1082,16 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     for v in vars.iter() {
         let lb = v.lb;
         let ub = v.ub;
+        if matches!(v.domain, Domain::Binary) {
+            writeln!(out, " BV BND       {}", v.name)?;
+            if lb != 0.0 {
+                writeln!(out, " LO BND       {:<10}{}", v.name, lb)?;
+            }
+            if (ub - 1.0).abs() >= f64::EPSILON {
+                writeln!(out, " UP BND       {:<10}{}", v.name, ub)?;
+            }
+            continue;
+        }
         if let Some(thr) = v.domain.semi_threshold() {
             writeln!(out, " LO BND       {:<10}{}", v.name, thr)?;
             let semi_ub = if ub.is_finite() { ub } else { 1e30 };
