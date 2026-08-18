@@ -235,14 +235,36 @@ ENDATA
 
 #[test]
 fn qsection_supports_objective_and_constraint_targets() {
-    let objective = "NAME q\nROWS\n N cost\nCOLUMNS\n x cost 0\nQSECTION cost\n x x 6\nENDATA\n";
-    let model = read_mps(objective.as_bytes()).expect("objective QSECTION");
+    let declared = "NAME q\nROWS\n N cost\nCOLUMNS\n x cost 0\nQSECTION cost\n x x 6\nENDATA\n";
+    let model = read_mps(declared.as_bytes()).expect("declared objective QSECTION");
     assert!(close(quadratic_terms(&model, true).hessian[0].2, 6.0));
+
+    let obj_alias = "NAME q\nROWS\n N cost\nCOLUMNS\n x cost 0\nQSECTION OBJ\n x x 8\nENDATA\n";
+    let model = read_mps(obj_alias.as_bytes()).expect("OBJ objective QSECTION");
+    assert!(close(quadratic_terms(&model, true).hessian[0].2, 8.0));
 
     let constraint =
         "NAME q\nROWS\n N obj\n L row\nCOLUMNS\n x row 0\nQSECTION row\n x x 3\nENDATA\n";
     let model = read_mps(constraint.as_bytes()).expect("constraint QSECTION");
     assert!(close(quadratic_terms(&model, false).hessian[0].2, 6.0));
+}
+
+#[test]
+fn qsection_obj_rejects_ambiguous_and_duplicate_objective_targets() {
+    let ambiguous =
+        "NAME q\nROWS\n N cost\n L OBJ\nCOLUMNS\n x cost 0 OBJ 0\nQSECTION OBJ\n x x 1\nENDATA\n";
+    let error = read_mps(ambiguous.as_bytes()).expect_err("ambiguous OBJ target");
+    assert!(matches!(
+        error,
+        IoError::InvalidMps { message, .. } if message.contains("ambiguous")
+    ));
+
+    let duplicate = "NAME q\nROWS\n N cost\nCOLUMNS\n x cost 0\nQSECTION cost\n x x 1\nQSECTION OBJ\n x x 1\nENDATA\n";
+    let error = read_mps(duplicate.as_bytes()).expect_err("duplicate objective QSECTION");
+    assert!(matches!(
+        error,
+        IoError::InvalidMps { message, .. } if message.contains("already supplied")
+    ));
 }
 
 #[test]

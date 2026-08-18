@@ -605,6 +605,20 @@ fn quadratic_coefficient(
     }
 }
 
+fn qsection_targets_objective(data: &ParsedMps, name: &str, line: usize) -> Result<bool, IoError> {
+    if name == "OBJ" {
+        if data.objective_row.as_deref() != Some("OBJ") && data.row_index.contains_key("OBJ") {
+            return Err(invalid_mps(
+                line,
+                1,
+                "QSECTION OBJ is ambiguous because OBJ is also a constraint row",
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(data.objective_row.as_deref() == Some(name))
+}
+
 fn parse_quadratic_record(
     data: &mut ParsedMps,
     section: &Section,
@@ -628,7 +642,7 @@ fn parse_quadratic_record(
     let value = parse_number(&items[2], line)?;
     let objective = match section {
         Section::QuadObj | Section::QMatrix => true,
-        Section::QSec(name) => data.objective_row.as_deref() == Some(name.as_str()),
+        Section::QSec(name) => qsection_targets_objective(data, name, line)?,
         Section::QcMatrix(_) => false,
         _ => unreachable!("quadratic parser called outside quadratic section"),
     };
@@ -654,7 +668,7 @@ fn begin_quadratic_section(
     let source = section.name();
     let objective = match section {
         Section::QuadObj | Section::QMatrix => true,
-        Section::QSec(name) => data.objective_row.as_deref() == Some(name.as_str()),
+        Section::QSec(name) => qsection_targets_objective(data, name, line)?,
         Section::QcMatrix(_) => false,
         _ => return Ok(()),
     };
