@@ -68,6 +68,33 @@ ENDATA
 }
 
 #[test]
+fn upstream_stacked_data_fixture_with_tabs_and_extra_row_fields() {
+    let text = "NAME stacked\nROWS\n N OBJ metadata\n L limit metadata\nCOLUMNS\n x\tOBJ\t1\tlimit\t2\n y\tOBJ\t-1\tlimit\t3\nRHS\n rhs\tOBJ\t4\tlimit\t7\nENDATA\n";
+    let model = read_mps(text.as_bytes()).expect("stacked upstream fixture");
+
+    assert_eq!(model.num_variables(), 2);
+    assert_eq!(model.num_constraints(), 1);
+    let objective = quadratic_terms(&model, true);
+    assert_eq!(objective.linear.len(), 2);
+    assert!(close(objective.constant, -4.0));
+    let constraints = model.constraints();
+    let row = &constraints.algebraic()[0];
+    assert!(row.lower.is_infinite() && row.lower.is_sign_negative());
+    assert!(close(row.upper, 7.0));
+}
+
+#[test]
+fn upstream_integer_default_bounds_reset_on_explicit_bound() {
+    let text = "NAME integer\nROWS\n N OBJ\nCOLUMNS\n marker 'MARKER' 'INTORG'\n x OBJ 1\n marker 'MARKER' 'INTEND'\n y OBJ 1\nBOUNDS\n LO BND x 2\nENDATA\n";
+    let model = read_mps(text.as_bytes()).expect("integer default bounds fixture");
+    let x = &model.variables()[0];
+    assert!(matches!(x.domain, Domain::Integer));
+    assert!(close(x.lb, 2.0));
+    assert!(x.ub.is_infinite() && x.ub.is_sign_positive());
+    assert!(matches!(model.variables()[1].domain, Domain::Real));
+}
+
+#[test]
 fn legacy_sense_is_fallback_and_objsense_takes_precedence() {
     let legacy = "* sense: maximize\nNAME old\nROWS\n N obj\nCOLUMNS\n x obj 1\nENDATA\n";
     let model = read_mps(legacy.as_bytes()).expect("legacy sense");
