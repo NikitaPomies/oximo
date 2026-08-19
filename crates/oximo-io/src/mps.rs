@@ -712,7 +712,7 @@ fn parse_quadratic_record(
 fn validate_quadratic_triangles(data: &ParsedMps, line: usize) -> Result<(), IoError> {
     for ((_, left, right), triangle) in &data.quadratic_triangles {
         if let (Some(upper), Some(lower)) = (triangle.upper, triangle.lower)
-            && upper != lower
+            && upper.total_cmp(&lower).is_ne()
         {
             return Err(invalid_mps(
                 line,
