@@ -562,7 +562,12 @@ fn parse_bound(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result
             column.upper = value;
             column.lower_explicit = true;
         }
-        ("UP", Some(value)) => column.upper = value,
+        ("UP", Some(value)) => {
+            if value < 0.0 && !column.lower_explicit {
+                column.lower = f64::NEG_INFINITY;
+            }
+            column.upper = value;
+        }
         ("LO", Some(value)) => {
             column.lower = value;
             column.lower_explicit = true;

@@ -95,6 +95,22 @@ fn upstream_integer_default_bounds_reset_on_explicit_bound() {
 }
 
 #[test]
+fn negative_upper_bound_without_lower_bound_is_unbounded_below() {
+    let initial =
+        "NAME negative_up\nROWS\n N OBJ\nCOLUMNS\n x OBJ 1\nBOUNDS\n UP BND x -2\nENDATA\n";
+    let model = read_mps(initial.as_bytes()).expect("negative initial upper bound");
+    let variable = &model.variables()[0];
+    assert!(variable.lb.is_infinite() && variable.lb.is_sign_negative());
+    assert!(close(variable.ub, -2.0));
+
+    let explicit = "NAME explicit_lo\nROWS\n N OBJ\nCOLUMNS\n x OBJ 1\nBOUNDS\n LO BND x -5\n UP BND x -2\nENDATA\n";
+    let model = read_mps(explicit.as_bytes()).expect("explicit lower bound");
+    let variable = &model.variables()[0];
+    assert!(close(variable.lb, -5.0));
+    assert!(close(variable.ub, -2.0));
+}
+
+#[test]
 fn legacy_sense_is_fallback_and_objsense_takes_precedence() {
     let legacy = "* sense: maximize\nNAME old\nROWS\n N obj\nCOLUMNS\n x obj 1\nENDATA\n";
     let model = read_mps(legacy.as_bytes()).expect("legacy sense");
