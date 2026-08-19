@@ -89,6 +89,12 @@ struct ParsedColumn {
     marker_placement: MarkerPlacement,
 }
 
+#[derive(Default)]
+struct QuadraticTriangle {
+    upper: Option<f64>,
+    lower: Option<f64>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum MarkerPlacement {
     #[default]
@@ -178,6 +184,7 @@ struct ParsedMps {
     column_index: FxHashMap<String, usize>,
     objective_linear: Vec<f64>,
     objective_quadratic: FxHashMap<(usize, usize), f64>,
+    quadratic_triangles: FxHashMap<(Option<usize>, usize, usize), QuadraticTriangle>,
     objective_constant: f64,
     intorg: bool,
     rhs_vector: Option<String>,
@@ -205,6 +212,7 @@ impl ParsedMps {
             column_index: FxHashMap::default(),
             objective_linear: Vec::new(),
             objective_quadratic: FxHashMap::default(),
+            quadratic_triangles: FxHashMap::default(),
             objective_constant: 0.0,
             intorg: false,
             rhs_vector: None,
@@ -660,9 +668,6 @@ fn parse_quadratic_record(
     let right = data.column_index.get(items[1].text).copied().ok_or_else(|| {
         invalid_mps(line, items[1].column, format!("unknown column {:?}", items[1].text))
     })?;
-    if matches!(section, Section::QMatrix | Section::QcMatrix(_)) && left > right {
-        return Ok(());
-    }
     let pair = if left <= right { (left, right) } else { (right, left) };
     let value = parse_number(&items[2], line)?;
     let objective = match section {
@@ -671,17 +676,54 @@ fn parse_quadratic_record(
         Section::QcMatrix(_) => false,
         _ => unreachable!("quadratic parser called outside quadratic section"),
     };
+    let row = if objective {
+        None
+    } else {
+        let (Section::QcMatrix(row_name) | Section::QSec(row_name)) = section else {
+            unreachable!()
+        };
+        Some(data.row_index.get(row_name).copied().ok_or_else(|| {
+            invalid_mps(line, 1, format!("quadratic section names unknown row {row_name:?}"))
+        })?)
+    };
     let coefficient =
         quadratic_coefficient(options.quadratic_format, left == right, objective, value);
+    let mut store_coefficient = true;
+    if matches!(section, Section::QMatrix | Section::QcMatrix(_)) && left != right {
+        let triangle = data.quadratic_triangles.entry((row, pair.0, pair.1)).or_default();
+        let first_record = triangle.upper.is_none() && triangle.lower.is_none();
+        let side = if left < right { &mut triangle.upper } else { &mut triangle.lower };
+        let same_side = side.is_some();
+        *side = Some(side.take().unwrap_or(0.0) + coefficient);
+        store_coefficient = first_record || same_side;
+    }
+    if !store_coefficient {
+        return Ok(());
+    }
     if objective {
         *data.objective_quadratic.entry(pair).or_insert(0.0) += coefficient;
         return Ok(());
     }
-    let (Section::QcMatrix(row_name) | Section::QSec(row_name)) = section else { unreachable!() };
-    let row = data.row_index.get(row_name).copied().ok_or_else(|| {
-        invalid_mps(line, 1, format!("quadratic section names unknown row {row_name:?}"))
-    })?;
-    *data.rows[row].quadratic.entry(pair).or_insert(0.0) += coefficient;
+    *data.rows[row.expect("quadratic constraint row")].quadratic.entry(pair).or_insert(0.0) +=
+        coefficient;
+    Ok(())
+}
+
+fn validate_quadratic_triangles(data: &ParsedMps, line: usize) -> Result<(), IoError> {
+    for ((_, left, right), triangle) in &data.quadratic_triangles {
+        if let (Some(upper), Some(lower)) = (triangle.upper, triangle.lower)
+            && upper != lower
+        {
+            return Err(invalid_mps(
+                line,
+                1,
+                format!(
+                    "asymmetric quadratic matrix entries for columns {:?} and {:?}",
+                    data.columns[*left].name, data.columns[*right].name
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -867,6 +909,7 @@ fn parse_mps<R: BufRead>(
     if data.seen_sections & SEEN_END == 0 {
         return Err(invalid_mps(last_line, 1, "missing ENDATA"));
     }
+    validate_quadratic_triangles(&data, last_line)?;
     build_mps_model(data)
 }
 

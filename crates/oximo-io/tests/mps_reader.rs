@@ -334,6 +334,27 @@ fn reads_quadobj_triangular_objective() {
 }
 
 #[test]
+fn preserves_lower_triangle_records_in_qmatrix_and_qcmatrix() {
+    let objective = "NAME qp\nROWS\n N obj\nCOLUMNS\n x obj 0\n y obj 0\nQMATRIX\n y x 3\nENDATA\n";
+    let model = read_mps(objective.as_bytes()).expect("lower QMATRIX record");
+    let q = quadratic_terms(&model, true);
+    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 3.0)));
+
+    let constraint = "NAME qcp\nROWS\n N obj\n L q\nCOLUMNS\n x q 0\n y q 0\nRHS\n rhs q 1\nQCMATRIX q\n y x 2\nENDATA\n";
+    let model = read_mps(constraint.as_bytes()).expect("lower QCMATRIX record");
+    let q = quadratic_terms(&model, false);
+    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 4.0)));
+}
+
+#[test]
+fn rejects_asymmetric_qmatrix_triangle_values() {
+    let text =
+        "NAME qp\nROWS\n N obj\nCOLUMNS\n x obj 0\n y obj 0\nQMATRIX\n x y 2\n y x 3\nENDATA\n";
+    let error = read_mps(text.as_bytes()).expect_err("asymmetric QMATRIX");
+    assert!(matches!(error, IoError::InvalidMps { message, .. } if message.contains("asymmetric")));
+}
+
+#[test]
 fn quadratic_constraint_scaling_is_configurable() {
     let text = r"
 NAME qcp
