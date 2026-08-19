@@ -123,6 +123,29 @@ fn legacy_sense_is_fallback_and_objsense_takes_precedence() {
 }
 
 #[test]
+fn reads_named_and_unnamed_bounds_without_name_lookup() {
+    let text = r"
+NAME bounds
+ROWS
+ N obj
+COLUMNS
+ x obj 1
+ y obj 1
+BOUNDS
+ FR x
+ FR x y
+ UP x 4
+ENDATA
+";
+    let model = read_mps(text.as_bytes()).expect("named and unnamed bounds");
+    let vars = model.variables();
+    assert!(vars[0].lb.is_infinite() && vars[0].lb.is_sign_negative());
+    assert!(close(vars[0].ub, 4.0));
+    assert!(vars[1].lb.is_infinite() && vars[1].lb.is_sign_negative());
+    assert!(vars[1].ub.is_infinite() && vars[1].ub.is_sign_positive());
+}
+
+#[test]
 fn reads_bound_types_and_semi_domains() {
     let text = r"
 NAME domains

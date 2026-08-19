@@ -526,15 +526,24 @@ fn parse_ranges(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Resul
 }
 
 fn parse_bound(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
-    if items.len() != 3 && items.len() != 4 {
-        return Err(invalid_mps(line, 1, "BOUNDS records require three or four fields"));
+    if !(2..=4).contains(&items.len()) {
+        return Err(invalid_mps(line, 1, "BOUNDS records require two to four fields"));
     }
-    select_vector(&mut data.bounds_vector, Some(&items[1]), "BOUNDS")?;
-    let column_index = data.column_index.get(items[2].text).copied().ok_or_else(|| {
-        invalid_mps(line, items[2].column, format!("unknown column {:?}", items[2].text))
-    })?;
     let bound_type = items[0].text.to_ascii_uppercase();
-    let value = items.get(3).map(|field| parse_number(field, line)).transpose()?;
+    let requires_value =
+        matches!(bound_type.as_str(), "FX" | "UP" | "LO" | "LI" | "UI" | "SC" | "SI");
+    let (vector, column_field, value_field) = match (items.len(), requires_value) {
+        (2, _) => (None, &items[1], None),
+        (3, true) => (None, &items[1], Some(&items[2])),
+        (3, false) => (Some(&items[1]), &items[2], None),
+        (4, _) => (Some(&items[1]), &items[2], Some(&items[3])),
+        _ => unreachable!(),
+    };
+    select_vector(&mut data.bounds_vector, vector, "BOUNDS")?;
+    let column_index = data.column_index.get(column_field.text).copied().ok_or_else(|| {
+        invalid_mps(line, column_field.column, format!("unknown column {:?}", column_field.text))
+    })?;
+    let value = value_field.map(|field| parse_number(field, line)).transpose()?;
     let column = &mut data.columns[column_index];
     if column.default_bounds && column.kind == ColumnKind::Integer {
         column.upper = f64::INFINITY;
