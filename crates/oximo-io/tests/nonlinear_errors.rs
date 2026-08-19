@@ -64,7 +64,10 @@ fn lp_names_the_objective() {
 fn mps_writes_quadratic_constraint() {
     let mps = to_mps_string(&bilinear_model()).expect("quadratic MPS should export");
     assert!(mps.contains("QCMATRIX capacity"), "{mps}");
-    assert!(mps.contains("x          y          0.5"), "{mps}");
+    assert!(
+        mps.lines().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["x", "y", "0.5"]),
+        "{mps}"
+    );
 }
 
 #[test]
