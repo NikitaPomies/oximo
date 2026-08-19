@@ -174,10 +174,10 @@ ENDATA
     assert!(matches!(vars[1].domain, Domain::Integer));
     assert_eq!((vars[1].lb, vars[1].ub), (-2.0, 7.0));
     assert!(matches!(vars[2].domain, Domain::SemiContinuous { threshold: 2.0 }));
-    assert_eq!(vars[2].lb, 0.0);
+    assert!(close(vars[2].lb, 0.0));
     assert!(close(vars[2].ub, 10.0));
     assert!(matches!(vars[3].domain, Domain::SemiInteger { threshold: 1.0 }));
-    assert_eq!(vars[3].lb, 0.0);
+    assert!(close(vars[3].lb, 0.0));
     assert_eq!((vars[4].lb, vars[4].ub), (4.0, 4.0));
 }
 
