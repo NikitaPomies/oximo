@@ -1030,10 +1030,14 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
             ColumnKind::SemiContinuous => Domain::SemiContinuous { threshold: column.lower },
             ColumnKind::SemiInteger => Domain::SemiInteger { threshold: column.lower },
         };
+        let model_lower = match column.kind {
+            ColumnKind::SemiContinuous | ColumnKind::SemiInteger => 0.0,
+            _ => column.lower,
+        };
         variables.push(
             model
                 .__var(column.name.clone())
-                .bounds(column.lower, column.upper)
+                .bounds(model_lower, column.upper)
                 .domain(domain)
                 .build(),
         );
