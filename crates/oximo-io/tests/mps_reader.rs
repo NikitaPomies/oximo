@@ -296,7 +296,7 @@ fn writer_round_trips_quadratic_objective_and_constraints_for_mps_dialects() {
 #[test]
 fn writer_sanitizes_and_uniquifies_mps_names() {
     let model = Model::new("name roundtrip");
-    let spaced = model.__var("x one").build();
+    let spaced = model.__var("*comment").build();
     let tabbed = model.__var("x\tone").build();
     let underscored = model.__var("x_one").build();
     let unnamed = model.__var("").build();
@@ -311,7 +311,7 @@ fn writer_sanitizes_and_uniquifies_mps_names() {
 
     let variable_names: Vec<_> =
         imported.variables().iter().map(|variable| variable.name.to_string()).collect();
-    assert_eq!(variable_names, ["x_one", "x_one_1", "x_one_2", "C4"]);
+    assert_eq!(variable_names, ["_comment", "x_one", "x_one_1", "C4"]);
     let constraint_names: Vec<_> = imported
         .constraints()
         .algebraic()

@@ -950,8 +950,16 @@ fn unique_mps_names<'a>(
         .into_iter()
         .enumerate()
         .map(|(index, name)| {
-            let base: String =
-                name.chars().map(|ch| if ch.is_whitespace() { '_' } else { ch }).collect();
+            let base: String = name
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
             let base =
                 if base.is_empty() { format!("{fallback_prefix}{}", index + 1) } else { base };
             let mut candidate = base.clone();
