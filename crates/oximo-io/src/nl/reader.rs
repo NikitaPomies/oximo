@@ -80,17 +80,26 @@ pub fn read_nl_file(path: impl AsRef<Path>) -> Result<Model, IoError> {
     let mut bytes = Vec::new();
     File::open(path)?.read_to_end(&mut bytes)?;
     let stem = path.with_extension("");
-    let cols = read_names(&stem.with_extension("col"))?;
-    let rows = read_names(&stem.with_extension("row"))?;
+    let cols = read_names(&stem.with_extension("col"), "column")?;
+    let rows = read_names(&stem.with_extension("row"), "row")?;
     parse_bytes(&bytes, Some(&stem), Some((&cols, &rows)))
 }
 
-fn read_names(path: &Path) -> Result<Vec<String>, IoError> {
+fn read_names(path: &Path, what: &str) -> Result<Vec<String>, IoError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
     let text = std::fs::read_to_string(path)?;
-    Ok(text.lines().map(str::trim_end).map(ToOwned::to_owned).collect())
+    let names = text.lines().map(|line| line.trim_end_matches('\r').to_owned()).collect::<Vec<_>>();
+    for name in &names {
+        if name.is_empty() {
+            return Err(invalid("sidecar", format!("empty {what} name")));
+        }
+        if name.chars().any(char::is_control) {
+            return Err(invalid("sidecar", format!("{what} name contains a control character")));
+        }
+    }
+    Ok(names)
 }
 
 fn parse_bytes(
@@ -1011,6 +1020,20 @@ mod tests {
         assert_eq!(m.num_constraints(), 4);
         assert_eq!(m.try_objective().unwrap().sense, ObjectiveSense::Minimize);
         assert_eq!(m.variables()[0].name, "Buy['BEEF']");
+    }
+
+    #[test]
+    fn rejects_invalid_sidecar_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("names.col");
+        std::fs::write(&path, "x\0\n").unwrap();
+        match read_names(&path, "column") {
+            Err(IoError::InvalidNl { section, message }) => {
+                assert_eq!(section, "sidecar");
+                assert_eq!(message, "column name contains a control character");
+            }
+            other => panic!("expected InvalidNl, got {other:?}"),
+        }
     }
 
     #[test]

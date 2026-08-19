@@ -81,6 +81,20 @@ fn unnamed_constraint_names_skip_explicit_names() {
 }
 
 #[test]
+fn duplicate_constraint_names_are_rejected() {
+    let text = "Minimize\n obj: x\nSubject To\n c: x <= 5\n c: x >= 0\nEnd\n";
+    let err = read_lp(text.as_bytes()).unwrap_err();
+    assert!(matches!(err, IoError::InvalidLp { .. }));
+}
+
+#[test]
+fn unrepresentable_variable_names_are_rejected() {
+    let text = "Minimize\n obj: x\nBounds\n 1x >= 0\nEnd\n";
+    let err = read_lp(text.as_bytes()).unwrap_err();
+    assert!(matches!(err, IoError::InvalidLp { .. }));
+}
+
+#[test]
 fn negative_upper_bound_without_lower_bound_is_invalid() {
     let err = read_lp("Minimize\n obj: x\nBounds\n x <= -1\nEnd\n".as_bytes()).unwrap_err();
     assert!(matches!(err, IoError::InvalidLp { .. }));

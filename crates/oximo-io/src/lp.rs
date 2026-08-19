@@ -611,6 +611,9 @@ fn build_model(
             p.vars.push(n.clone());
         }
     }
+    for name in &p.vars {
+        validate_lp_variable_name(name)?;
+    }
     let m = Model::new(model_name);
     let mut vars = HashMap::new();
     for n in &p.vars {
@@ -634,12 +637,16 @@ fn build_model(
         };
         vars.insert(n.clone(), m.__var(n.clone()).bounds(lb, ub).domain(domain).build());
     }
-    let mut used_names: HashSet<String> = p
-        .rows
-        .iter()
-        .filter(|(name, _, _, _)| !name.is_empty())
-        .map(|(name, _, _, _)| name.clone())
-        .collect();
+    let mut used_names = HashSet::new();
+    for (name, _, _, _) in &p.rows {
+        if name.is_empty() {
+            continue;
+        }
+        validate_lp_row_name(name)?;
+        if !used_names.insert(name.clone()) {
+            return Err(invalid_lp(1, 1, format!("duplicate constraint name {name:?}")));
+        }
+    }
     let mut next_generated_name = 0;
     for (mut name, expr, sense, rhs) in p.rows {
         if name.is_empty() {
@@ -677,6 +684,43 @@ fn build_model(
         ObjectiveSense::Maximize => m.__maximize(e),
     }
     Ok(m)
+}
+
+fn validate_lp_variable_name(name: &str) -> Result<(), IoError> {
+    if name.is_empty() || name.chars().any(char::is_control) || name.contains('\\') {
+        return Err(invalid_lp(
+            1,
+            1,
+            format!("variable name {name:?} contains characters not representable in LP syntax"),
+        ));
+    }
+    if name.eq_ignore_ascii_case("inf") || name.eq_ignore_ascii_case("infinity") {
+        return Err(invalid_lp(
+            1,
+            1,
+            format!("variable name {name:?} is reserved for an LP bound"),
+        ));
+    }
+    let tokens = lex(name, 1)?;
+    if !matches!(tokens.as_slice(), [Token { kind: Tok::Word(word), .. }] if word == name) {
+        return Err(invalid_lp(
+            1,
+            1,
+            format!("variable name {name:?} cannot be represented as one LP identifier"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lp_row_name(name: &str) -> Result<(), IoError> {
+    if name.chars().any(char::is_control) || name.contains('\\') {
+        return Err(invalid_lp(
+            1,
+            1,
+            format!("constraint name {name:?} contains characters not representable in LP syntax"),
+        ));
+    }
+    Ok(())
 }
 
 fn collect_vars(a: &Ast, vars: &mut Vec<String>, seen: &mut FxHashSet<String>) {
