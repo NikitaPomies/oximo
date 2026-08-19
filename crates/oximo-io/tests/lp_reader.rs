@@ -158,6 +158,25 @@ fn stream_reader_preserves_read_errors() {
 }
 
 #[test]
+fn stream_reader_does_not_materialize_the_input() {
+    struct ReadToStringFails(Cursor<&'static [u8]>);
+
+    impl Read for ReadToStringFails {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+
+        fn read_to_string(&mut self, _buf: &mut String) -> io::Result<usize> {
+            Err(io::Error::other("read_to_string should not be called"))
+        }
+    }
+
+    let input = ReadToStringFails(Cursor::new(b"Minimize\n obj: x\nEnd\n"));
+    let model = read_lp(input).expect("LP reader should consume lines through BufReader");
+    assert_eq!(model.num_variables(), 1);
+}
+
+#[test]
 fn file_reader_preserves_open_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("missing.lp");

@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use oximo_core::{Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, var_name};
@@ -30,10 +30,8 @@ use crate::error::IoError;
 /// # Errors
 ///
 /// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
-pub fn read_lp<R: Read>(mut input: R) -> Result<Model, IoError> {
-    let mut text = String::new();
-    input.read_to_string(&mut text)?;
-    parse_lp(&text, "lp_model")
+pub fn read_lp<R: Read>(input: R) -> Result<Model, IoError> {
+    parse_lp(BufReader::new(input), "lp_model")
 }
 
 /// Read a CPLEX LP file. The file stem is used as the model name.
@@ -43,10 +41,8 @@ pub fn read_lp<R: Read>(mut input: R) -> Result<Model, IoError> {
 /// Returns [`IoError`] for I/O failures, malformed syntax, or unsupported sections.
 pub fn read_lp_file(path: impl AsRef<Path>) -> Result<Model, IoError> {
     let path = path.as_ref();
-    let mut text = String::new();
-    File::open(path)?.read_to_string(&mut text)?;
     let name = path.file_stem().and_then(|x| x.to_str()).unwrap_or("lp_model");
-    parse_lp(&text, name)
+    parse_lp(BufReader::new(File::open(path)?), name)
 }
 
 #[derive(Clone, Debug)]
@@ -455,17 +451,6 @@ fn section(line: &str) -> Option<&'static str> {
     }
 }
 
-fn parse_lp(text: &str, model_name: &str) -> Result<Model, IoError> {
-    let lines: Vec<(usize, String)> = text
-        .lines()
-        .enumerate()
-        .map(|(i, x)| (i + 1, strip_comment(x).trim().to_string()))
-        .filter(|(_, x)| !x.is_empty())
-        .collect();
-    let (p, objective_lines) = parse_sections(&lines, text.lines().count())?;
-    build_model(p, objective_lines, model_name)
-}
-
 fn parse_constraint_line(
     line: &str,
     line_no: usize,
@@ -503,20 +488,27 @@ fn parse_constraint_line(
     Ok(())
 }
 
-fn parse_sections(
-    lines: &[(usize, String)],
-    line_count: usize,
-) -> Result<(ParsedLp, Vec<String>), IoError> {
+fn parse_lp<R: BufRead>(mut input: R, model_name: &str) -> Result<Model, IoError> {
     let mut p = ParsedLp::default();
     let mut current = "";
     let mut objective_lines = Vec::new();
     let mut pending = String::new();
     let mut pending_line = 1;
     let mut ended = false;
-    for (line_no, line) in lines {
-        let line_no = *line_no;
+    let mut line_buffer = String::new();
+    let mut line_count = 0;
+    loop {
+        line_buffer.clear();
+        if input.read_line(&mut line_buffer)? == 0 {
+            break;
+        }
+        line_count += 1;
+        let line = strip_comment(line_buffer.trim_end_matches(['\r', '\n'])).trim();
+        if line.is_empty() {
+            continue;
+        }
         if ended {
-            return Err(invalid_lp(line_no, 1, "content after End section"));
+            return Err(invalid_lp(line_count, 1, "content after End section"));
         }
         let lower_line = line.to_ascii_lowercase();
         let inline_objective = if ["minimize ", "minimise ", "minimum ", "min "]
@@ -547,7 +539,7 @@ fn parse_sections(
                 // TODO: Add native SOS, indicator, PWL, and MO
                 // representations before importing these sections.
                 return Err(IoError::UnsupportedLp {
-                    section: line.clone(),
+                    section: line.to_owned(),
                     feature: "not represented by oximo-core".into(),
                 });
             }
@@ -563,15 +555,15 @@ fn parse_sections(
             continue;
         }
         match current {
-            "objective_min" | "objective_max" => objective_lines.push(line.clone()),
+            "objective_min" | "objective_max" => objective_lines.push(line.to_owned()),
             "rows" => {
-                parse_constraint_line(line, line_no, &mut pending, &mut pending_line, &mut p)?;
+                parse_constraint_line(line, line_count, &mut pending, &mut pending_line, &mut p)?;
             }
-            "bounds" => parse_bound(line, line_no, &mut p)?,
+            "bounds" => parse_bound(line, line_count, &mut p)?,
             "general" => p.general.extend(line.split_whitespace().map(str::to_owned)),
             "binary" => p.binary.extend(line.split_whitespace().map(str::to_owned)),
             "semi" => p.semi.extend(line.split_whitespace().map(str::to_owned)),
-            _ => return Err(invalid_lp(line_no, 1, "content before an objective or after End")),
+            _ => return Err(invalid_lp(line_count, 1, "content before an objective or after End")),
         }
     }
     if !ended {
@@ -587,7 +579,7 @@ fn parse_sections(
     if p.sense.is_none() {
         return Err(invalid_lp(1, 1, "missing Minimize or Maximize section"));
     }
-    Ok((p, objective_lines))
+    build_model(p, objective_lines, model_name)
 }
 
 fn build_model(
