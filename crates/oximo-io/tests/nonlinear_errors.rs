@@ -61,14 +61,13 @@ fn lp_names_the_objective() {
 }
 
 #[test]
-fn mps_names_the_constraint_and_renders_the_term() {
-    match to_mps_string(&bilinear_model()) {
-        Err(IoError::Nonlinear { location, term }) => {
-            assert_eq!(location, "constraint \"capacity\"");
-            assert_eq!(term, "x * y");
-        }
-        other => panic!("expected a Nonlinear error, got {other:?}"),
-    }
+fn mps_writes_quadratic_constraint() {
+    let mps = to_mps_string(&bilinear_model()).expect("quadratic MPS should export");
+    assert!(mps.contains("QCMATRIX capacity"), "{mps}");
+    assert!(
+        mps.lines().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["x", "y", "0.5"]),
+        "{mps}"
+    );
 }
 
 #[test]

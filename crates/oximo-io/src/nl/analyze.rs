@@ -274,7 +274,7 @@ pub mod benchmark_support {
         let constraints = model_constraints.algebraic();
         let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
         let arena_ref = &*arena;
-        let analysis = build(arena_ref, &vars, &constraints, &objective, parallel)?;
+        let analysis = build(arena_ref, &vars, constraints, &objective, parallel)?;
         Ok(analysis.cons.len()
             + analysis.jacobian_nnz()
             + analysis.obj_vars.len()

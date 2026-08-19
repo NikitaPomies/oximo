@@ -1,6 +1,10 @@
 use oximo::prelude::*;
 use oximo::solvers::Highs;
 
+fn mps_record(text: &str, fields: &[&str]) -> bool {
+    text.lines().any(|line| line.split_whitespace().eq(fields.iter().copied()))
+}
+
 #[test]
 fn lp_canonical() {
     let m = Model::new("transport");
@@ -140,12 +144,12 @@ fn io_linear_writers_fold_param_coefficient() {
     objective!(m, Min, cost * x);
 
     let mps = to_mps_string(&m).unwrap();
-    assert!(mps.contains("x         OBJ       3"), "got:\n{mps}");
+    assert!(mps_record(&mps, &["x", "OBJ", "3"]), "got:\n{mps}");
     assert!(to_lp_string(&m).is_ok());
 
     m.set_param(cost, 5.0);
     let mps2 = to_mps_string(&m).unwrap();
-    assert!(mps2.contains("x         OBJ       5"), "got:\n{mps2}");
+    assert!(mps_record(&mps2, &["x", "OBJ", "5"]), "got:\n{mps2}");
 }
 
 #[cfg(feature = "io")]
@@ -371,18 +375,18 @@ fn mps_coefficients_and_rhs() {
     assert!(s.contains("ENDATA"));
 
     // Objective coefficients
-    assert!(s.contains("x         OBJ       3"));
-    assert!(s.contains("y         OBJ       4"));
+    assert!(mps_record(&s, &["x", "OBJ", "3"]));
+    assert!(mps_record(&s, &["y", "OBJ", "4"]));
 
     // Constraint coefficients
-    assert!(s.contains("x         c1        1"));
-    assert!(s.contains("y         c1        2"));
+    assert!(mps_record(&s, &["x", "c1", "1"]));
+    assert!(mps_record(&s, &["y", "c1", "2"]));
 
     // RHS for c1
-    assert!(s.contains("RHS       c1        14"));
+    assert!(mps_record(&s, &["RHS", "c1", "14"]));
 
     // y upper bound
-    assert!(s.contains("UP BND       y         4"));
+    assert!(mps_record(&s, &["UP", "BND", "y", "4"]));
 
     // Sense comment preserved
     assert!(s.contains("* sense: minimize"));
@@ -400,10 +404,10 @@ fn mps_fixed_variable_emits_fx_bound() {
 
     let s = oximo::io::to_mps_string(&m).unwrap();
 
-    // y is fixed, must appear as FX at col 2, value at col 25
-    assert!(s.contains(" FX BND       y         3.5"), "got:\n{s}");
+    // y is fixed and must appear as an FX bound record.
+    assert!(mps_record(&s, &["FX", "BND", "y", "3.5"]), "got:\n{s}");
     // x is not fixed, no FX line for x
-    assert!(!s.contains(" FX BND       x"), "got:\n{s}");
+    assert!(!mps_record(&s, &["FX", "BND", "x"]), "got:\n{s}");
     // y still appears in COLUMNS (constraint coefficients unchanged)
     assert!(s.contains('y'), "got:\n{s}");
 }
@@ -425,10 +429,10 @@ fn mps_free_and_integer_bounds() {
     assert!(mps.contains("'INTEND'"));
 
     // z is free
-    assert!(mps.contains("FR BND       z"));
+    assert!(mps_record(&mps, &["FR", "BND", "z"]));
 
     // y upper bound
-    assert!(mps.contains("UP BND       y         10"));
+    assert!(mps_record(&mps, &["UP", "BND", "y", "10"]));
 }
 
 #[cfg(feature = "io")]

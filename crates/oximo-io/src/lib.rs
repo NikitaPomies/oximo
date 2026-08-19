@@ -8,7 +8,11 @@ pub mod nl;
 
 pub use error::IoError;
 pub use lp::{read_lp, read_lp_file, to_lp_string, write_lp};
-pub use mps::{to_mps_string, write_mps};
+pub use mps::{
+    MpsQuadraticFormat, MpsReadOptions, MpsWriteOptions, read_mps, read_mps_file,
+    read_mps_file_with, read_mps_with, to_mps_string, to_mps_string_with, write_mps,
+    write_mps_with,
+};
 pub use nl::{
     Complementarity, DefinedVar, ImportedFunction, NlFormat, SuffixData, SuffixFlavour, SuffixKind,
     WriteOptions, read_nl, read_nl_file, to_nl_string, to_nl_string_with, write_nl, write_nl_files,

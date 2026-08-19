@@ -30,4 +30,8 @@ pub enum IoError {
     InvalidLp { line: usize, column: usize, message: String },
     #[error("unsupported LP feature in {section}: {feature}")]
     UnsupportedLp { section: String, feature: String },
+    #[error("invalid MPS file at {line}:{column}: {message}")]
+    InvalidMps { line: usize, column: usize, message: String },
+    #[error("unsupported MPS feature in {section}: {feature}")]
+    UnsupportedMps { section: String, feature: String },
 }

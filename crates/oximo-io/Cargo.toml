@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Model I/O (MPS, LP, NLP writers) for oximo"
+description = "MPS, LP, and NL model readers and writers for oximo"
 readme = "README.md"
 
 [features]
