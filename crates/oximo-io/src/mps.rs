@@ -195,6 +195,7 @@ struct ParsedMps {
     seen_sections: u8,
 }
 
+const MPS_INFINITY_SENTINEL: f64 = 1e30;
 const SEEN_ROWS: u8 = 1;
 const SEEN_COLUMNS: u8 = 2;
 const SEEN_END: u8 = 4;
@@ -551,7 +552,12 @@ fn parse_bound(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result
     let column_index = data.column_index.get(column_field.text).copied().ok_or_else(|| {
         invalid_mps(line, column_field.column, format!("unknown column {:?}", column_field.text))
     })?;
-    let value = value_field.map(|field| parse_number(field, line)).transpose()?;
+    let value = value_field
+        .map(|field| {
+            parse_number(field, line)
+                .map(|value| if value >= MPS_INFINITY_SENTINEL { f64::INFINITY } else { value })
+        })
+        .transpose()?;
     let column = &mut data.columns[column_index];
     if column.default_bounds && column.kind == ColumnKind::Integer {
         column.upper = f64::INFINITY;
@@ -1282,7 +1288,7 @@ pub fn write_mps_with<W: Write>(
         }
         if let Some(thr) = v.domain.semi_threshold() {
             writeln!(out, " LO BND       {column_name:<10} {thr}")?;
-            let semi_ub = if ub.is_finite() { ub } else { 1e30 };
+            let semi_ub = if ub.is_finite() { ub } else { MPS_INFINITY_SENTINEL };
             // `is_integer()` distinguishes the two semi domains here.
             let code = if v.domain.is_integer() { "SI" } else { "SC" };
             writeln!(out, " {code} BND       {column_name:<10} {semi_ub}")?;

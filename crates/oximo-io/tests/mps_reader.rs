@@ -182,6 +182,26 @@ ENDATA
 }
 
 #[test]
+fn semi_domain_infinite_upper_bound_uses_mps_sentinel() {
+    let source = Model::new("semi");
+    let s = source.__var("s").domain(Domain::SemiContinuous { threshold: 2.0 }).build();
+    source.__minimize(s);
+    let written = to_mps_string(&source).expect("write sentinel semi upper bound");
+    let sentinel = format!("{}", 1e30);
+    assert!(written.contains("SC BND") && written.contains(&sentinel));
+
+    let model = read_mps(written.as_bytes()).expect("read sentinel semi upper bound");
+    let variable = &model.variables()[0];
+    assert!(matches!(variable.domain, Domain::SemiContinuous { threshold: 2.0 }));
+    assert!(close(variable.lb, 0.0));
+    assert!(variable.ub.is_infinite() && variable.ub.is_sign_positive());
+
+    let finite = "NAME finite\nROWS\n N obj\nCOLUMNS\n s obj 1\nBOUNDS\n LO BND s 2\n SC BND s 1e29\nENDATA\n";
+    let model = read_mps(finite.as_bytes()).expect("finite semi upper bound");
+    assert!(close(model.variables()[0].ub, 1e29));
+}
+
+#[test]
 fn writer_round_trips_max_binary_semi_range_and_unused_variables() {
     let model = Model::new("roundtrip");
     variable!(model, x <= 8.0);
