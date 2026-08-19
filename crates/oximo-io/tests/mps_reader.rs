@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, Read};
 
 use oximo_core::prelude::*;
@@ -273,21 +274,43 @@ fn writer_round_trips_quadratic_objective_and_constraints_for_mps_dialects() {
         let actual_constraint = quadratic_terms(&imported, false);
         assert_eq!(actual_objective.hessian.len(), expected_objective.hessian.len());
         assert_eq!(actual_constraint.hessian.len(), expected_constraint.hessian.len());
-        for (actual, expected) in actual_objective.hessian.iter().zip(&expected_objective.hessian) {
-            assert_eq!(actual.0, expected.0);
-            assert_eq!(actual.1, expected.1);
+        let actual_objective_hessian: HashMap<_, _> = actual_objective
+            .hessian
+            .into_iter()
+            .map(|(row, col, value)| ((row, col), value))
+            .collect();
+        let expected_objective_hessian: HashMap<_, _> = expected_objective
+            .hessian
+            .iter()
+            .map(|&(row, col, value)| ((row, col), value))
+            .collect();
+        for (pair, expected) in &expected_objective_hessian {
+            let actual = actual_objective_hessian
+                .get(pair)
+                .unwrap_or_else(|| panic!("{format:?} objective is missing Hessian pair {pair:?}"));
             assert!(
-                close(actual.2, expected.2),
-                "{format:?} objective: actual={actual:?} expected={expected:?}"
+                close(*actual, *expected),
+                "{format:?} objective: pair={pair:?} actual={actual} expected={expected}"
             );
         }
-        for (actual, expected) in actual_constraint.hessian.iter().zip(&expected_constraint.hessian)
-        {
-            assert_eq!(actual.0, expected.0);
-            assert_eq!(actual.1, expected.1);
+
+        let actual_constraint_hessian: HashMap<_, _> = actual_constraint
+            .hessian
+            .into_iter()
+            .map(|(row, col, value)| ((row, col), value))
+            .collect();
+        let expected_constraint_hessian: HashMap<_, _> = expected_constraint
+            .hessian
+            .iter()
+            .map(|&(row, col, value)| ((row, col), value))
+            .collect();
+        for (pair, expected) in &expected_constraint_hessian {
+            let actual = actual_constraint_hessian.get(pair).unwrap_or_else(|| {
+                panic!("{format:?} constraint is missing Hessian pair {pair:?}")
+            });
             assert!(
-                close(actual.2, expected.2),
-                "{format:?} constraint: actual={actual:?} expected={expected:?}"
+                close(*actual, *expected),
+                "{format:?} constraint: pair={pair:?} actual={actual} expected={expected}"
             );
         }
     }
