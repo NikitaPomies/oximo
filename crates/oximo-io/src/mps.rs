@@ -932,10 +932,11 @@ fn expression<'a>(
             expr = expr + coefficient * variables[column];
         }
     }
+    let mut quadratic: Vec<_> =
+        quadratic.into_iter().filter(|(_, coefficient)| *coefficient != 0.0).collect();
+    quadratic.sort_unstable_by_key(|((left, right), _)| (*left, *right));
     for ((left, right), coefficient) in quadratic {
-        if coefficient != 0.0 {
-            expr = expr + coefficient * variables[left] * variables[right];
-        }
+        expr = expr + coefficient * variables[left] * variables[right];
     }
     expr
 }
