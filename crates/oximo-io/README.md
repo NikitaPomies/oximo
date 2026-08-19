@@ -81,9 +81,11 @@ write_mps(&model, &mut f)?;
 // Read a file with the default Gurobi quadratic-constraint convention.
 let imported = read_mps_file("model.mps")?;
 
-// Select CPLEX scaling when importing QCMATRIX/QSECTION constraints.
-let options = MpsReadOptions { quadratic_format: MpsQuadraticFormat::Cplex };
-let imported_cplex = read_mps_with(s.as_bytes(), &options)?;
+// Serialize and import with matching CPLEX quadratic conventions.
+let cplex_write_options = MpsWriteOptions { quadratic_format: MpsQuadraticFormat::Cplex };
+let cplex_mps = to_mps_string_with(&model, &cplex_write_options)?;
+let cplex_read_options = MpsReadOptions { quadratic_format: MpsQuadraticFormat::Cplex };
+let imported_cplex = read_mps_with(cplex_mps.as_bytes(), &cplex_read_options)?;
 
 // Export quadratic sections in a solver-compatible dialect.
 let write_options = MpsWriteOptions { quadratic_format: MpsQuadraticFormat::Mosek };
