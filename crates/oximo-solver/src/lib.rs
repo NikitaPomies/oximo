@@ -13,6 +13,8 @@ pub use incremental::{Snapshot, snapshot};
 pub use infeasibility::{Iis, IisReport, InfeasibilityDiagnosis, VarBoundKind, is_infeasible};
 pub use options::{HasUniversal, UniversalOptions, UniversalOptionsExt};
 pub use persistent::PersistentSolver;
-pub use result::{ModelReport, SolutionPoint, SolverResult};
+pub use result::{
+    ConstraintEvaluation, DualStatus, ModelReport, SocEvaluation, SolutionPoint, SolverResult,
+};
 pub use solver::Solver;
 pub use status::{PrimalStatus, SolverError, TerminationStatus};

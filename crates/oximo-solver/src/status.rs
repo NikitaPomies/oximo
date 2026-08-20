@@ -21,7 +21,19 @@ pub enum TerminationStatus {
     TimeLimit,
     /// Stopped at a branch-and-bound node limit.
     NodeLimit,
-    /// Stopped by an external interrupt or solver-specific user limit.
+    /// Stopped after reaching an objective cutoff or target.
+    ObjectiveLimit,
+    /// Stopped after finding the requested number of solutions.
+    SolutionLimit,
+    /// Stopped at a solver-defined work limit.
+    WorkLimit,
+    /// Stopped because the solver exhausted its memory limit.
+    MemoryLimit,
+    /// Converged to a locally infeasible point.
+    LocallyInfeasible,
+    /// The solver could not run because no usable license was available.
+    LicenseError,
+    /// Stopped by a genuine user or external interrupt.
     Interrupted,
     /// The solver hit a numerical problem (singular basis, presolve error, ...).
     NumericError,
@@ -45,6 +57,10 @@ impl TerminationStatus {
                 | Self::IterationLimit
                 | Self::TimeLimit
                 | Self::NodeLimit
+                | Self::ObjectiveLimit
+                | Self::SolutionLimit
+                | Self::WorkLimit
+                | Self::MemoryLimit
                 | Self::Interrupted
         )
     }
@@ -136,10 +152,16 @@ mod tests {
             | T::IterationLimit
             | T::TimeLimit
             | T::NodeLimit
+            | T::ObjectiveLimit
+            | T::SolutionLimit
+            | T::WorkLimit
+            | T::MemoryLimit
             | T::Interrupted => (true, PrimalStatus::FeasiblePoint),
             T::Infeasible
             | T::Unbounded
             | T::InfeasibleOrUnbounded
+            | T::LocallyInfeasible
+            | T::LicenseError
             | T::NumericError
             | T::NotSolved
             | T::Other(_) => (false, PrimalStatus::FeasiblePoint),
@@ -158,6 +180,12 @@ mod tests {
             T::IterationLimit,
             T::TimeLimit,
             T::NodeLimit,
+            T::ObjectiveLimit,
+            T::SolutionLimit,
+            T::WorkLimit,
+            T::MemoryLimit,
+            T::LocallyInfeasible,
+            T::LicenseError,
             T::Interrupted,
             T::NumericError,
             T::NotSolved,
