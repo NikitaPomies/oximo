@@ -12,7 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["highs", "io"]
+default = ["io"]
 highs = ["dep:oximo-highs"]
 io = ["dep:oximo-io"]
 gurobi = ["dep:oximo-gurobi"]
@@ -55,7 +55,7 @@ _benchmark-enzyme = [
 ]
 
 [package.metadata.docs.rs]
-features = ["gams", "baron", "clarabel", "clarabel-faer", "pounce"]
+features = ["highs", "gams", "baron", "clarabel", "clarabel-faer", "pounce"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -85,3 +85,19 @@ required-features = ["_benchmark-support"]
 [[example]]
 name = "baron_robot"
 doc-scrape-examples = false
+
+[[example]]
+name = "transport"
+required-features = ["highs"]
+
+[[example]]
+name = "parametric_pricing"
+required-features = ["highs"]
+
+[[example]]
+name = "resource_investment_scheduling"
+required-features = ["highs"]
+
+[[test]]
+name = "solve"
+required-features = ["highs"]

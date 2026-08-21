@@ -27,9 +27,9 @@
 //!   h[T-1] >= safety_stock
 //! ```
 //!
-//! Run with HiGHS (default):
+//! Run with HiGHS:
 //! ```text
-//! cargo run --example lot_sizing
+//! cargo run --example lot_sizing --features highs
 //! ```
 //!
 //! Run with Gurobi:
@@ -137,6 +137,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(any(feature = "gurobi", feature = "highs")))]
 fn main() {
     println!("Enable at least one solver feature:");
-    println!("  cargo run --example lot_sizing                   # HiGHS (default)");
+    println!("  cargo run --example lot_sizing --features highs  # HiGHS");
     println!("  cargo run --example lot_sizing --features gurobi # Gurobi");
 }

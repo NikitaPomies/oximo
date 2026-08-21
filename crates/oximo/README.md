@@ -25,7 +25,7 @@
 
 oximo is a Rust algebraic modeling library for mathematical optimization. Learn more at [oximo.dev](https://oximo.dev).
 
-```rust,no_run
+```rust,ignore
 use oximo::prelude::*;
 use oximo::solvers::Highs;
 
@@ -209,22 +209,24 @@ pub trait Solver {
 
 ## Features
 
-| Feature         | What it adds                                                 | Default |
-| --------------- | ------------------------------------------------------------ | ------- |
-| `highs`         | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
-| `io`            | NL, MPS, and LP file readers and writers                     | yes     |
-| `gurobi`        | Gurobi v13+ solver (requires licensed install)               | no      |
-| `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP solver                | no      |
-| `gams`          | GAMS bridge - solve type depends on the selected sub-solver  | no      |
-| `baron`         | BARON - Global non-convex solver (requires licensed install) | no      |
-| `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
-| `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend         | no      |
-| `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)      | no      |
-| `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)               | no      |
+| Feature         | What it adds                                                   | Default |
+| --------------- | -------------------------------------------------------------- | ------- |
+| `highs`         | HiGHS - LP/MILP/QP solver (bundled; requires a C/C++ compiler) | no      |
+| `io`            | NL, MPS, and LP file readers and writers                       | yes     |
+| `gurobi`        | Gurobi v13+ solver (requires licensed install)                 | no      |
+| `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP solver                  | no      |
+| `gams`          | GAMS bridge - solve type depends on the selected sub-solver    | no      |
+| `baron`         | BARON - Global non-convex solver (requires licensed install)   | no      |
+| `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)     | no      |
+| `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend           | no      |
+| `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)        | no      |
+| `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)                 | no      |
 
-### HiGHS (default)
+### HiGHS
 
-No install required, HiGHS is compiled from source via the `highs` crate.
+No solver install is required, but HiGHS is compiled from source via the
+`highs` crate and requires a C/C++ compiler. Enable it with
+`features = ["highs"]`.
 
 ```rust,ignore
 use oximo::prelude::*;

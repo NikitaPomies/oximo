@@ -22,9 +22,9 @@
 //! and Logical Inference for Chemical Process Synthesis", Computers and
 //! Chemical Engineering 15, 2 (1991), 73–84.
 //!
-//! Run with HiGHS (default):
+//! Run with HiGHS:
 //! ```text
-//! cargo run --example reaction_path
+//! cargo run --example reaction_path --features highs
 //! ```
 //!
 //! Run with GAMS / CPLEX:
@@ -143,6 +143,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(any(feature = "gams", feature = "highs")))]
 fn main() {
     println!("Enable at least one solver feature:");
-    println!("  cargo run --example reaction_path                  # HiGHS (default)");
+    println!("  cargo run --example reaction_path --features highs # HiGHS");
     println!("  cargo run --example reaction_path --features gams  # GAMS/CPLEX");
 }
