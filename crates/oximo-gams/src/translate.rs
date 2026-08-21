@@ -400,9 +400,6 @@ fn parseoximo_solution(
     let solutions =
         if has_sol { vec![SolutionPoint { primal, objective: obj_val }] } else { Vec::new() };
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
-    if !mixed_integer {
-        best_bound = None;
-    }
     let mut gap = match (obj_val, best_bound) {
         (Some(objective), Some(bound)) if objective.is_finite() && bound.is_finite() => {
             Some((objective - bound).abs() / (objective.abs().max(bound.abs()) + 1e-10))
@@ -1297,6 +1294,26 @@ mod tests {
         assert_eq!(r.dual_status, DualStatus::FeasiblePoint);
         assert_eq!(r.solver_version.as_deref(), Some("13.0.1"));
         assert!(r.raw_status.as_deref().unwrap().contains("solvestat=3 (resource limit)"));
+    }
+
+    #[test]
+    fn continuous_objest_bound_is_preserved() {
+        let content = "STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
+        let r = parseoximo_solution(content, &[], false, std::time::Duration::ZERO, None);
+        assert_eq!(r.termination, TerminationStatus::TimeLimit);
+        assert_eq!(r.best_bound, Some(8.0));
+        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(r.node_count, None);
+    }
+
+    #[test]
+    fn missing_objest_tokens_remain_unset() {
+        for token in ["NA", "UNDF"] {
+            let content = format!("STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST={token}\n0=2.5\n");
+            let r = parseoximo_solution(&content, &[], false, std::time::Duration::ZERO, None);
+            assert_eq!(r.best_bound, None, "OBJEST={token}");
+            assert_eq!(r.gap, None, "OBJEST={token}");
+        }
     }
 
     #[test]
