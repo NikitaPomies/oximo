@@ -218,6 +218,8 @@ pub(crate) fn extract_result(
     let mut best_bound = mixed_integer
         .then(|| solved.double_info_value(c"mip_dual_bound").ok())
         .flatten()
+        .filter(|value| value.is_finite())
+        .map(|value| value + obj_constant)
         .filter(|value| value.is_finite());
     if matches!(termination, TerminationStatus::Optimal) {
         best_bound = best_bound.or(objective_value);
@@ -551,6 +553,20 @@ mod tests {
         assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!((res.value_of(x).unwrap() - 1.0).abs() < 1e-6);
         assert!(res.objective().unwrap().abs() < 1e-6);
+    }
+
+    #[test]
+    fn milp_objective_constant_is_added_to_bound() {
+        // min x + 5, x integer in [0, 1] -> objective and bound 5.
+        let m = Model::new("milp_constant");
+        variable!(m, 0.0 <= x <= 1.0, Int);
+        objective!(m, Min, x + 5.0);
+        assert_eq!(m.kind(), ModelKind::MILP);
+
+        let res = solve(&m, &HighsOptions::default()).unwrap();
+        assert_eq!(res.termination, TerminationStatus::Optimal);
+        assert!((res.objective().unwrap() - 5.0).abs() < 1e-6);
+        assert!((res.best_bound.unwrap() - 5.0).abs() < 1e-6);
     }
 
     #[test]
