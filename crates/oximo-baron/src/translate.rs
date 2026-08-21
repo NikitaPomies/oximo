@@ -804,6 +804,42 @@ fn relative_gap(lower: Option<f64>, upper: Option<f64>) -> Option<f64> {
     }
 }
 
+enum BaronBanner {
+    Completion,
+    NodeLimit,
+    IterationLimit,
+    TimeLimit,
+    NumericError,
+    Interrupted,
+    Feasible,
+    MemoryLimit,
+    MissingBounds,
+}
+
+fn matched_banner(log: &str) -> Option<BaronBanner> {
+    if log.contains("nodes in memory") {
+        Some(BaronBanner::NodeLimit)
+    } else if log.contains("bar iterations") {
+        Some(BaronBanner::IterationLimit)
+    } else if log.contains("time exceeded") {
+        Some(BaronBanner::TimeLimit)
+    } else if log.contains("numerically sensitive") {
+        Some(BaronBanner::NumericError)
+    } else if log.contains("search interrupted by user") || log.contains("access violation") {
+        Some(BaronBanner::Interrupted)
+    } else if log.contains("heuristic termination") {
+        Some(BaronBanner::Feasible)
+    } else if log.contains("insufficient memory") {
+        Some(BaronBanner::MemoryLimit)
+    } else if log.contains("appropriate variable bounds") {
+        Some(BaronBanner::MissingBounds)
+    } else if log.contains("completion") {
+        Some(BaronBanner::Completion)
+    } else {
+        None
+    }
+}
+
 /// Determine the [`TerminationStatus`] from BARON's results-file termination banner
 /// (BARON manual, Section 5.2 "Termination messages, model and solver statuses").
 ///
@@ -815,53 +851,54 @@ fn relative_gap(lower: Option<f64>, upper: Option<f64>) -> Option<f64> {
 /// keeps its incumbent.
 fn map_status(res: &str, model_status: i64) -> TerminationStatus {
     let log = res.to_ascii_lowercase();
-    let has = |needle: &str| log.contains(needle);
 
-    if has("nodes in memory") {
-        // *** Max. allowable nodes in memory reached ***
-        TerminationStatus::NodeLimit
-    } else if has("bar iterations") {
-        // *** Max. allowable BaR iterations reached ***
-        TerminationStatus::IterationLimit
-    } else if has("time exceeded") {
-        // *** Max. allowable time exceeded ***
-        TerminationStatus::TimeLimit
-    } else if has("numerically sensitive") {
-        // *** Problem is numerically sensitive ***
-        TerminationStatus::NumericError
-    } else if has("search interrupted by user") || has("access violation") {
-        // *** Search interrupted by user *** / *** ... access violation ... ***
-        TerminationStatus::Interrupted
-    } else if has("heuristic termination") {
-        // *** Heuristic termination ***, feasible found, global optimality not
-        // guaranteed (DeltaTerm).
-        TerminationStatus::Feasible
-    } else if has("insufficient memory") {
-        // *** Insufficient Memory for Data structures ***
-        TerminationStatus::MemoryLimit
-    } else if has("appropriate variable bounds") {
-        // *** User did not provide appropriate variable bounds ***, relaxation
-        // bounds may be invalid, so neither globality nor infeasibility is
-        // guaranteed. Feasibility, if any, is still reflected in the primal status.
-        TerminationStatus::Other("baron_missing_bounds".into())
-    } else {
-        // *** Normal completion *** or no recognizable banner.
-        // The model status is the authoritative outcome.
-        model_status_termination(model_status)
+    match matched_banner(&log) {
+        Some(BaronBanner::NodeLimit) => {
+            // *** Max. allowable nodes in memory reached ***
+            TerminationStatus::NodeLimit
+        }
+        Some(BaronBanner::IterationLimit) => {
+            // *** Max. allowable BaR iterations reached ***
+            TerminationStatus::IterationLimit
+        }
+        Some(BaronBanner::TimeLimit) => {
+            // *** Max. allowable time exceeded ***
+            TerminationStatus::TimeLimit
+        }
+        Some(BaronBanner::NumericError) => {
+            // *** Problem is numerically sensitive ***
+            TerminationStatus::NumericError
+        }
+        Some(BaronBanner::Interrupted) => {
+            // *** Search interrupted by user *** / *** ... access violation ... ***
+            TerminationStatus::Interrupted
+        }
+        Some(BaronBanner::Feasible) => {
+            // *** Heuristic termination ***, feasible found, global optimality not
+            // guaranteed (DeltaTerm).
+            TerminationStatus::Feasible
+        }
+        Some(BaronBanner::MemoryLimit) => {
+            // *** Insufficient Memory for Data structures ***
+            TerminationStatus::MemoryLimit
+        }
+        Some(BaronBanner::MissingBounds) => {
+            // *** User did not provide appropriate variable bounds ***, relaxation
+            // bounds may be invalid, so neither globality nor infeasibility is
+            // guaranteed. Feasibility, if any, is still reflected in the primal status.
+            TerminationStatus::Other("baron_missing_bounds".into())
+        }
+        Some(BaronBanner::Completion) | None => {
+            // *** Normal completion *** or no recognizable banner.
+            // The model status is the authoritative outcome.
+            model_status_termination(model_status)
+        }
     }
 }
 
 fn termination_banner(res: &str) -> Option<&str> {
     res.lines().map(str::trim).find(|line| {
-        if !line.starts_with("***") {
-            return false;
-        }
-        let lower = line.to_ascii_lowercase();
-        lower.contains("completion")
-            || lower.contains("termination")
-            || lower.contains("exceeded")
-            || lower.contains("interrupted")
-            || lower.contains("memory")
+        line.starts_with("***") && matched_banner(&line.to_ascii_lowercase()).is_some()
     })
 }
 
@@ -1561,6 +1598,45 @@ mod tests {
         );
         // No recognizable banner falls back to the model status.
         assert_eq!(map_status("", 1), TerminationStatus::Optimal);
+    }
+
+    #[test]
+    fn mapped_banners_preserve_raw_status() {
+        let cases = [
+            ("*** Normal completion ***", 1, TerminationStatus::Optimal),
+            ("*** Max. allowable nodes in memory reached ***", 4, TerminationStatus::NodeLimit),
+            ("*** Max. allowable BaR iterations reached ***", 4, TerminationStatus::IterationLimit),
+            ("*** Max. allowable time exceeded ***", 4, TerminationStatus::TimeLimit),
+            ("*** Problem is numerically sensitive ***", 4, TerminationStatus::NumericError),
+            ("*** Search interrupted by user ***", 4, TerminationStatus::Interrupted),
+            ("*** BARON stopped after an access violation ***", 4, TerminationStatus::Interrupted),
+            ("*** Heuristic termination ***", 4, TerminationStatus::Feasible),
+            ("*** Insufficient Memory for Data structures ***", 4, TerminationStatus::MemoryLimit),
+            (
+                "*** User did not provide appropriate variable bounds ***",
+                4,
+                TerminationStatus::Other("baron_missing_bounds".into()),
+            ),
+        ];
+
+        for (banner, model_status, expected) in cases {
+            assert_eq!(map_status(banner, model_status), expected);
+            assert_eq!(termination_banner(banner), Some(banner));
+
+            let tim = format!("m 0 0 0 0 0 0 1 {model_status} 0 0 0 0 0 0.0");
+            let result = parse_solution(
+                &tim,
+                banner,
+                ObjectiveSense::Minimize,
+                std::time::Duration::ZERO,
+                None,
+                &[],
+                &[],
+                &[],
+            );
+            assert_eq!(result.termination, expected);
+            assert_eq!(result.raw_status.as_deref(), Some(banner));
+        }
     }
 
     #[test]
