@@ -205,13 +205,7 @@ fn collect_after_optimize(
     Ok(SolverResult {
         termination,
         primal_status,
-        dual_status: if dual_available {
-            DualStatus::FeasiblePoint
-        } else if solutions.is_empty() {
-            DualStatus::NoSolution
-        } else {
-            DualStatus::Unknown
-        },
+        dual_status: collected_dual_status(kind, dual_available, !solutions.is_empty()),
         solutions,
         dual,
         soc_dual,
@@ -777,6 +771,20 @@ type Collected = (
     bool,
 );
 
+fn supports_dual_attributes(kind: ModelKind) -> bool {
+    matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP)
+}
+
+fn collected_dual_status(kind: ModelKind, dual_available: bool, has_solution: bool) -> DualStatus {
+    if dual_available {
+        DualStatus::FeasiblePoint
+    } else if !has_solution || !supports_dual_attributes(kind) {
+        DualStatus::NoSolution
+    } else {
+        DualStatus::Unknown
+    }
+}
+
 fn collect_solution(
     kind: ModelKind,
     model: &mut gurobi_rs::Model,
@@ -805,7 +813,7 @@ fn collect_solution(
     // where Gurobi refuses the attributes.
     // LP/QP always have duals, QCP/SOCP rows only when the user opted into
     // `QCPDual=1`.
-    if !matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP) {
+    if !supports_dual_attributes(kind) {
         return (
             solutions,
             FxHashMap::default(),
@@ -946,6 +954,15 @@ fn map_status(status: Status) -> TerminationStatus {
 #[cfg(test)]
 mod status_tests {
     use super::*;
+
+    #[test]
+    fn integer_incumbents_do_not_report_dual_status() {
+        assert_eq!(collected_dual_status(ModelKind::MILP, false, true), DualStatus::NoSolution);
+        assert_eq!(collected_dual_status(ModelKind::MINLP, false, true), DualStatus::NoSolution);
+        assert_eq!(collected_dual_status(ModelKind::QP, false, true), DualStatus::Unknown);
+        assert_eq!(collected_dual_status(ModelKind::QP, false, false), DualStatus::NoSolution);
+        assert_eq!(collected_dual_status(ModelKind::MILP, true, true), DualStatus::FeasiblePoint);
+    }
 
     #[test]
     fn native_limits_keep_distinct_termination_reasons() {
