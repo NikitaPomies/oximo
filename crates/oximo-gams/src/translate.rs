@@ -1320,7 +1320,7 @@ mod tests {
 
     #[test]
     fn continuous_objest_bound_is_preserved() {
-        let content = "STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
+        let content = "STATUS=7\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
         let r = parseoximo_solution(content, &[], false, std::time::Duration::ZERO, None);
         assert_eq!(r.termination, TerminationStatus::TimeLimit);
         assert_eq!(r.best_bound, Some(8.0));
