@@ -13,7 +13,9 @@ use oximo_core::{
     SocConstraint, SocConstraintId, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{
+    DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+};
 use rustc_hash::FxHashMap;
 
 use crate::GamsOptions;
@@ -86,6 +88,10 @@ pub fn solve(
     writeln!(gms, "Put 'SOLVESTAT=' oximo_m.solvestat:0:0 /;").unwrap();
     writeln!(gms, "Put 'ITER=' oximo_m.iterusd:0:0 /;").unwrap();
     writeln!(gms, "Put 'OBJVAL=' v_obj.l:0:15 /;").unwrap();
+    writeln!(gms, "Put 'OBJEST=' oximo_m.objest:0:15 /;").unwrap();
+    writeln!(gms, "Put 'NODUSD=' oximo_m.nodusd:0:0 /;").unwrap();
+    writeln!(gms, "Put 'MARGINALS=' oximo_m.marginals:0:0 /;").unwrap();
+    writeln!(gms, "Put 'SOLVER_VERSION=' oximo_m.sysVer:0:15 /;").unwrap();
     for i in 0..vars.len() {
         writeln!(gms, "Put '{i}=' v{i}.l:0:15 /;").unwrap();
     }
@@ -185,7 +191,16 @@ pub fn solve(
     let mut result = if sol_path.exists() {
         let content = fs::read_to_string(&sol_path)
             .map_err(|e| SolverError::Backend(format!("cannot read solution file: {e}")))?;
-        let mut result = parseoximo_solution(&content, &soc_bounds, elapsed, raw_log);
+        let mixed_integer = matches!(
+            kind,
+            ModelKind::MILP
+                | ModelKind::MIQP
+                | ModelKind::MIQCP
+                | ModelKind::MISOCP
+                | ModelKind::MINLP
+        );
+        let mut result =
+            parseoximo_solution(&content, &soc_bounds, mixed_integer, elapsed, raw_log);
         // If a sub-solver wrote a solution pool (e.g. CPLEX `solnpool`), surface
         // every pooled point. The model itself emits no GDX, so any pool GDX in
         // the run directory came from the user's option file.
@@ -279,15 +294,21 @@ fn write_soc_marginal_puts(gms: &mut String, n: usize) {
 ///
 /// `soc_bounds` holds the affine bound side of each explicit SOC constraint
 /// (in `SocConstraintId` order), the squared-row marginal parsed is rescaled.
+#[expect(clippy::too_many_lines)]
 fn parseoximo_solution(
     content: &str,
     soc_bounds: &[LinearTerms],
+    mixed_integer: bool,
     elapsed: std::time::Duration,
     raw_log: Option<String>,
 ) -> SolverResult {
     let mut modelstat: Option<i32> = None;
     let mut solvestat: Option<i32> = None;
     let mut obj_val: Option<f64> = None;
+    let mut best_bound: Option<f64> = None;
+    let mut node_count: Option<u64> = None;
+    let mut marginals: Option<bool> = None;
+    let mut solver_version: Option<Cow<'static, str>> = None;
     let mut iterations: u64 = 0;
     let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
@@ -302,6 +323,17 @@ fn parseoximo_solution(
             solvestat = parse_gams_int(rest);
         } else if let Some(rest) = line.strip_prefix("OBJVAL=") {
             obj_val = parse_gams_float(rest);
+        } else if let Some(rest) = line.strip_prefix("OBJEST=") {
+            best_bound = parse_gams_float(rest);
+        } else if let Some(rest) = line.strip_prefix("NODUSD=") {
+            node_count = parse_gams_u64(rest);
+        } else if let Some(rest) = line.strip_prefix("MARGINALS=") {
+            marginals = parse_gams_int(rest).map(|value| value != 0);
+        } else if let Some(rest) = line.strip_prefix("SOLVER_VERSION=") {
+            let version = rest.trim();
+            if !version.is_empty() {
+                solver_version = Some(version.to_owned().into());
+            }
         } else if let Some(rest) = line.strip_prefix("ITER=") {
             if let Some(n) = parse_gams_u64(rest) {
                 iterations = n;
@@ -341,7 +373,8 @@ fn parseoximo_solution(
     }
 
     let modelstat = modelstat.unwrap_or(13);
-    let termination = map_status(modelstat, solvestat.unwrap_or(0));
+    let solvestat = solvestat.unwrap_or(0);
+    let termination = map_status(modelstat, solvestat);
     let has_sol = modelstat_has_solution(modelstat);
 
     // Rescale each lowered SOC row's marginal to the norm-form bound
@@ -367,6 +400,18 @@ fn parseoximo_solution(
     let solutions =
         if has_sol { vec![SolutionPoint { primal, objective: obj_val }] } else { Vec::new() };
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
+    let mut gap = match (obj_val, best_bound) {
+        (Some(objective), Some(bound)) if objective.is_finite() && bound.is_finite() => {
+            let scale = objective.abs().max(bound.abs()) + 1e-10;
+            let gap = (objective / scale - bound / scale).abs();
+            gap.is_finite().then_some(gap)
+        }
+        _ => None,
+    };
+    if modelstat == 1 && solvestat == 1 {
+        best_bound = best_bound.or(obj_val);
+        gap = Some(0.0);
+    }
     SolverResult {
         solutions,
         dual: if has_sol { dual } else { FxHashMap::default() },
@@ -374,12 +419,27 @@ fn parseoximo_solution(
         reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
         termination,
         primal_status,
-        best_bound: None,
-        gap: None,
+        dual_status: match marginals {
+            Some(true) if has_sol => DualStatus::FeasiblePoint,
+            Some(_) => DualStatus::NoSolution,
+            None => DualStatus::Unknown,
+        },
+        best_bound,
+        gap,
         solve_time: elapsed,
         iterations,
+        node_count: mixed_integer.then_some(node_count).flatten(),
+        raw_status: Some(
+            format!(
+                "modelstat={modelstat} ({}), solvestat={solvestat} ({})",
+                model_status_label(modelstat),
+                solve_status_label(solvestat)
+            )
+            .into(),
+        ),
         raw_log,
         solver_name: Some(crate::NAME.into()),
+        solver_version,
     }
 }
 
@@ -512,7 +572,7 @@ fn map_status(modelstat: i32, solvestat: i32) -> TerminationStatus {
         // Evaluation / solver / internal / system errors.
         5 | 10 | 11 | 13 => TerminationStatus::NumericError,
         6 => TerminationStatus::Other("gams_solver_capability".into()),
-        7 => TerminationStatus::Other("gams_license_error".into()),
+        7 => TerminationStatus::LicenseError,
         9 => TerminationStatus::Other("gams_setup_error".into()),
         12 => TerminationStatus::NotSolved,
         n => TerminationStatus::Other(format!("gams_solvestat_{n}")),
@@ -538,8 +598,9 @@ fn modelstat_termination(modelstat: i32) -> TerminationStatus {
         2 => TerminationStatus::LocallyOptimal,
         7 => TerminationStatus::Feasible,
         3 | 18 => TerminationStatus::Unbounded,
-        4 | 5 | 6 | 10 | 19 => TerminationStatus::Infeasible,
-        11 => TerminationStatus::Other("gams_license_error".into()),
+        4 | 6 | 10 | 19 => TerminationStatus::Infeasible,
+        5 => TerminationStatus::LocallyInfeasible,
+        11 => TerminationStatus::LicenseError,
         n => TerminationStatus::Other(format!("gams_modelstat_{n}")),
     }
 }
@@ -547,6 +608,50 @@ fn modelstat_termination(modelstat: i32) -> TerminationStatus {
 /// GAMS model-status codes that carry a usable primal point.
 fn modelstat_has_solution(modelstat: i32) -> bool {
     matches!(modelstat, 1 | 2 | 7 | 8 | 15 | 16 | 17)
+}
+
+fn model_status_label(status: i32) -> &'static str {
+    match status {
+        1 => "optimal",
+        2 => "locally optimal",
+        3 => "unbounded",
+        4 => "infeasible",
+        5 => "locally infeasible",
+        6 => "intermediate infeasible",
+        7 => "feasible",
+        8 => "integer solution",
+        9 => "intermediate non-integer",
+        10 => "integer infeasible",
+        11 => "license problem",
+        12 => "error unknown",
+        13 => "error no solution",
+        14 => "no solution returned",
+        15 => "solved unique",
+        16 => "solved",
+        17 => "solved singular",
+        18 => "unbounded no solution",
+        19 => "infeasible no solution",
+        _ => "unknown",
+    }
+}
+
+fn solve_status_label(status: i32) -> &'static str {
+    match status {
+        1 => "normal",
+        2 => "iteration limit",
+        3 => "resource limit",
+        4 => "terminated by solver",
+        5 => "evaluation error",
+        6 => "capability error",
+        7 => "license error",
+        8 => "user interrupt",
+        9 => "setup error",
+        10 => "solver error",
+        11 => "internal error",
+        12 => "skipped",
+        13 => "system error",
+        _ => "unknown",
+    }
 }
 
 // - Helpers
@@ -1172,16 +1277,72 @@ mod tests {
     fn parses_iterations_from_put_file() {
         // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
         let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
-        let r = parseoximo_solution(content, &[], std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(content, &[], false, std::time::Duration::ZERO, None);
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.iterations, 42);
+        assert_eq!(r.best_bound, Some(10.0));
+        assert_eq!(r.gap, Some(0.0));
+        assert!(r.raw_status.as_deref().unwrap().contains("modelstat=1 (optimal)"));
+    }
+
+    #[test]
+    fn parses_bound_nodes_marginals_and_solver_version() {
+        let content = "STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\nNODUSD=17\nMARGINALS=1\nSOLVER_VERSION=13.0.1\n0=2.5\nD0=1.0\n";
+        let r = parseoximo_solution(content, &[], true, std::time::Duration::ZERO, None);
+        assert_eq!(r.termination, TerminationStatus::TimeLimit);
+        assert_eq!(r.best_bound, Some(8.0));
+        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(r.node_count, Some(17));
+        assert_eq!(r.dual_status, DualStatus::FeasiblePoint);
+        assert_eq!(r.solver_version.as_deref(), Some("13.0.1"));
+        assert!(r.raw_status.as_deref().unwrap().contains("solvestat=3 (resource limit)"));
+    }
+
+    #[test]
+    fn integer_solution_status_keeps_reported_gap() {
+        let content = "STATUS=8\nSOLVESTAT=1\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
+        let r = parseoximo_solution(content, &[], true, std::time::Duration::ZERO, None);
+        assert_eq!(r.termination, TerminationStatus::Optimal);
+        assert_eq!(r.best_bound, Some(8.0));
+        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extreme_objective_bound_gap_does_not_overflow() {
+        let content =
+            format!("STATUS=8\nSOLVESTAT=3\nOBJVAL={}\nOBJEST={}\n0=2.5\n", f64::MAX, -f64::MAX);
+        let r = parseoximo_solution(&content, &[], true, std::time::Duration::ZERO, None);
+        assert_eq!(r.best_bound, Some(-f64::MAX));
+        let gap = r.gap.expect("finite extreme gap");
+        assert!(gap.is_finite());
+        assert!((gap - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn continuous_objest_bound_is_preserved() {
+        let content = "STATUS=7\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
+        let r = parseoximo_solution(content, &[], false, std::time::Duration::ZERO, None);
+        assert_eq!(r.termination, TerminationStatus::TimeLimit);
+        assert_eq!(r.best_bound, Some(8.0));
+        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(r.node_count, None);
+    }
+
+    #[test]
+    fn missing_objest_tokens_remain_unset() {
+        for token in ["NA", "UNDF"] {
+            let content = format!("STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST={token}\n0=2.5\n");
+            let r = parseoximo_solution(&content, &[], false, std::time::Duration::ZERO, None);
+            assert_eq!(r.best_bound, None, "OBJEST={token}");
+            assert_eq!(r.gap, None, "OBJEST={token}");
+        }
     }
 
     #[test]
     fn soc_marginal_is_rescaled_to_norm_form() {
         let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\n0=-1.0\n1=1.5\nZ0=-0.75\n";
         let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)], constant: 0.5 }];
-        let r = parseoximo_solution(content, &bounds, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(content, &bounds, false, std::time::Duration::ZERO, None);
         let z0 = r.soc_dual_of(SocConstraintId(0)).expect("SOC dual missing");
         assert!((z0 - 3.0).abs() < 1e-9, "z0 = {z0}");
     }
@@ -1211,7 +1372,8 @@ mod tests {
         assert_eq!(map_status(8, 4), TerminationStatus::Interrupted);
         assert_eq!(map_status(1, 5), TerminationStatus::NumericError);
         assert_eq!(map_status(1, 12), TerminationStatus::NotSolved);
-        assert_eq!(map_status(1, 7), TerminationStatus::Other("gams_license_error".into()));
+        assert_eq!(map_status(1, 7), TerminationStatus::LicenseError);
+        assert_eq!(map_status(5, 1), TerminationStatus::LocallyInfeasible);
     }
 
     #[test]

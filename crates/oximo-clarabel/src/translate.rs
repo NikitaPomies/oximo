@@ -28,7 +28,9 @@ use oximo_core::{
     explicit_soc_form, var_name,
 };
 use oximo_expr::{LinearTerms, VarId, describe_nonlinear_term, extract_linear, extract_quadratic};
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{
+    DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -470,8 +472,9 @@ pub(crate) fn read_result(
     meta: &Meta,
     elapsed: Duration,
 ) -> SolverResult {
-    let termination = map_status(solver.solution.status);
-    let has_point = termination.admits_primal();
+    let native_status = solver.solution.status;
+    let termination = map_status(native_status);
+    let has_point = status_has_point(native_status);
 
     let mut solutions = Vec::new();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
@@ -499,21 +502,42 @@ pub(crate) fn read_result(
         }
     }
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
+    let (best_bound, gap) =
+        mapped_objective_bound(meta, solver.solution.obj_val, solver.solution.obj_val_dual);
 
     SolverResult {
         termination,
         primal_status,
+        dual_status: if has_point { DualStatus::FeasiblePoint } else { DualStatus::NoSolution },
         solutions,
         dual,
         soc_dual,
         reduced_costs: FxHashMap::default(),
-        best_bound: None,
-        gap: None,
+        best_bound,
+        gap,
         solve_time: elapsed,
         iterations: u64::from(solver.info.iterations),
+        node_count: None,
+        raw_status: Some(format!("{native_status:?}").into()),
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
+        solver_version: None,
     }
+}
+
+/// Map Clarabel's primal and dual objectives back to the model's objective
+/// convention and compute their relative difference when both are finite.
+fn mapped_objective_bound(meta: &Meta, primal: f64, dual: f64) -> (Option<f64>, Option<f64>) {
+    let mapped_primal = meta.sign * primal + meta.obj_constant;
+    let mapped_dual = meta.sign * dual + meta.obj_constant;
+    if !mapped_primal.is_finite() || !mapped_dual.is_finite() {
+        return (None, None);
+    }
+
+    let relative_gap =
+        (mapped_primal - mapped_dual).abs() / (mapped_primal.abs().max(mapped_dual.abs()) + 1e-10);
+    let gap = relative_gap.is_finite().then_some(relative_gap);
+    (Some(mapped_dual), gap)
 }
 
 /// Assemble an `m x n` [`CscMatrix`] from `(row, col, value)` triplets,
@@ -629,7 +653,7 @@ fn reject_semi_domains(vars: &[Variable]) -> Result<(), SolverError> {
 fn map_status(s: SolverStatus) -> TerminationStatus {
     match s {
         SolverStatus::Solved => TerminationStatus::Optimal,
-        SolverStatus::AlmostSolved => TerminationStatus::Interrupted,
+        SolverStatus::AlmostSolved => TerminationStatus::Feasible,
         SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
             TerminationStatus::Infeasible
         }
@@ -644,6 +668,10 @@ fn map_status(s: SolverStatus) -> TerminationStatus {
         SolverStatus::Unsolved => TerminationStatus::NotSolved,
         other @ SolverStatus::CallbackTerminated => TerminationStatus::Other(format!("{other:?}")),
     }
+}
+
+fn status_has_point(status: SolverStatus) -> bool {
+    matches!(status, SolverStatus::Solved | SolverStatus::AlmostSolved)
 }
 
 #[cfg(feature = "benchmark-support")]
@@ -722,6 +750,46 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    #[test]
+    fn only_solution_statuses_admit_primal_and_dual_points() {
+        assert!(status_has_point(SolverStatus::Solved));
+        assert!(status_has_point(SolverStatus::AlmostSolved));
+        assert!(!status_has_point(SolverStatus::MaxIterations));
+        assert!(!status_has_point(SolverStatus::MaxTime));
+    }
+
+    #[test]
+    fn finite_dual_objective_maps_bound_and_gap() {
+        let meta = Meta {
+            sign: -1.0,
+            obj_constant: 5.0,
+            row_duals: Vec::new(),
+            soc_block_starts: Vec::new(),
+            n_explicit: 0,
+        };
+
+        let (bound, gap) = mapped_objective_bound(&meta, -10.0, -8.0);
+        assert_eq!(bound, Some(13.0));
+        assert!(close(gap.unwrap(), 2.0 / 15.0, 1e-12));
+    }
+
+    #[test]
+    fn nonfinite_objective_leaves_bound_and_gap_unset() {
+        let meta = Meta {
+            sign: 1.0,
+            obj_constant: 0.0,
+            row_duals: Vec::new(),
+            soc_block_starts: Vec::new(),
+            n_explicit: 0,
+        };
+
+        for (primal, dual) in
+            [(f64::NAN, 1.0), (1.0, f64::NAN), (f64::INFINITY, 1.0), (1.0, f64::NEG_INFINITY)]
+        {
+            assert_eq!(mapped_objective_bound(&meta, primal, dual), (None, None));
+        }
     }
 
     #[test]
@@ -1113,6 +1181,10 @@ mod tests {
 
         let res = solve(&m, &ClarabelOptions::default().max_iter(1)).unwrap();
         assert!(res.iterations <= 1, "iterations = {}", res.iterations);
+        if res.termination == TerminationStatus::IterationLimit {
+            assert!(!res.has_solution());
+            assert_eq!(res.dual_status, DualStatus::NoSolution);
+        }
     }
 
     #[test]

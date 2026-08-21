@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use oximo_core::{Model, ModelKind, ObjectiveSense, Sense, SocForm, detect_soc, explicit_soc_form};
 use oximo_expr::{LinearTerms, extract_linear, extract_quadratic};
-use oximo_solver::{SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{DualStatus, SolverError, SolverResult, TerminationStatus};
 use pounce_rs::IpoptApplication;
 use pounce_rs::convex::{
     ActiveSetOverrides, ConeSpec, QpOptions, QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet,
@@ -582,6 +582,12 @@ pub(crate) fn outcome(
     let reduced = Some(sol.z_lb.iter().zip(&sol.z_ub).map(|(l, u)| l - u).collect());
     Outcome {
         termination,
+        dual_status: if matches!(sol.status, QpStatus::Optimal) {
+            DualStatus::FeasiblePoint
+        } else {
+            DualStatus::Unknown
+        },
+        raw_status: format!("{:?}", sol.status),
         x: sol.x.clone(),
         lambda,
         soc_dual,

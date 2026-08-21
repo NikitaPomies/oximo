@@ -2,9 +2,10 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use oximo_core::{
-    ConstraintId, ConstraintRef, Expr, ExprNode, IndexKey, IndexedVar, Model, ObjectiveSense,
+    ConstraintId, ConstraintRef, Expr, IndexKey, IndexedVar, Model, ObjectiveSense,
     SocConstraintId, VarId,
 };
+use oximo_expr::{EvalContext, ExprArena, ExprId, ParamId, evaluate};
 use rustc_hash::FxHashMap;
 
 use crate::status::{PrimalStatus, TerminationStatus};
@@ -20,22 +21,32 @@ pub struct SolutionPoint {
     pub objective: Option<f64>,
 }
 
+struct PointContext<'a>(&'a FxHashMap<VarId, f64>);
+
+impl EvalContext for PointContext<'_> {
+    fn var(&self, id: VarId) -> Option<f64> {
+        self.0.get(&id).copied()
+    }
+
+    fn param(&self, _id: ParamId) -> Option<f64> {
+        None
+    }
+}
+
 impl SolutionPoint {
     /// Look up a primal value by `VarId`.
     pub fn value(&self, id: VarId) -> Option<f64> {
         self.primal.get(&id).copied()
     }
 
-    /// Look up the primal value for an `Expr` that points at a `Var` node.
-    /// Returns `None` for any expression that is not a single variable, so
-    /// callers that need the value of a derived expression should evaluate it
-    /// against the primal solution explicitly.
+    /// Evaluate an expression at this primal point.
+    ///
+    /// Returns `None` when any variable needed by the expression is absent.
+    /// Parameter values are read from the expression's model arena at query
+    /// time.
     pub fn value_of(&self, expr: Expr<'_>) -> Option<f64> {
         let arena = expr.arena.borrow();
-        match arena.get(expr.id) {
-            ExprNode::Var(v) => self.primal.get(v).copied(),
-            _ => None,
-        }
+        evaluate(&arena, expr.id, &PointContext(&self.primal)).ok()
     }
 
     /// Look up the primal value for a specific index of an [`IndexedVar`].
@@ -62,6 +73,77 @@ impl SolutionPoint {
     }
 }
 
+/// Availability and quality of the dual solution returned by a solver.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum DualStatus {
+    /// The backend reports that no dual solution is available.
+    #[default]
+    NoSolution,
+    /// A usable dual point is available.
+    FeasiblePoint,
+    /// The backend cannot distinguish unavailable from unreported duals.
+    Unknown,
+}
+
+/// Activity and feasibility information for an algebraic constraint.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ConstraintEvaluation {
+    pub activity: f64,
+    pub lower_slack: Option<f64>,
+    pub upper_slack: Option<f64>,
+    pub violation: f64,
+}
+
+/// Activity and feasibility information for an explicit second-order cone.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SocEvaluation {
+    pub norm: f64,
+    pub bound: f64,
+    pub slack: f64,
+    pub violation: f64,
+}
+
+fn evaluate_at(arena: &ExprArena, id: ExprId, point: &SolutionPoint) -> Option<f64> {
+    evaluate(arena, id, &PointContext(&point.primal)).ok()
+}
+
+fn evaluate_constraint_at(
+    point: &SolutionPoint,
+    model: &Model,
+    id: ConstraintId,
+) -> Option<ConstraintEvaluation> {
+    let arena = model.arena();
+    let constraints = model.constraints();
+    let constraint = constraints.algebraic().get(id.index())?;
+    let activity = evaluate_at(&arena, constraint.lhs, point)?;
+    let lower_slack = constraint.lower.is_finite().then_some(activity - constraint.lower);
+    let upper_slack = constraint.upper.is_finite().then_some(constraint.upper - activity);
+    let violation = lower_slack
+        .into_iter()
+        .chain(upper_slack)
+        .map(|slack| (-slack).max(0.0))
+        .fold(0.0, f64::max);
+    Some(ConstraintEvaluation { activity, lower_slack, upper_slack, violation })
+}
+
+fn evaluate_soc_at(
+    point: &SolutionPoint,
+    model: &Model,
+    id: SocConstraintId,
+) -> Option<SocEvaluation> {
+    let arena = model.arena();
+    let socs = model.soc_constraints();
+    let constraint = socs.get(id.index())?;
+    let squared_norm = constraint.terms.iter().try_fold(0.0, |sum, &term| {
+        evaluate_at(&arena, term, point).map(|value| sum + value * value)
+    })?;
+    let norm = squared_norm.sqrt();
+    let bound = evaluate_at(&arena, constraint.bound, point)?;
+    let slack = bound - norm;
+    Some(SocEvaluation { norm, bound, slack, violation: (-slack).max(0.0) })
+}
+
 /// A solver's final result on a model.
 ///
 /// `termination` expresses why the solver stopped and `primal_status` says
@@ -75,16 +157,24 @@ impl SolutionPoint {
 pub struct SolverResult {
     pub termination: TerminationStatus,
     pub primal_status: PrimalStatus,
+    pub dual_status: DualStatus,
     pub solutions: Vec<SolutionPoint>,
     pub dual: FxHashMap<ConstraintId, f64>,
     pub soc_dual: FxHashMap<SocConstraintId, f64>,
     pub reduced_costs: FxHashMap<VarId, f64>,
+    /// The best objective bound reported by the backend.
     pub best_bound: Option<f64>,
+    /// The backend's relative optimality gap.
     pub gap: Option<f64>,
     pub solve_time: Duration,
+    /// A backend-defined aggregate iteration count.
     pub iterations: u64,
+    pub node_count: Option<u64>,
+    /// A compact native status label or code, distinct from [`Self::raw_log`].
+    pub raw_status: Option<Cow<'static, str>>,
     pub raw_log: Option<String>,
     pub solver_name: Option<Cow<'static, str>>,
+    pub solver_version: Option<Cow<'static, str>>,
 }
 
 impl Default for SolverResult {
@@ -92,6 +182,7 @@ impl Default for SolverResult {
         Self {
             termination: TerminationStatus::NotSolved,
             primal_status: PrimalStatus::NoSolution,
+            dual_status: DualStatus::NoSolution,
             solutions: Vec::new(),
             dual: FxHashMap::default(),
             soc_dual: FxHashMap::default(),
@@ -100,8 +191,11 @@ impl Default for SolverResult {
             gap: None,
             solve_time: Duration::ZERO,
             iterations: 0,
+            node_count: None,
+            raw_status: None,
             raw_log: None,
             solver_name: None,
+            solver_version: None,
         }
     }
 }
@@ -145,11 +239,48 @@ impl SolverResult {
         self.solutions.first().and_then(|s| s.value(id))
     }
 
-    /// Look up the best solution's primal value for an `Expr` that points at a
-    /// `Var` node. Returns `None` for any expression that is not a single
-    /// variable.
+    /// Evaluate an expression at the best solution.
     pub fn value_of(&self, expr: Expr<'_>) -> Option<f64> {
         self.solutions.first().and_then(|s| s.value_of(expr))
+    }
+
+    /// Evaluate an algebraic constraint at the best solution.
+    ///
+    /// The result and model must describe the same solve. Parameter values are
+    /// read from `model` at query time, so do not combine an old result with a
+    /// subsequently modified model.
+    pub fn constraint_evaluation(
+        &self,
+        model: &Model,
+        id: ConstraintId,
+    ) -> Option<ConstraintEvaluation> {
+        self.constraint_evaluation_at(model, id, 0)
+    }
+
+    /// Evaluate an algebraic constraint at solution `solution_index`.
+    pub fn constraint_evaluation_at(
+        &self,
+        model: &Model,
+        id: ConstraintId,
+        solution_index: usize,
+    ) -> Option<ConstraintEvaluation> {
+        evaluate_constraint_at(self.solution(solution_index)?, model, id)
+    }
+
+    /// Evaluate an explicit second-order-cone constraint at the best solution.
+    pub fn soc_evaluation(&self, model: &Model, id: SocConstraintId) -> Option<SocEvaluation> {
+        self.soc_evaluation_at(model, id, 0)
+    }
+
+    /// Evaluate an explicit second-order-cone constraint at solution
+    /// `solution_index`.
+    pub fn soc_evaluation_at(
+        &self,
+        model: &Model,
+        id: SocConstraintId,
+        solution_index: usize,
+    ) -> Option<SocEvaluation> {
+        evaluate_soc_at(self.solution(solution_index)?, model, id)
     }
 
     pub fn dual_of(&self, c: ConstraintId) -> Option<f64> {
@@ -223,10 +354,19 @@ impl std::fmt::Display for ModelReport<'_> {
         };
 
         writeln!(f, "solution summary")?;
-        writeln!(f, "  solver     : {}", r.solver_name.as_deref().unwrap_or("(unknown)"))?;
+        let solver = match (r.solver_name.as_deref(), r.solver_version.as_deref()) {
+            (Some(name), Some(version)) => format!("{name} {version}"),
+            (Some(name), None) => name.to_owned(),
+            (None, _) => "(unknown)".to_owned(),
+        };
+        writeln!(f, "  solver     : {solver}")?;
         writeln!(f, "  model      : {}  ({:?}, {sense})", m.name, m.kind())?;
         writeln!(f, "  termination: {:?}", r.termination)?;
         writeln!(f, "  primal     : {:?}", r.primal_status)?;
+        writeln!(f, "  dual       : {:?}", r.dual_status)?;
+        if let Some(raw) = r.raw_status.as_deref() {
+            writeln!(f, "  raw status : {raw}")?;
+        }
         writeln!(f, "  solutions  : {}", r.result_count())?;
         match r.objective() {
             Some(v) => writeln!(f, "  objective  : {}", num(v))?,
@@ -240,6 +380,9 @@ impl std::fmt::Display for ModelReport<'_> {
         }
         writeln!(f, "  solve time : {:?}", r.solve_time)?;
         writeln!(f, "  iterations : {}", r.iterations)?;
+        if let Some(nodes) = r.node_count {
+            writeln!(f, "  nodes      : {nodes}")?;
+        }
 
         // Variables
         let vars = m.variables();
@@ -307,6 +450,110 @@ mod tests {
         assert!(r.primal().is_none());
         assert!(r.value(VarId(0)).is_none());
         assert!(r.solution(0).is_none());
+        assert_eq!(r.dual_status, DualStatus::NoSolution);
+        assert!(r.raw_status.is_none());
+        assert!(r.solver_version.is_none());
+        assert!(r.node_count.is_none());
+    }
+
+    #[test]
+    fn value_of_evaluates_linear_quadratic_nonlinear_and_parameterized_expressions() {
+        use oximo_core::{param, variable};
+
+        let m = Model::new("expressions");
+        param!(m, p = 2.0);
+        variable!(m, x);
+        variable!(m, y);
+        let mut primal = FxHashMap::default();
+        primal.insert(x.var_id().unwrap(), 3.0);
+        primal.insert(y.var_id().unwrap(), 4.0);
+        let point = SolutionPoint { primal, objective: None };
+
+        assert_eq!(point.value_of(x), Some(3.0));
+        assert_eq!(point.value_of(2.0 * x + y - 1.0), Some(9.0));
+        assert_eq!(point.value_of(x.powi(2) + x * y), Some(21.0));
+        assert_eq!(point.value_of(x.sin()), Some(3.0_f64.sin()));
+        assert_eq!(point.value_of(p * x + y), Some(10.0));
+
+        let incomplete = SolutionPoint::default();
+        assert!(incomplete.value_of(x + y).is_none());
+    }
+
+    #[test]
+    fn algebraic_constraint_evaluations_cover_all_bound_shapes_and_solution_indices() {
+        use oximo_core::{constraint, variable};
+
+        let m = Model::new("constraint evaluation");
+        variable!(m, x);
+        let equality = constraint!(m, equality, x == 2.0);
+        let lower = constraint!(m, lower, x >= 1.0);
+        let upper = constraint!(m, upper, x <= 3.0);
+        constraint!(m, ranged, 1.5 <= x <= 2.5);
+        let ranged = m.constraint_id("ranged").unwrap();
+
+        let point = |value| {
+            let mut primal = FxHashMap::default();
+            primal.insert(x.var_id().unwrap(), value);
+            SolutionPoint { primal, objective: None }
+        };
+        let result = SolverResult {
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![point(2.0), point(4.0)],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            result.constraint_evaluation(&m, equality),
+            Some(ConstraintEvaluation {
+                activity: 2.0,
+                lower_slack: Some(0.0),
+                upper_slack: Some(0.0),
+                violation: 0.0,
+            })
+        );
+        assert_eq!(result.constraint_evaluation(&m, lower).unwrap().lower_slack, Some(1.0));
+        assert_eq!(result.constraint_evaluation(&m, lower).unwrap().upper_slack, None);
+        assert_eq!(result.constraint_evaluation(&m, upper).unwrap().lower_slack, None);
+        assert_eq!(result.constraint_evaluation(&m, upper).unwrap().upper_slack, Some(1.0));
+        assert!(result.constraint_evaluation(&m, ranged).unwrap().violation.abs() < f64::EPSILON);
+        assert!(
+            (result.constraint_evaluation_at(&m, ranged, 1).unwrap().violation - 1.5).abs()
+                < f64::EPSILON
+        );
+        assert!(result.constraint_evaluation_at(&m, ranged, 2).is_none());
+        assert!(result.constraint_evaluation(&m, ConstraintId(u32::MAX)).is_none());
+    }
+
+    #[test]
+    fn soc_evaluation_reports_norm_slack_and_violation() {
+        use oximo_core::{soc_constraint, variable};
+
+        let m = Model::new("soc evaluation");
+        variable!(m, x);
+        variable!(m, y);
+        variable!(m, t);
+        let cone = soc_constraint!(m, cone, [x, y] <= t);
+        let point = |x_value, y_value, t_value| {
+            let mut primal = FxHashMap::default();
+            primal.insert(x.var_id().unwrap(), x_value);
+            primal.insert(y.var_id().unwrap(), y_value);
+            primal.insert(t.var_id().unwrap(), t_value);
+            SolutionPoint { primal, objective: None }
+        };
+        let result = SolverResult {
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![point(3.0, 4.0, 6.0), point(3.0, 4.0, 4.0)],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            result.soc_evaluation(&m, cone),
+            Some(SocEvaluation { norm: 5.0, bound: 6.0, slack: 1.0, violation: 0.0 })
+        );
+        assert!(
+            (result.soc_evaluation_at(&m, cone, 1).unwrap().violation - 1.0).abs() < f64::EPSILON
+        );
+        assert!(result.soc_evaluation_at(&m, cone, 2).is_none());
     }
 
     #[test]
@@ -350,13 +597,20 @@ mod tests {
             solutions: vec![SolutionPoint { primal, objective: Some(5.0) }],
             dual,
             solver_name: Some("TestSolver".into()),
+            solver_version: Some("1.2.3".into()),
+            raw_status: Some("native optimal".into()),
+            dual_status: DualStatus::FeasiblePoint,
+            node_count: Some(7),
             ..Default::default()
         };
 
         let out = r.report(&m).to_string();
-        assert!(out.contains("solver     : TestSolver"), "{out}");
+        assert!(out.contains("solver     : TestSolver 1.2.3"), "{out}");
         assert!(out.contains("termination: Optimal"), "{out}");
         assert!(out.contains("primal     : OptimalPoint"), "{out}");
+        assert!(out.contains("dual       : FeasiblePoint"), "{out}");
+        assert!(out.contains("raw status : native optimal"), "{out}");
+        assert!(out.contains("nodes      : 7"), "{out}");
         assert!(out.contains("objective  : 5"), "{out}");
         assert!(out.contains("(LP, maximize)"), "{out}");
         assert!(out.contains("x = 5"), "{out}");

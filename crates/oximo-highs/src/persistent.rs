@@ -123,8 +123,13 @@ impl HighsPersistent {
             .try_solve()
             .map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
         let elapsed = started.elapsed();
-        let result =
-            extract_result(&solved, st.meta.obj_constant, st.meta.num_constraints, elapsed);
+        let result = extract_result(
+            &solved,
+            st.meta.mixed_integer,
+            st.meta.obj_constant,
+            st.meta.num_constraints,
+            elapsed,
+        );
         st.live = Some(HighsModel::from(solved));
         Ok(result)
     }
