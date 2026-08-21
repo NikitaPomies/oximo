@@ -337,14 +337,9 @@ fn extract_result(
     let solution_status = task.get_sol_sta(solution_type).unwrap_or(Solsta::UNKNOWN);
     let problem_status = task.get_pro_sta(solution_type).unwrap_or(Prosta::UNKNOWN);
     let termination = map_status(solution_status, problem_status, trm);
-    let has_point = task.solution_def(solution_type).unwrap_or(false)
-        && matches!(
-            solution_status,
-            Solsta::OPTIMAL
-                | Solsta::INTEGER_OPTIMAL
-                | Solsta::PRIM_FEAS
-                | Solsta::PRIM_AND_DUAL_FEAS
-        );
+    let solution_defined = task.solution_def(solution_type).unwrap_or(false);
+    let has_point = solution_defined && has_primal_solution(solution_status);
+    let has_dual = !mixed_integer && solution_defined && has_dual_solution(solution_status);
 
     let variables = model.variables();
     let mut solutions = Vec::new();
@@ -363,49 +358,39 @@ fn extract_result(
             .collect::<Result<FxHashMap<_, _>, SolverError>>()?;
         let objective = task.get_primal_obj(solution_type).ok().filter(|value| value.is_finite());
         solutions.push(SolutionPoint { primal, objective });
-
-        if !mixed_integer {
-            collect_continuous_duals(
-                task,
-                solution_type,
-                meta,
-                variables.len(),
-                &mut dual,
-                &mut reduced_costs,
-            )?;
-            for &(id, acc, dim) in &meta.explicit_accs {
-                let mut dot_y = vec![0.0; dim];
-                if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok() {
-                    if let Some(&bound_multiplier) = dot_y.first() {
-                        soc_dual.insert(id, bound_multiplier);
-                    }
-                }
-            }
-        }
+    }
+    if has_dual {
+        collect_continuous_duals(
+            task,
+            solution_type,
+            meta,
+            variables.len(),
+            &mut dual,
+            &mut reduced_costs,
+        )?;
+        collect_continuous_soc_duals(task, solution_type, meta, &mut soc_dual);
     }
 
-    let mut best_bound = mixed_integer
+    let bound_defined = mixed_integer
+        && task.get_int_inf(Iinfitem::MIO_OBJ_BOUND_DEFINED).is_ok_and(|defined| defined != 0);
+    let mut best_bound = bound_defined
         .then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_BOUND).ok())
         .flatten()
         .filter(|value| value.is_finite());
     let mut gap = mixed_integer
         .then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_REL_GAP).ok())
         .flatten()
-        .filter(|value| value.is_finite());
+        .filter(|value| value.is_finite() && *value >= 0.0);
     if matches!(termination, TerminationStatus::Optimal) {
         best_bound = best_bound.or_else(|| solutions.first().and_then(|point| point.objective));
         gap = gap.or(Some(0.0));
     }
     let iterations = iteration_count(task, mixed_integer);
     let node_count = mixed_integer
-        .then(|| task.get_int_inf(Iinfitem::MIO_NUM_BRANCH).ok())
+        .then(|| task.get_int_inf(Iinfitem::MIO_NUM_SOLVED_NODES).ok())
         .flatten()
         .and_then(|count| u64::try_from(count).ok());
-    let dual_status = if has_point && !mixed_integer {
-        DualStatus::FeasiblePoint
-    } else {
-        DualStatus::NoSolution
-    };
+    let dual_status = if has_dual { DualStatus::FeasiblePoint } else { DualStatus::NoSolution };
     let mut major = 0;
     let mut minor = 0;
     let mut revision = 0;
@@ -468,6 +453,33 @@ fn collect_continuous_duals(
             .insert(VarId(u32::try_from(index).map_err(|_| overflow("variable"))?), lower - upper);
     }
     Ok(())
+}
+
+fn collect_continuous_soc_duals(
+    task: &TaskCB,
+    solution_type: i32,
+    meta: &Meta,
+    soc_dual: &mut FxHashMap<SocConstraintId, f64>,
+) {
+    for &(id, acc, dim) in &meta.explicit_accs {
+        let mut dot_y = vec![0.0; dim];
+        if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok() {
+            if let Some(&bound_multiplier) = dot_y.first() {
+                soc_dual.insert(id, bound_multiplier);
+            }
+        }
+    }
+}
+
+fn has_primal_solution(solution_status: i32) -> bool {
+    matches!(
+        solution_status,
+        Solsta::OPTIMAL | Solsta::INTEGER_OPTIMAL | Solsta::PRIM_FEAS | Solsta::PRIM_AND_DUAL_FEAS
+    )
+}
+
+fn has_dual_solution(solution_status: i32) -> bool {
+    matches!(solution_status, Solsta::OPTIMAL | Solsta::DUAL_FEAS | Solsta::PRIM_AND_DUAL_FEAS)
 }
 
 fn select_solution(task: &TaskCB, mixed_integer: bool) -> i32 {
@@ -660,6 +672,20 @@ pub mod benchmark_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separates_primal_and_dual_solution_statuses() {
+        assert!(has_primal_solution(Solsta::OPTIMAL));
+        assert!(has_dual_solution(Solsta::OPTIMAL));
+        assert!(has_primal_solution(Solsta::PRIM_FEAS));
+        assert!(!has_dual_solution(Solsta::PRIM_FEAS));
+        assert!(!has_primal_solution(Solsta::DUAL_FEAS));
+        assert!(has_dual_solution(Solsta::DUAL_FEAS));
+        assert!(has_primal_solution(Solsta::PRIM_AND_DUAL_FEAS));
+        assert!(has_dual_solution(Solsta::PRIM_AND_DUAL_FEAS));
+        assert!(has_primal_solution(Solsta::INTEGER_OPTIMAL));
+        assert!(!has_dual_solution(Solsta::INTEGER_OPTIMAL));
+    }
 
     #[test]
     fn maps_native_limit_and_failure_codes() {
