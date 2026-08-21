@@ -474,7 +474,7 @@ pub(crate) fn read_result(
 ) -> SolverResult {
     let native_status = solver.solution.status;
     let termination = map_status(native_status);
-    let has_point = termination.admits_primal();
+    let has_point = status_has_point(native_status);
 
     let mut solutions = Vec::new();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
@@ -670,6 +670,10 @@ fn map_status(s: SolverStatus) -> TerminationStatus {
     }
 }
 
+fn status_has_point(status: SolverStatus) -> bool {
+    matches!(status, SolverStatus::Solved | SolverStatus::AlmostSolved)
+}
+
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
 #[expect(clippy::cast_precision_loss)]
@@ -746,6 +750,14 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    #[test]
+    fn only_solution_statuses_admit_primal_and_dual_points() {
+        assert!(status_has_point(SolverStatus::Solved));
+        assert!(status_has_point(SolverStatus::AlmostSolved));
+        assert!(!status_has_point(SolverStatus::MaxIterations));
+        assert!(!status_has_point(SolverStatus::MaxTime));
     }
 
     #[test]
@@ -1169,6 +1181,10 @@ mod tests {
 
         let res = solve(&m, &ClarabelOptions::default().max_iter(1)).unwrap();
         assert!(res.iterations <= 1, "iterations = {}", res.iterations);
+        if res.termination == TerminationStatus::IterationLimit {
+            assert!(!res.has_solution());
+            assert_eq!(res.dual_status, DualStatus::NoSolution);
+        }
     }
 
     #[test]
