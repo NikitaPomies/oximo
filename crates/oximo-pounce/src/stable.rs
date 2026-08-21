@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use oximo_core::Model;
-use oximo_solver::SolverError;
+use oximo_solver::{DualStatus, SolverError};
 use pounce_rs::IpoptApplication;
 use pounce_rs::builder::{Nlp, Problem};
 
@@ -181,6 +181,11 @@ fn run_builder(
     });
     Ok(Outcome {
         termination,
+        dual_status: if matches!(sol.status, pounce_rs::ApplicationReturnStatus::SolveSucceeded) {
+            DualStatus::FeasiblePoint
+        } else {
+            DualStatus::Unknown
+        },
         raw_status: format!("{:?}", sol.status),
         x: sol.x,
         lambda: sol.multipliers,

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::rc::Rc;
 
-use oximo_solver::SolverError;
+use oximo_solver::{DualStatus, SolverError};
 use pounce_rs::pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_rs::{
     ApplicationReturnStatus, BoundsInfo, Index, IndexStyle, IpoptApplication, IpoptCq, IpoptData,
@@ -113,6 +113,11 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
     Ok(match &t.captured {
         Some(c) => Outcome {
             termination,
+            dual_status: if matches!(status, ApplicationReturnStatus::SolveSucceeded) {
+                DualStatus::FeasiblePoint
+            } else {
+                DualStatus::Unknown
+            },
             raw_status: format!("{status:?}"),
             x: c.warm.x.clone(),
             lambda: c.warm.lambda.clone(),
@@ -125,6 +130,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
         },
         None => Outcome {
             termination,
+            dual_status: DualStatus::Unknown,
             raw_status: format!("{status:?}"),
             x: Vec::new(),
             lambda: Vec::new(),

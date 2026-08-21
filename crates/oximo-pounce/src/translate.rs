@@ -52,6 +52,7 @@ pub(crate) struct WarmStart {
 /// (a `Maximize` model is posed as `min -f`) and [`assemble`] undoes the sign.
 pub(crate) struct Outcome {
     pub termination: TerminationStatus,
+    pub dual_status: DualStatus,
     /// Native POUNCE/convex-route status label.
     pub raw_status: String,
     pub x: Vec<f64>,
@@ -394,7 +395,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
     SolverResult {
         termination: o.termination,
         primal_status,
-        dual_status: if has_point { DualStatus::FeasiblePoint } else { DualStatus::NoSolution },
+        dual_status: o.dual_status,
         solutions,
         dual,
         soc_dual,
@@ -661,9 +662,57 @@ mod retry_tests {
         }
     }
 
+    #[test]
+    fn assemble_preserves_explicit_dual_status_for_partial_and_limit_points() {
+        for (termination, raw_status) in [
+            (TerminationStatus::Feasible, "OptimalInaccurate"),
+            (TerminationStatus::IterationLimit, "MaximumIterationsExceeded"),
+            (TerminationStatus::TimeLimit, "MaximumWallTimeExceeded"),
+        ] {
+            let result = assemble(
+                1.0,
+                Outcome {
+                    termination,
+                    dual_status: DualStatus::Unknown,
+                    raw_status: raw_status.into(),
+                    x: vec![1.0],
+                    lambda: vec![2.0],
+                    soc_dual: Vec::new(),
+                    reduced: None,
+                    objective: Some(1.0),
+                    iterations: 1,
+                    warm: None,
+                    raw_log: None,
+                },
+                Duration::ZERO,
+            );
+            assert_eq!(result.dual_status, DualStatus::Unknown, "{raw_status}");
+        }
+
+        let result = assemble(
+            1.0,
+            Outcome {
+                termination: TerminationStatus::LocallyOptimal,
+                dual_status: DualStatus::FeasiblePoint,
+                raw_status: "SolveSucceeded".into(),
+                x: vec![1.0],
+                lambda: vec![2.0],
+                soc_dual: Vec::new(),
+                reduced: None,
+                objective: Some(1.0),
+                iterations: 1,
+                warm: None,
+                raw_log: None,
+            },
+            Duration::ZERO,
+        );
+        assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
+    }
+
     fn logged_outcome(log: &str) -> Outcome {
         Outcome {
             termination: TerminationStatus::Infeasible,
+            dual_status: DualStatus::Unknown,
             raw_status: "InfeasibleProblemDetected".into(),
             x: Vec::new(),
             lambda: Vec::new(),
