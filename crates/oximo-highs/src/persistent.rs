@@ -125,7 +125,7 @@ impl HighsPersistent {
         let elapsed = started.elapsed();
         let result = extract_result(
             &solved,
-            st.meta.kind,
+            st.meta.mixed_integer,
             st.meta.obj_constant,
             st.meta.num_constraints,
             elapsed,

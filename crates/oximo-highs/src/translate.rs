@@ -49,7 +49,13 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     let solved =
         live.try_solve().map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
     let elapsed = started.elapsed();
-    Ok(extract_result(&solved, meta.kind, meta.obj_constant, meta.num_constraints, elapsed))
+    Ok(extract_result(
+        &solved,
+        meta.mixed_integer,
+        meta.obj_constant,
+        meta.num_constraints,
+        elapsed,
+    ))
 }
 
 /// The HiGHS [`RowProblem`] plus the inputs needed to build and configure a live
@@ -70,10 +76,10 @@ pub(crate) struct Prob {
 /// duals. The incremental fast path's snapshot/fingerprint lives in
 /// [`oximo_solver::snapshot`], shared across backends.
 pub(crate) struct Meta {
-    pub kind: ModelKind,
     pub cols: Vec<highs::Col>,
     pub obj_constant: f64,
     pub num_constraints: usize,
+    pub mixed_integer: bool,
 }
 
 /// Translate `model` into a HiGHS [`RowProblem`] and the [`Meta`] needed to read the
@@ -109,6 +115,9 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     // Build the HiGHS row problem from the variables and constraints.
     let mut pb = RowProblem::new();
     let mut cols: Vec<highs::Col> = Vec::with_capacity(vars.len());
+    let mixed_integer = vars
+        .iter()
+        .any(|v| v.domain.is_integer() || matches!(v.domain, Domain::SemiContinuous { .. }));
     let mut has_initial = false;
     let mut init_vals: Vec<f64> = vec![0.0; vars.len()];
     for (i, v) in vars.iter().enumerate() {
@@ -148,7 +157,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
 
     Ok((
         Prob { pb, sense, hessian_cols, has_hessian, has_initial, init_vals },
-        Meta { kind, cols, obj_constant, num_constraints },
+        Meta { cols, obj_constant, num_constraints, mixed_integer },
     ))
 }
 
@@ -186,7 +195,7 @@ pub(crate) fn make_live(prob: Prob, opts: &HighsOptions) -> Result<HighsModel, S
 /// back onto HiGHS' objective value.
 pub(crate) fn extract_result(
     solved: &highs::SolvedModel,
-    kind: ModelKind,
+    mixed_integer: bool,
     obj_constant: f64,
     num_constraints: usize,
     elapsed: Duration,
@@ -212,15 +221,13 @@ pub(crate) fn extract_result(
         Vec::new()
     };
     let primal_status = PrimalStatus::infer(&termination, has_point);
-    let mixed_integer = matches!(kind, ModelKind::MILP);
-    let raw_gap = solved.mip_gap();
-    let mut gap = mixed_integer.then_some(raw_gap).filter(|value| value.is_finite());
     let mut best_bound = mixed_integer
         .then(|| solved.double_info_value(c"mip_dual_bound").ok())
         .flatten()
         .filter(|value| value.is_finite())
         .map(|value| value + obj_constant)
         .filter(|value| value.is_finite());
+    let mut gap = mixed_integer.then(|| relative_gap(objective_value, best_bound)).flatten();
     if matches!(termination, TerminationStatus::Optimal) {
         best_bound = best_bound.or(objective_value);
         gap = gap.or(Some(0.0));
@@ -233,7 +240,8 @@ pub(crate) fn extract_result(
     let node_count = mixed_integer
         .then(|| solved.int_info_value(c"mip_node_count").ok())
         .flatten()
-        .and_then(|count| u64::try_from(count).ok());
+        .and_then(|count| u64::try_from(count).ok())
+        .or_else(|| mixed_integer.then_some(0));
     SolverResult {
         termination,
         primal_status,
@@ -251,6 +259,17 @@ pub(crate) fn extract_result(
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
         solver_version: None,
+    }
+}
+
+fn relative_gap(objective: Option<f64>, bound: Option<f64>) -> Option<f64> {
+    match (objective, bound) {
+        (Some(objective), Some(bound)) if objective.is_finite() && bound.is_finite() => {
+            let scale = objective.abs().max(bound.abs()) + 1e-10;
+            let gap = (objective / scale - bound / scale).abs();
+            gap.is_finite().then_some(gap)
+        }
+        _ => None,
     }
 }
 
@@ -570,6 +589,15 @@ mod tests {
     }
 
     #[test]
+    fn nonoptimal_milp_gap_uses_shifted_objective_and_bound() {
+        let objective_constant = 5.0;
+        let objective = 10.0 + objective_constant;
+        let bound = 8.0 + objective_constant;
+        let gap = relative_gap(Some(objective), Some(bound)).expect("finite MIP gap");
+        assert!((gap - 2.0 / 15.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn miqp_is_unsupported() {
         // Integer variable + quadratic objective = MIQP, which HiGHS cannot solve.
         let m = Model::new("miqp");
@@ -605,6 +633,9 @@ mod tests {
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!((res.value_of(x).unwrap() - 5.0).abs() < 1e-6, "x = {:?}", res.value_of(x));
+        assert_eq!(res.best_bound, Some(5.0));
+        assert_eq!(res.gap, Some(0.0));
+        assert!(res.node_count.is_some());
     }
 
     #[test]
@@ -617,6 +648,9 @@ mod tests {
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!(res.value_of(x).unwrap().abs() < 1e-9, "x = {:?}", res.value_of(x));
+        assert_eq!(res.best_bound, Some(0.0));
+        assert_eq!(res.gap, Some(0.0));
+        assert!(res.node_count.is_some());
     }
 
     #[test]
