@@ -582,6 +582,7 @@ pub(crate) fn outcome(
     let reduced = Some(sol.z_lb.iter().zip(&sol.z_ub).map(|(l, u)| l - u).collect());
     Outcome {
         termination,
+        raw_status: format!("{:?}", sol.status),
         x: sol.x.clone(),
         lambda,
         soc_dual,

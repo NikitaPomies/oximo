@@ -28,7 +28,9 @@ use oximo_core::{
     explicit_soc_form, var_name,
 };
 use oximo_expr::{LinearTerms, VarId, describe_nonlinear_term, extract_linear, extract_quadratic};
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{
+    DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -470,7 +472,8 @@ pub(crate) fn read_result(
     meta: &Meta,
     elapsed: Duration,
 ) -> SolverResult {
-    let termination = map_status(solver.solution.status);
+    let native_status = solver.solution.status;
+    let termination = map_status(native_status);
     let has_point = termination.admits_primal();
 
     let mut solutions = Vec::new();
@@ -499,20 +502,26 @@ pub(crate) fn read_result(
         }
     }
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
+    let optimal = matches!(termination, TerminationStatus::Optimal);
+    let best_bound = optimal.then(|| solutions.first().and_then(|point| point.objective)).flatten();
 
     SolverResult {
         termination,
         primal_status,
+        dual_status: if has_point { DualStatus::FeasiblePoint } else { DualStatus::NoSolution },
         solutions,
         dual,
         soc_dual,
         reduced_costs: FxHashMap::default(),
-        best_bound: None,
-        gap: None,
+        best_bound,
+        gap: optimal.then_some(0.0),
         solve_time: elapsed,
         iterations: u64::from(solver.info.iterations),
+        node_count: None,
+        raw_status: Some(format!("{native_status:?}").into()),
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
+        solver_version: None,
     }
 }
 
@@ -629,7 +638,7 @@ fn reject_semi_domains(vars: &[Variable]) -> Result<(), SolverError> {
 fn map_status(s: SolverStatus) -> TerminationStatus {
     match s {
         SolverStatus::Solved => TerminationStatus::Optimal,
-        SolverStatus::AlmostSolved => TerminationStatus::Interrupted,
+        SolverStatus::AlmostSolved => TerminationStatus::Feasible,
         SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
             TerminationStatus::Infeasible
         }

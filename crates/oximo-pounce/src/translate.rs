@@ -6,7 +6,9 @@
 use std::time::{Duration, Instant};
 
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, SocConstraintId, VarId};
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{
+    DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+};
 use pounce_rs::ApplicationReturnStatus;
 use pounce_rs::pounce_common::options_list::OptionsList;
 use rustc_hash::FxHashMap;
@@ -50,6 +52,8 @@ pub(crate) struct WarmStart {
 /// (a `Maximize` model is posed as `min -f`) and [`assemble`] undoes the sign.
 pub(crate) struct Outcome {
     pub termination: TerminationStatus,
+    /// Native POUNCE/convex-route status label.
+    pub raw_status: String,
     pub x: Vec<f64>,
     pub lambda: Vec<f64>,
     /// Explicit second-order-cone bound multipliers in model order.
@@ -390,6 +394,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
     SolverResult {
         termination: o.termination,
         primal_status,
+        dual_status: if has_point { DualStatus::FeasiblePoint } else { DualStatus::NoSolution },
         solutions,
         dual,
         soc_dual,
@@ -398,8 +403,11 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
         gap: None,
         solve_time: elapsed,
         iterations: o.iterations,
+        node_count: None,
+        raw_status: Some(o.raw_status.into()),
         raw_log: o.raw_log,
         solver_name: Some("pounce".into()),
+        solver_version: None,
     }
 }
 
@@ -656,6 +664,7 @@ mod retry_tests {
     fn logged_outcome(log: &str) -> Outcome {
         Outcome {
             termination: TerminationStatus::Infeasible,
+            raw_status: "InfeasibleProblemDetected".into(),
             x: Vec::new(),
             lambda: Vec::new(),
             soc_dual: Vec::new(),

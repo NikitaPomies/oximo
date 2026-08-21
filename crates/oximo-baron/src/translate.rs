@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,7 +11,8 @@ use oximo_core::{
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
 use oximo_solver::{
-    Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus, VarBoundKind,
+    DualStatus, Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+    VarBoundKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -691,7 +693,8 @@ fn parse_solution(
     let model_status = tim_model_status(tim);
     let lower = float_at(5);
     let upper = float_at(6);
-    let iterations = int_at(10).and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
+    let node_count = int_at(10).and_then(|n| u64::try_from(n).ok());
+    let iterations = node_count.unwrap_or(0);
     let nodeopt = int_at(11);
 
     let termination = map_status(res, model_status);
@@ -748,11 +751,19 @@ fn parse_solution(
     // A point is only usable if it carries primal values.
     let has_usable_primal = solutions.iter().any(|s| !s.primal.is_empty());
     let primal_status = PrimalStatus::infer(&termination, has_usable_primal);
-    let best_bound = match sense {
+    let mut best_bound = match sense {
         ObjectiveSense::Minimize => lower,
         ObjectiveSense::Maximize => upper,
     };
-    let gap = relative_gap(lower, upper);
+    let mut gap = relative_gap(lower, upper);
+    if matches!(termination, TerminationStatus::Optimal) {
+        best_bound = best_bound.or(objective);
+        gap = gap.or(Some(0.0));
+    }
+    let raw_status = termination_banner(res)
+        .map_or_else(|| format!("model_status={model_status}"), str::to_owned);
+    let dual_available =
+        has_sol && res.to_ascii_lowercase().contains("corresponding dual solution");
 
     SolverResult {
         solutions,
@@ -761,12 +772,22 @@ fn parse_solution(
         reduced_costs,
         termination,
         primal_status,
+        dual_status: if dual_available {
+            DualStatus::FeasiblePoint
+        } else if has_sol {
+            DualStatus::Unknown
+        } else {
+            DualStatus::NoSolution
+        },
         best_bound,
         gap,
         solve_time: elapsed,
         iterations,
+        node_count,
+        raw_status: Some(raw_status.into()),
         raw_log,
         solver_name: Some(crate::NAME.into()),
+        solver_version: baron_version(res),
     }
 }
 
@@ -817,7 +838,7 @@ fn map_status(res: &str, model_status: i64) -> TerminationStatus {
         TerminationStatus::Feasible
     } else if has("insufficient memory") {
         // *** Insufficient Memory for Data structures ***
-        TerminationStatus::Other("baron_insufficient_memory".into())
+        TerminationStatus::MemoryLimit
     } else if has("appropriate variable bounds") {
         // *** User did not provide appropriate variable bounds ***, relaxation
         // bounds may be invalid, so neither globality nor infeasibility is
@@ -828,6 +849,39 @@ fn map_status(res: &str, model_status: i64) -> TerminationStatus {
         // The model status is the authoritative outcome.
         model_status_termination(model_status)
     }
+}
+
+fn termination_banner(res: &str) -> Option<&str> {
+    res.lines().map(str::trim).find(|line| {
+        if !line.starts_with("***") {
+            return false;
+        }
+        let lower = line.to_ascii_lowercase();
+        lower.contains("completion")
+            || lower.contains("termination")
+            || lower.contains("exceeded")
+            || lower.contains("interrupted")
+            || lower.contains("memory")
+    })
+}
+
+fn baron_version(res: &str) -> Option<Cow<'static, str>> {
+    for line in res.lines() {
+        let lower = line.to_ascii_lowercase();
+        let Some(position) = lower.find("baron version") else {
+            continue;
+        };
+        let version = line[position + "baron version".len()..]
+            .trim()
+            .trim_start_matches([':', '='])
+            .split_whitespace()
+            .next()?;
+        let version = version.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+        if !version.is_empty() {
+            return Some(version.to_owned().into());
+        }
+    }
+    None
 }
 
 /// Outcome implied by BARON's numeric model status, used on normal completion or
@@ -1498,6 +1552,10 @@ mod tests {
         );
         assert_eq!(map_status("*** Heuristic termination ***", 4), TerminationStatus::Feasible);
         assert_eq!(
+            map_status("*** Insufficient Memory for Data structures ***", 4),
+            TerminationStatus::MemoryLimit
+        );
+        assert_eq!(
             map_status("*** User did not provide appropriate variable bounds ***", 4),
             TerminationStatus::Other("baron_missing_bounds".into())
         );
@@ -1522,6 +1580,8 @@ mod tests {
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.objective(), Some(9.5)); // upper bound for minimize
         assert_eq!(r.iterations, 42); // branch-and-reduce iterations from tim[10]
+        assert_eq!(r.node_count, Some(42));
+        assert!(r.raw_status.as_deref().unwrap().contains("model_status=1"));
         let r = parse_solution(
             tim,
             "",

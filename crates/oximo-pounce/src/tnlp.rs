@@ -113,6 +113,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
     Ok(match &t.captured {
         Some(c) => Outcome {
             termination,
+            raw_status: format!("{status:?}"),
             x: c.warm.x.clone(),
             lambda: c.warm.lambda.clone(),
             soc_dual: Vec::new(),
@@ -124,6 +125,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
         },
         None => Outcome {
             termination,
+            raw_status: format!("{status:?}"),
             x: Vec::new(),
             lambda: Vec::new(),
             soc_dual: Vec::new(),

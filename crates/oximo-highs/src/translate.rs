@@ -12,7 +12,9 @@ use oximo_expr::LinearTerms;
 use oximo_expr::{
     ExprArena, ExprId, QuadraticTerms, describe_nonlinear_term, extract_linear, extract_quadratic,
 };
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{
+    DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::HighsOptions;
@@ -47,7 +49,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     let solved =
         live.try_solve().map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
     let elapsed = started.elapsed();
-    Ok(extract_result(&solved, meta.obj_constant, meta.num_constraints, elapsed))
+    Ok(extract_result(&solved, meta.kind, meta.obj_constant, meta.num_constraints, elapsed))
 }
 
 /// The HiGHS [`RowProblem`] plus the inputs needed to build and configure a live
@@ -68,6 +70,7 @@ pub(crate) struct Prob {
 /// duals. The incremental fast path's snapshot/fingerprint lives in
 /// [`oximo_solver::snapshot`], shared across backends.
 pub(crate) struct Meta {
+    pub kind: ModelKind,
     pub cols: Vec<highs::Col>,
     pub obj_constant: f64,
     pub num_constraints: usize,
@@ -145,7 +148,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
 
     Ok((
         Prob { pb, sense, hessian_cols, has_hessian, has_initial, init_vals },
-        Meta { cols, obj_constant, num_constraints },
+        Meta { kind, cols, obj_constant, num_constraints },
     ))
 }
 
@@ -183,11 +186,13 @@ pub(crate) fn make_live(prob: Prob, opts: &HighsOptions) -> Result<HighsModel, S
 /// back onto HiGHS' objective value.
 pub(crate) fn extract_result(
     solved: &highs::SolvedModel,
+    kind: ModelKind,
     obj_constant: f64,
     num_constraints: usize,
     elapsed: Duration,
 ) -> SolverResult {
-    let termination = map_status(solved.status());
+    let native_status = solved.status();
+    let termination = map_status(native_status);
     let has_point = solved.primal_solution_status() == HighsSolutionStatus::Feasible;
     let solution = solved.get_solution();
     let (primal, reduced_costs, dual) = collect_solution(
@@ -207,12 +212,30 @@ pub(crate) fn extract_result(
         Vec::new()
     };
     let primal_status = PrimalStatus::infer(&termination, has_point);
+    let mixed_integer = matches!(kind, ModelKind::MILP);
     let raw_gap = solved.mip_gap();
-    let gap = raw_gap.is_finite().then_some(raw_gap);
-    let best_bound = solved.double_info_value(c"mip_dual_bound").ok().filter(|b| b.is_finite());
+    let mut gap = mixed_integer.then_some(raw_gap).filter(|value| value.is_finite());
+    let mut best_bound = mixed_integer
+        .then(|| solved.double_info_value(c"mip_dual_bound").ok())
+        .flatten()
+        .filter(|value| value.is_finite());
+    if matches!(termination, TerminationStatus::Optimal) {
+        best_bound = best_bound.or(objective_value);
+        gap = gap.or(Some(0.0));
+    }
+    let dual_status = match solved.int_info_value(c"dual_solution_status") {
+        Ok(status) if status == HighsSolutionStatus::Feasible as i64 => DualStatus::FeasiblePoint,
+        Ok(_) => DualStatus::NoSolution,
+        Err(_) => DualStatus::Unknown,
+    };
+    let node_count = mixed_integer
+        .then(|| solved.int_info_value(c"mip_node_count").ok())
+        .flatten()
+        .and_then(|count| u64::try_from(count).ok());
     SolverResult {
         termination,
         primal_status,
+        dual_status,
         solutions,
         dual,
         soc_dual: FxHashMap::default(),
@@ -221,8 +244,11 @@ pub(crate) fn extract_result(
         gap,
         solve_time: elapsed,
         iterations: total_iterations(solved),
+        node_count,
+        raw_status: Some(format!("{native_status:?}").into()),
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
+        solver_version: None,
     }
 }
 
@@ -346,8 +372,11 @@ fn map_status(s: HighsModelStatus) -> TerminationStatus {
         HighsModelStatus::ReachedTimeLimit => TerminationStatus::TimeLimit,
         HighsModelStatus::ReachedIterationLimit => TerminationStatus::IterationLimit,
         HighsModelStatus::ObjectiveBound | HighsModelStatus::ObjectiveTarget => {
-            TerminationStatus::Interrupted
+            TerminationStatus::ObjectiveLimit
         }
+        HighsModelStatus::ReachedSolutionLimit => TerminationStatus::SolutionLimit,
+        HighsModelStatus::ReachedInterrupt => TerminationStatus::Interrupted,
+        HighsModelStatus::ReachedMemoryLimit => TerminationStatus::MemoryLimit,
         HighsModelStatus::ModelEmpty => TerminationStatus::Other("model_empty".into()),
         HighsModelStatus::NotSet | HighsModelStatus::Unknown => TerminationStatus::NotSolved,
         HighsModelStatus::LoadError
@@ -356,6 +385,28 @@ fn map_status(s: HighsModelStatus) -> TerminationStatus {
         | HighsModelStatus::SolveError
         | HighsModelStatus::PostsolveError => TerminationStatus::NumericError,
         _ => TerminationStatus::Other("unknown_highs_status".into()),
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn native_limits_keep_distinct_termination_reasons() {
+        assert_eq!(
+            map_status(HighsModelStatus::ObjectiveTarget),
+            TerminationStatus::ObjectiveLimit
+        );
+        assert_eq!(
+            map_status(HighsModelStatus::ReachedSolutionLimit),
+            TerminationStatus::SolutionLimit
+        );
+        assert_eq!(
+            map_status(HighsModelStatus::ReachedMemoryLimit),
+            TerminationStatus::MemoryLimit
+        );
+        assert_eq!(map_status(HighsModelStatus::ReachedInterrupt), TerminationStatus::Interrupted);
     }
 }
 

@@ -9,7 +9,9 @@ use oximo_core::{
     explicit_soc_form,
 };
 use oximo_expr::{LinearTerms, QuadraticTerms, VarId, extract_quadratic};
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{
+    DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+};
 use rustc_hash::FxHashMap;
 
 use crate::MosekOptions;
@@ -382,19 +384,39 @@ fn extract_result(
         }
     }
 
-    let best_bound = mixed_integer
+    let mut best_bound = mixed_integer
         .then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_BOUND).ok())
         .flatten()
         .filter(|value| value.is_finite());
-    let gap = mixed_integer
+    let mut gap = mixed_integer
         .then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_REL_GAP).ok())
         .flatten()
         .filter(|value| value.is_finite());
+    if matches!(termination, TerminationStatus::Optimal) {
+        best_bound = best_bound.or_else(|| solutions.first().and_then(|point| point.objective));
+        gap = gap.or(Some(0.0));
+    }
     let iterations = iteration_count(task, mixed_integer);
+    let node_count = mixed_integer
+        .then(|| task.get_int_inf(Iinfitem::MIO_NUM_BRANCH).ok())
+        .flatten()
+        .and_then(|count| u64::try_from(count).ok());
+    let dual_status = if has_point && !mixed_integer {
+        DualStatus::FeasiblePoint
+    } else {
+        DualStatus::NoSolution
+    };
+    let mut major = 0;
+    let mut minor = 0;
+    let mut revision = 0;
+    let solver_version = mosek::get_version(&mut major, &mut minor, &mut revision)
+        .ok()
+        .map(|()| format!("{major}.{minor}.{revision}").into());
     let primal_status = PrimalStatus::infer(&termination, has_point);
     Ok(SolverResult {
         termination,
         primal_status,
+        dual_status,
         solutions,
         dual,
         soc_dual,
@@ -403,8 +425,14 @@ fn extract_result(
         gap,
         solve_time: elapsed,
         iterations,
+        node_count,
+        raw_status: Some(
+            format!("solution={solution_status}, problem={problem_status}, termination={trm}")
+                .into(),
+        ),
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
+        solver_version,
     })
 }
 
@@ -494,6 +522,10 @@ fn map_status(solution: i32, problem: i32, trm: i32) -> TerminationStatus {
         Rescode::TRM_MAX_TIME | Rescode::TRM_SERVER_MAX_TIME => TerminationStatus::TimeLimit,
         Rescode::TRM_MAX_ITERATIONS => TerminationStatus::IterationLimit,
         Rescode::TRM_MIO_NUM_BRANCHES => TerminationStatus::NodeLimit,
+        Rescode::TRM_MIO_NUM_RELAXS => TerminationStatus::WorkLimit,
+        Rescode::TRM_NUM_MAX_NUM_INT_SOLUTIONS => TerminationStatus::SolutionLimit,
+        Rescode::TRM_OBJECTIVE_RANGE => TerminationStatus::ObjectiveLimit,
+        Rescode::TRM_SERVER_MAX_MEMORY => TerminationStatus::MemoryLimit,
         Rescode::TRM_USER_CALLBACK | Rescode::TRM_LOST_RACE => TerminationStatus::Interrupted,
         Rescode::TRM_NUMERICAL_PROBLEM | Rescode::TRM_STALL => TerminationStatus::NumericError,
         _ if matches!(solution, Solsta::PRIM_FEAS | Solsta::PRIM_AND_DUAL_FEAS) => {
@@ -642,6 +674,18 @@ mod tests {
         assert_eq!(
             map_status(Solsta::PRIM_FEAS, Prosta::UNKNOWN, Rescode::TRM_MIO_NUM_BRANCHES),
             TerminationStatus::NodeLimit
+        );
+        assert_eq!(
+            map_status(Solsta::PRIM_FEAS, Prosta::UNKNOWN, Rescode::TRM_MIO_NUM_RELAXS),
+            TerminationStatus::WorkLimit
+        );
+        assert_eq!(
+            map_status(Solsta::PRIM_FEAS, Prosta::UNKNOWN, Rescode::TRM_NUM_MAX_NUM_INT_SOLUTIONS),
+            TerminationStatus::SolutionLimit
+        );
+        assert_eq!(
+            map_status(Solsta::PRIM_FEAS, Prosta::UNKNOWN, Rescode::TRM_SERVER_MAX_MEMORY),
+            TerminationStatus::MemoryLimit
         );
         assert_eq!(
             map_status(Solsta::UNKNOWN, Prosta::UNKNOWN, Rescode::TRM_USER_CALLBACK),

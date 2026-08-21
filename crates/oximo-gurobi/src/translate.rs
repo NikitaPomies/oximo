@@ -9,7 +9,8 @@ use oximo_core::{
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term, extract_linear};
 use oximo_solver::{
-    Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus, VarBoundKind,
+    DualStatus, Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
+    VarBoundKind,
 };
 use rustc_hash::FxHashMap;
 
@@ -170,10 +171,11 @@ fn collect_after_optimize(
     kind: ModelKind,
     elapsed: std::time::Duration,
 ) -> Result<SolverResult, SolverError> {
-    let termination = map_status(&built.model)?;
+    let native_status = built.model.get_attr(attr::Status).map_err(map_gurobi_err)?;
+    let termination = map_status(native_status);
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let iterations = built.model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
-    let (solutions, reduced_costs, dual, soc_dual) = collect_solution(
+    let (solutions, reduced_costs, dual, soc_dual, dual_available) = collect_solution(
         kind,
         &mut built.model,
         &built.vars,
@@ -183,12 +185,33 @@ fn collect_after_optimize(
     );
 
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
-    let best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
-    let gap = built.model.get_attr(attr::MIPGap).ok().filter(|g| g.is_finite());
+    let mut best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
+    let mut gap = built.model.get_attr(attr::MIPGap).ok().filter(|g| g.is_finite());
+    if matches!(termination, TerminationStatus::Optimal) {
+        best_bound = best_bound.or_else(|| solutions.first().and_then(|point| point.objective));
+        gap = gap.or(Some(0.0));
+    }
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let node_count = matches!(
+        kind,
+        ModelKind::MILP | ModelKind::MIQP | ModelKind::MIQCP | ModelKind::MISOCP | ModelKind::MINLP
+    )
+    .then(|| built.model.get_attr(attr::NodeCount).ok())
+    .flatten()
+    .filter(|count| count.is_finite() && *count >= 0.0)
+    .map(|count| count as u64);
+    let (major, minor, technical) = gurobi_rs::version();
 
     Ok(SolverResult {
         termination,
         primal_status,
+        dual_status: if dual_available {
+            DualStatus::FeasiblePoint
+        } else if solutions.is_empty() {
+            DualStatus::NoSolution
+        } else {
+            DualStatus::Unknown
+        },
         solutions,
         dual,
         soc_dual,
@@ -197,8 +220,11 @@ fn collect_after_optimize(
         gap,
         solve_time: elapsed,
         iterations,
+        node_count,
+        raw_status: Some(format!("{native_status:?}").into()),
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
+        solver_version: Some(format!("{major}.{minor}.{technical}").into()),
     })
 }
 
@@ -259,7 +285,7 @@ pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverErr
 ///
 /// Panics if a constraint, SOC, or variable index overflows `u32`.
 pub(crate) fn compute_iis_resident(built: &mut Built) -> Result<Iis, SolverError> {
-    let mut termination = map_status(&built.model)?;
+    let mut termination = map_status(built.model.get_attr(attr::Status).map_err(map_gurobi_err)?);
     if matches!(termination, TerminationStatus::InfeasibleOrUnbounded) {
         // Dual reductions can leave "infeasible or unbounded". Turn them off just
         // for a disambiguating re-optimize, then restore the saved value so the
@@ -269,7 +295,7 @@ pub(crate) fn compute_iis_resident(built: &mut Built) -> Result<Iis, SolverError
         built.model.set_param(gurobi_rs::param::DualReductions, 0).map_err(map_gurobi_err)?;
         let outcome = (|| {
             built.model.optimize().map_err(map_gurobi_err)?;
-            map_status(&built.model)
+            built.model.get_attr(attr::Status).map(map_status).map_err(map_gurobi_err)
         })();
         built.model.set_param(gurobi_rs::param::DualReductions, saved).map_err(map_gurobi_err)?;
         termination = outcome?;
@@ -748,6 +774,7 @@ type Collected = (
     FxHashMap<VarId, f64>,
     FxHashMap<ConstraintId, f64>,
     FxHashMap<SocConstraintId, f64>,
+    bool,
 );
 
 fn collect_solution(
@@ -763,7 +790,13 @@ fn collect_solution(
     // kept at a time/iteration/node limit.
     let sol_count = model.get_attr(attr::SolCount).unwrap_or(0);
     if sol_count <= 0 {
-        return (Vec::new(), FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
+        return (
+            Vec::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+            false,
+        );
     }
 
     let solutions = collect_pool(model, vars, obj_constant, sol_count);
@@ -773,13 +806,18 @@ fn collect_solution(
     // LP/QP always have duals, QCP/SOCP rows only when the user opted into
     // `QCPDual=1`.
     if !matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP) {
-        return (solutions, FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
+        return (
+            solutions,
+            FxHashMap::default(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+            false,
+        );
     }
 
-    let reduced_costs = model
-        .get_obj_attr_batch(attr::RC, vars.iter().copied())
-        .map(|v| index_map(&v))
-        .unwrap_or_default();
+    let reduced_cost_values = model.get_obj_attr_batch(attr::RC, vars.iter().copied());
+    let mut dual_available = reduced_cost_values.is_ok();
+    let reduced_costs = reduced_cost_values.map(|v| index_map(&v)).unwrap_or_default();
 
     let mut dual = FxHashMap::default();
     dual.reserve(constrs.len());
@@ -794,6 +832,7 @@ fn collect_solution(
             if let Ok(pi) = pi {
                 value += pi;
                 available = true;
+                dual_available = true;
             }
         }
         if available {
@@ -822,7 +861,7 @@ fn collect_solution(
         }
     }
 
-    (solutions, reduced_costs, dual, soc_dual)
+    (solutions, reduced_costs, dual, soc_dual, dual_available)
 }
 
 /// Collect the `n` pooled primal points, best first.
@@ -880,9 +919,8 @@ fn index_map(vals: &[f64]) -> FxHashMap<VarId, f64> {
     map
 }
 
-fn map_status(model: &gurobi_rs::Model) -> Result<TerminationStatus, SolverError> {
-    let status = model.get_attr(attr::Status).map_err(map_gurobi_err)?;
-    Ok(match status {
+fn map_status(status: Status) -> TerminationStatus {
+    match status {
         Status::Optimal => TerminationStatus::Optimal,
         Status::Infeasible => TerminationStatus::Infeasible,
         Status::Unbounded => TerminationStatus::Unbounded,
@@ -891,19 +929,33 @@ fn map_status(model: &gurobi_rs::Model) -> Result<TerminationStatus, SolverError
         Status::TimeLimit => TerminationStatus::TimeLimit,
         Status::IterationLimit => TerminationStatus::IterationLimit,
         Status::NodeLimit => TerminationStatus::NodeLimit,
-        Status::Interrupted
-        | Status::CutOff
-        | Status::SolutionLimit
-        | Status::UserObjLimit
-        | Status::WorkLimit
-        | Status::MemLimit => TerminationStatus::Interrupted,
+        Status::Interrupted => TerminationStatus::Interrupted,
+        Status::CutOff | Status::UserObjLimit => TerminationStatus::ObjectiveLimit,
+        Status::SolutionLimit => TerminationStatus::SolutionLimit,
+        Status::WorkLimit => TerminationStatus::WorkLimit,
+        Status::MemLimit => TerminationStatus::MemoryLimit,
         Status::LocallyOptimal => TerminationStatus::LocallyOptimal,
-        Status::LocallyInfeasible => TerminationStatus::Other("LocallyInfeasible".into()),
+        Status::LocallyInfeasible => TerminationStatus::LocallyInfeasible,
         // Gurobi could not meet optimality tolerances but holds a feasible point.
         Status::SubOptimal => TerminationStatus::Feasible,
         Status::Loaded => TerminationStatus::NotSolved,
         Status::InProgress => TerminationStatus::Other("Status: InProgress".into()),
-    })
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn native_limits_keep_distinct_termination_reasons() {
+        assert_eq!(map_status(Status::UserObjLimit), TerminationStatus::ObjectiveLimit);
+        assert_eq!(map_status(Status::SolutionLimit), TerminationStatus::SolutionLimit);
+        assert_eq!(map_status(Status::WorkLimit), TerminationStatus::WorkLimit);
+        assert_eq!(map_status(Status::MemLimit), TerminationStatus::MemoryLimit);
+        assert_eq!(map_status(Status::LocallyInfeasible), TerminationStatus::LocallyInfeasible);
+        assert_eq!(map_status(Status::Interrupted), TerminationStatus::Interrupted);
+    }
 }
 
 #[cfg(feature = "benchmark-support")]

@@ -181,6 +181,7 @@ fn run_builder(
     });
     Ok(Outcome {
         termination,
+        raw_status: format!("{:?}", sol.status),
         x: sol.x,
         lambda: sol.multipliers,
         soc_dual: Vec::new(),
