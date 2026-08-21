@@ -402,11 +402,13 @@ fn parseoximo_solution(
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
     let mut gap = match (obj_val, best_bound) {
         (Some(objective), Some(bound)) if objective.is_finite() && bound.is_finite() => {
-            Some((objective - bound).abs() / (objective.abs().max(bound.abs()) + 1e-10))
+            let scale = objective.abs().max(bound.abs()) + 1e-10;
+            let gap = (objective / scale - bound / scale).abs();
+            gap.is_finite().then_some(gap)
         }
         _ => None,
     };
-    if matches!(termination, TerminationStatus::Optimal) {
+    if modelstat == 1 && solvestat == 1 {
         best_bound = best_bound.or(obj_val);
         gap = Some(0.0);
     }
@@ -1294,6 +1296,26 @@ mod tests {
         assert_eq!(r.dual_status, DualStatus::FeasiblePoint);
         assert_eq!(r.solver_version.as_deref(), Some("13.0.1"));
         assert!(r.raw_status.as_deref().unwrap().contains("solvestat=3 (resource limit)"));
+    }
+
+    #[test]
+    fn integer_solution_status_keeps_reported_gap() {
+        let content = "STATUS=8\nSOLVESTAT=1\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
+        let r = parseoximo_solution(content, &[], true, std::time::Duration::ZERO, None);
+        assert_eq!(r.termination, TerminationStatus::Optimal);
+        assert_eq!(r.best_bound, Some(8.0));
+        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extreme_objective_bound_gap_does_not_overflow() {
+        let content =
+            format!("STATUS=8\nSOLVESTAT=3\nOBJVAL={}\nOBJEST={}\n0=2.5\n", f64::MAX, -f64::MAX);
+        let r = parseoximo_solution(&content, &[], true, std::time::Duration::ZERO, None);
+        assert_eq!(r.best_bound, Some(-f64::MAX));
+        let gap = r.gap.expect("finite extreme gap");
+        assert!(gap.is_finite());
+        assert!((gap - 2.0).abs() < 1e-12);
     }
 
     #[test]
