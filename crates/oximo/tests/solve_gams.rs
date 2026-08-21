@@ -34,6 +34,11 @@ fn gams_lp_canonical() {
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective());
     assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-4);
     assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-4);
+    assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
+    assert_eq!(result.best_bound, result.objective());
+    assert_eq!(result.gap, Some(0.0));
+    assert!(result.raw_status.as_deref().is_some_and(|status| status.contains("modelstat=1")));
+    assert!(result.solver_version.as_deref().is_some_and(|version| !version.is_empty()));
 }
 
 #[test]

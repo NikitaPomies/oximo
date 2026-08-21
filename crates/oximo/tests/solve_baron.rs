@@ -29,6 +29,8 @@ fn baron_enumerates_multiple_solutions() {
     let r = Baron::new().solve(&m, &opts).unwrap();
     assert_eq!(r.termination, TerminationStatus::Optimal);
     assert!(r.result_count() > 1, "expected multiple solutions, got {}", r.result_count());
+    assert!(r.node_count.is_some());
+    assert!(r.raw_status.as_deref().is_some_and(|status| status.contains("completion")));
 
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-4, "best obj={:?}", r.objective());
     for s in &r.solutions {
