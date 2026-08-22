@@ -9,7 +9,9 @@ use quote::quote;
 use syn::Expr;
 
 use crate::bind::{family_closure_param, filtered_set};
-use crate::{Named, RelOp, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas};
+use crate::{
+    Named, RelOp, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas,
+};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let parts = split_top_commas(input);

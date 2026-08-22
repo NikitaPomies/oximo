@@ -210,10 +210,7 @@ fn parse_named(seg: TokenStream2) -> syn::Result<Named> {
         }
     };
     if let Some(extra) = tts.get(2) {
-        return Err(syn::Error::new(
-            extra.span(),
-            "unexpected tokens after the index bindings",
-        ));
+        return Err(syn::Error::new(extra.span(), "unexpected tokens after the index bindings"));
     }
     Ok(Named { name, binds, cond })
 }
