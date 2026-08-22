@@ -214,17 +214,16 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
 }
 
 /// Recognize a trailing `kw = value` keyword segment, returning the keyword ident
-/// and the value tokens. A segment is a keyword iff it starts with one of the known
-/// keyword idents followed by a lone `=` (so `==`/`<=`/`>=` are not mistaken for
-/// it). Anything else (a bare domain token, `SemiCont(thr)`) returns `None`.
+/// and the value tokens. A segment is a keyword iff it starts with an identifier
+/// followed by a lone `=` (so `==`/`<=`/`>=` are not mistaken for it). Whether
+/// `kw` is a known keyword is decided by the caller's slot match, whose fallback
+/// reports invalid keywords. Anything that is not an `ident = value` pair (a bare
+/// domain token, `SemiCont(thr)`) returns `None`.
 fn parse_keyword(seg: &TokenStream2) -> Option<(proc_macro2::Ident, TokenStream2)> {
     let tts: Vec<TokenTree> = seg.clone().into_iter().collect();
     let TokenTree::Ident(kw) = tts.first()? else {
         return None;
     };
-    if !matches!(kw.to_string().as_str(), "lb" | "ub" | "domain" | "initial" | "init" | "fix") {
-        return None;
-    }
     match tts.get(1)? {
         TokenTree::Punct(p) if p.as_char() == '=' && p.spacing() == Spacing::Alone => {}
         _ => return None,
