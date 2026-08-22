@@ -9,12 +9,14 @@ use syn::Expr;
 
 use crate::bind::{family_closure_param, filtered_set};
 use crate::constraint::computed_name;
-use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, split_top_commas};
+use crate::{Named, RelOp, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let parts = split_top_commas(input);
     let mut parts = parts.into_iter();
-    let model = parts.next().expect("split always yields at least one segment");
+    let model = parts.next().ok_or_else(|| {
+        syn::Error::new(Span::call_site(), "soc_constraint! needs a model expression")
+    })?;
     let model: Expr = syn::parse2(model)?;
 
     let first = parts.next().ok_or_else(|| {
@@ -53,7 +55,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                 )),
                 Some(binds) => {
                     let param = family_closure_param(&binds);
-                    let set = build_set(&binds, &root);
+                    let set = build_set(&binds, &root)?;
                     let set = filtered_set(set, &binds, cond.as_ref(), &root);
                     Ok(quote! {
                         (#model).__add_soc_constraints_over(
@@ -76,7 +78,7 @@ fn parse_relation(tokens: TokenStream2) -> syn::Result<(Vec<Expr>, Expr)> {
     let (lhs, rhs) = match (segs.len(), ops.as_slice()) {
         (2, [RelOp::Le]) => {
             let mut segs = segs.into_iter();
-            (segs.next().unwrap(), segs.next().unwrap())
+            (next_seg(&mut segs)?, next_seg(&mut segs)?)
         }
         _ => return Err(syn::Error::new(Span::call_site(), SHAPE)),
     };

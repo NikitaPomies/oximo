@@ -20,7 +20,9 @@ use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, spli
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut parts = split_top_commas(input).into_iter();
-    let model = parts.next().expect("split always yields at least one segment");
+    let model = parts.next().ok_or_else(|| {
+        syn::Error::new(proc_macro2::Span::call_site(), "variable! needs a model expression")
+    })?;
     let model: syn::Expr = syn::parse2(model)?;
 
     let spec = parts.next().ok_or_else(|| {
@@ -125,7 +127,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             let #name = (#model).__var(#name_str) #domain_method #bounds #extras .build();
         },
         Some(binds) => {
-            let set = build_set(&binds, &root);
+            let set = build_set(&binds, &root)?;
             let set = filtered_set(set, &binds, cond.as_ref(), &root);
             quote! {
                 let #name = {
@@ -181,7 +183,12 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
                 "domain" => &mut kw_domain,
                 "initial" | "init" => &mut initial,
                 "fix" => &mut fix,
-                _ => unreachable!("parse_keyword only returns known keywords"),
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &kw,
+                        format!("`{kw}` is not a valid variable! keyword"),
+                    ));
+                }
             };
             if slot.is_some() {
                 return Err(syn::Error::new_spanned(&kw, format!("`{kw}` specified twice")));

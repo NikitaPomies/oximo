@@ -49,14 +49,27 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                 "set comprehension needs at least one `pat in domain`",
             ));
         }
-        let built = build_set(&binds.binds, &root);
+        let built = build_set(&binds.binds, &root)?;
         filtered_set(built, &binds.binds, binds.cond.as_ref(), &root)
     } else {
         // Plain expression: a top-level `*` is a Cartesian product.
-        let mut iter = split_top_mul(rhs)
+        let operands = split_top_mul(rhs)
             .into_iter()
-            .map(|seg| quote!( #root::__macro_support::as_set(&(#seg)) ));
-        let first = iter.next().expect("non-empty rhs yields at least one operand");
+            .map(|seg| {
+                if seg.is_empty() {
+                    Err(syn::Error::new(
+                        name.span(),
+                        "`*` product needs a set expression on both sides",
+                    ))
+                } else {
+                    Ok(quote!( #root::__macro_support::as_set(&(#seg)) ))
+                }
+            })
+            .collect::<syn::Result<Vec<_>>>()?;
+        let mut iter = operands.into_iter();
+        let Some(first) = iter.next() else {
+            return Err(syn::Error::new(name.span(), "expected a set expression after `=`"));
+        };
         iter.fold(first, |acc, seg| quote!( #root::__macro_support::product(&(#acc), &(#seg)) ))
     };
 
