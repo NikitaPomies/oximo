@@ -20,7 +20,9 @@ use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, spli
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut parts = split_top_commas(input).into_iter();
-    let model = parts.next().expect("split always yields at least one segment");
+    let model = parts.next().ok_or_else(|| {
+        syn::Error::new(proc_macro2::Span::call_site(), "variable! needs a model expression")
+    })?;
     let model: syn::Expr = syn::parse2(model)?;
 
     let spec = parts.next().ok_or_else(|| {
@@ -125,7 +127,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             let #name = (#model).__var(#name_str) #domain_method #bounds #extras .build();
         },
         Some(binds) => {
-            let set = build_set(&binds, &root);
+            let set = build_set(&binds, &root)?;
             let set = filtered_set(set, &binds, cond.as_ref(), &root);
             quote! {
                 let #name = {
@@ -181,7 +183,12 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
                 "domain" => &mut kw_domain,
                 "initial" | "init" => &mut initial,
                 "fix" => &mut fix,
-                _ => unreachable!("parse_keyword only returns known keywords"),
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &kw,
+                        format!("`{kw}` is not a valid variable! keyword"),
+                    ));
+                }
             };
             if slot.is_some() {
                 return Err(syn::Error::new_spanned(&kw, format!("`{kw}` specified twice")));
@@ -207,17 +214,16 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
 }
 
 /// Recognize a trailing `kw = value` keyword segment, returning the keyword ident
-/// and the value tokens. A segment is a keyword iff it starts with one of the known
-/// keyword idents followed by a lone `=` (so `==`/`<=`/`>=` are not mistaken for
-/// it). Anything else (a bare domain token, `SemiCont(thr)`) returns `None`.
+/// and the value tokens. A segment is a keyword iff it starts with an identifier
+/// followed by a lone `=` (so `==`/`<=`/`>=` are not mistaken for it). Whether
+/// `kw` is a known keyword is decided by the caller's slot match, whose fallback
+/// reports invalid keywords. Anything that is not an `ident = value` pair (a bare
+/// domain token, `SemiCont(thr)`) returns `None`.
 fn parse_keyword(seg: &TokenStream2) -> Option<(proc_macro2::Ident, TokenStream2)> {
     let tts: Vec<TokenTree> = seg.clone().into_iter().collect();
     let TokenTree::Ident(kw) = tts.first()? else {
         return None;
     };
-    if !matches!(kw.to_string().as_str(), "lb" | "ub" | "domain" | "initial" | "init" | "fix") {
-        return None;
-    }
     match tts.get(1)? {
         TokenTree::Punct(p) if p.as_char() == '=' && p.spacing() == Spacing::Alone => {}
         _ => return None,

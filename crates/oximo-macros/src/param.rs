@@ -38,7 +38,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             let root = oximo_root();
             let value = crate::index::rewrite_index_subscripts(value_ts);
             let param = masked_closure_param(&binds, &value);
-            let set = build_set(&binds, &root);
+            let set = build_set(&binds, &root)?;
             let set = filtered_set(set, &binds, cond.as_ref(), &root);
             Ok(quote! {
                 let #name = {

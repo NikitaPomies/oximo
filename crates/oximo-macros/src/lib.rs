@@ -209,15 +209,34 @@ fn parse_named(seg: TokenStream2) -> syn::Result<Named> {
             return Err(syn::Error::new(other.span(), "expected `[index in domain, ...]`"));
         }
     };
+    if let Some(extra) = tts.get(2) {
+        return Err(syn::Error::new(extra.span(), "unexpected tokens after the index bindings"));
+    }
     Ok(Named { name, binds, cond })
 }
 
 /// Build an owned `Set` token expression from one or more index bindings.
-fn build_set(binds: &[IndexBind], root: &TokenStream2) -> TokenStream2 {
-    let mut iter = binds.iter().map(|b| {
+fn build_set(binds: &[IndexBind], root: &TokenStream2) -> syn::Result<TokenStream2> {
+    let Some((first, rest)) = binds.split_first() else {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "an index family needs at least one binding",
+        ));
+    };
+    let dom = &first.domain;
+    let acc = quote!(#root::__macro_support::as_set(&(#dom)));
+    Ok(rest.iter().fold(acc, |set, b| {
         let dom = &b.domain;
-        quote!(#root::__macro_support::as_set(&(#dom)))
-    });
-    let first = iter.next().expect("at least one index binding");
-    iter.fold(first, |acc, s| quote!(#root::__macro_support::product(&(#acc), &(#s))))
+        quote!(#root::__macro_support::product(
+            &(#set),
+            &(#root::__macro_support::as_set(&(#dom))),
+        ))
+    }))
+}
+
+/// Take the next operand segment of a relation.
+fn next_seg(segs: &mut std::vec::IntoIter<TokenStream2>) -> syn::Result<TokenStream2> {
+    segs.next().ok_or_else(|| {
+        syn::Error::new(proc_macro2::Span::call_site(), "malformed relation: missing an operand")
+    })
 }

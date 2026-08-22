@@ -9,12 +9,16 @@ use quote::quote;
 use syn::Expr;
 
 use crate::bind::{family_closure_param, filtered_set};
-use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, split_top_commas};
+use crate::{
+    Named, RelOp, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas,
+};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let parts = split_top_commas(input);
     let mut parts = parts.into_iter();
-    let model = parts.next().expect("split always yields at least one segment");
+    let model = parts.next().ok_or_else(|| {
+        syn::Error::new(Span::call_site(), "constraint! needs a model expression")
+    })?;
     let model: Expr = syn::parse2(model)?;
 
     let first = parts.next().ok_or_else(|| {
@@ -43,7 +47,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                 None => Ok(register_named(&model, &name_str, rel)),
                 Some(binds) => {
                     let param = family_closure_param(&binds);
-                    let set = build_set(&binds, &root);
+                    let set = build_set(&binds, &root)?;
                     let set = filtered_set(set, &binds, cond.as_ref(), &root);
                     Ok(register_family(&model, &name_str, &set, &param, rel))
                 }
@@ -90,15 +94,15 @@ fn build_relations(tokens: TokenStream2, root: &TokenStream2) -> syn::Result<Rel
         (2, [op]) => {
             let method = op.method();
             let mut segs = segs.into_iter();
-            let lhs = parse_seg(segs.next().unwrap())?;
-            let rhs = parse_seg(segs.next().unwrap())?;
+            let lhs = parse_seg(next_seg(&mut segs)?)?;
+            let rhs = parse_seg(next_seg(&mut segs)?)?;
             Ok(Relations::Single(quote!( #root::__macro_support::Relate::#method(#lhs, #rhs) )))
         }
         (3, [a, b]) => {
             let mut segs = segs.into_iter();
-            let s0 = parse_seg(segs.next().unwrap())?;
-            let mid = parse_seg(segs.next().unwrap())?;
-            let s2 = parse_seg(segs.next().unwrap())?;
+            let s0 = parse_seg(next_seg(&mut segs)?)?;
+            let mid = parse_seg(next_seg(&mut segs)?)?;
+            let s2 = parse_seg(next_seg(&mut segs)?)?;
             match (a, b) {
                 // lo <= mid <= hi
                 (RelOp::Le, RelOp::Le) => Ok(Relations::Range { mid, lo: s0, hi: s2 }),
