@@ -117,7 +117,7 @@ impl ModelConstraints<'_> {
 /// Variables, constraints, and the objective are added through
 /// `RefCell`s under the hood.
 pub struct Model {
-    pub name: String,
+    pub name: SmolStr,
     pub(crate) arena: RefCell<ExprArena>,
     pub(crate) variables: RefCell<Vec<Variable>>,
     pub(crate) var_names: RefCell<FxHashMap<SmolStr, VarId>>,
@@ -150,7 +150,7 @@ impl std::fmt::Debug for Model {
 }
 
 impl Model {
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<SmolStr>) -> Self {
         Self {
             name: name.into(),
             arena: RefCell::new(ExprArena::new()),
