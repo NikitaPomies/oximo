@@ -15,4 +15,4 @@ const module = await WebAssembly.compile(await readFile(wasmPath));
 const instance = await WebAssembly.instantiate(module, {
   wasi_snapshot_preview1: wasi.wasiImport,
 });
-wasi.start(instance);
+process.exitCode = wasi.start(instance);
