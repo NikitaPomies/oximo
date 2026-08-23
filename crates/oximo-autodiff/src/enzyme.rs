@@ -211,16 +211,16 @@ pub fn grad_eval_tape(
     dregs: &mut [f64],
     out: &mut [f64],
     dout: &mut [f64],
+    seed: &mut [f64],
     grad_out: &mut [f64],
 ) {
-    let mut seed = vec![0.0; x.len()];
+    seed.fill(0.0);
     for i in 0..x.len() {
         seed[i] = 1.0;
         dregs.fill(0.0);
         dout[0] = 0.0;
         jvp_eval_tape(
-            ops, a, b, consts, lin_vars, lin_coeffs, x, &seed, params, mults, regs, dregs, out,
-            dout,
+            ops, a, b, consts, lin_vars, lin_coeffs, x, seed, params, mults, regs, dregs, out, dout,
         );
         grad_out[i] = dout[0];
         seed[i] = 0.0;
@@ -229,6 +229,7 @@ pub fn grad_eval_tape(
 
 /// Compute the dense gradient of `tape` at `x` into `grad_out` (overwritten).
 /// `regs`/`dregs` are scratch of length [`Tape::n_regs`].
+/// `seed` is caller-owned scratch of length `x.len()`.
 pub(crate) fn tape_gradient(
     tape: &Tape,
     x: &[f64],
@@ -236,15 +237,25 @@ pub(crate) fn tape_gradient(
     mults: &[f64],
     regs: &mut [f64],
     dregs: &mut [f64],
+    seed: &mut [f64],
     grad_out: &mut [f64],
 ) {
     let (ops, a, b, consts, lin_vars, lin_coeffs) = tape.parts();
     let mut out = [0.0];
     let mut dout = [0.0];
+    #[cfg(target_arch = "wasm32")]
     grad_eval_tape(
         ops, a, b, consts, lin_vars, lin_coeffs, x, params, mults, regs, dregs, &mut out,
-        &mut dout, grad_out,
+        &mut dout, seed, grad_out,
     );
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = seed;
+        grad_eval_tape(
+            ops, a, b, consts, lin_vars, lin_coeffs, x, params, mults, regs, dregs, &mut out,
+            &mut dout, grad_out,
+        );
+    }
 }
 
 /// Forward-over-reverse Hessian-vector product of `tape` at `x` along `dir`.
@@ -262,6 +273,7 @@ pub(crate) fn tape_hvp(
     regs_t: &mut [f64],
     dregs: &mut [f64],
     dregs_t: &mut [f64],
+    _basis: &mut [f64],
     grad_out: &mut [f64],
     hv_out: &mut [f64],
 ) {
@@ -314,11 +326,12 @@ pub(crate) fn tape_hvp(
     regs_t: &mut [f64],
     dregs: &mut [f64],
     dregs_t: &mut [f64],
+    basis: &mut [f64],
     grad_out: &mut [f64],
     hv_out: &mut [f64],
 ) {
     let (ops, a, b, consts, lin_vars, lin_coeffs) = tape.parts();
-    let mut basis = vec![0.0; x.len()];
+    basis.fill(0.0);
     let mut out = [0.0];
     let mut out_t = [0.0];
     let mut direction_out = [0.0];
@@ -340,7 +353,7 @@ pub(crate) fn tape_hvp(
             lin_vars,
             lin_coeffs,
             x,
-            &basis,
+            basis,
             dir,
             params,
             mults,

@@ -59,6 +59,7 @@ struct ParScratch {
     dregs: Vec<f64>,
     regs_t: Vec<f64>,
     dregs_t: Vec<f64>,
+    basis: Vec<f64>,
     dir: Vec<f64>,
     grad: Vec<f64>,
     hv: Vec<f64>,
@@ -71,6 +72,7 @@ impl ParScratch {
             dregs: vec![0.0; max_regs],
             regs_t: vec![0.0; max_regs],
             dregs_t: vec![0.0; max_regs],
+            basis: vec![0.0; n_vars],
             dir: vec![0.0; n_vars],
             grad: vec![0.0; n_vars],
             hv: vec![0.0; n_vars],
@@ -80,6 +82,8 @@ impl ParScratch {
 
 #[derive(Debug, Default)]
 struct Scratch {
+    /// One-hot forward-mode basis seed, length `n_vars`.
+    basis: Vec<f64>,
     /// Dense gradient buffer, length `n_vars`.
     grad: Vec<f64>,
     /// Dense HVP seed direction, length `n_vars`.
@@ -198,6 +202,7 @@ impl NlpEvaluator {
             .unwrap_or(0);
 
         let scratch = RefCell::new(Scratch {
+            basis: vec![0.0; n_vars],
             grad: vec![0.0; n_vars],
             dir: vec![0.0; n_vars],
             hv: vec![0.0; n_vars],
@@ -362,6 +367,7 @@ impl NlpEvaluator {
             &self.params,
             &mut scratch.regs,
             &mut scratch.dregs,
+            &mut scratch.basis,
             grad,
         );
     }
@@ -439,6 +445,7 @@ impl NlpEvaluator {
                 &self.params,
                 &mut scratch.regs,
                 &mut scratch.dregs,
+                &mut scratch.basis,
                 &mut scratch.grad,
             );
             for &v in &slot.support {
@@ -466,7 +473,15 @@ impl NlpEvaluator {
                     for &v in &slot.support {
                         sc.grad[v as usize] = 0.0;
                     }
-                    slot_gradient_into(slot, x, params, &mut sc.regs, &mut sc.dregs, &mut sc.grad);
+                    slot_gradient_into(
+                        slot,
+                        x,
+                        params,
+                        &mut sc.regs,
+                        &mut sc.dregs,
+                        &mut sc.basis,
+                        &mut sc.grad,
+                    );
                     slot.support.iter().map(|&v| sc.grad[v as usize]).collect()
                 },
             )
@@ -556,6 +571,7 @@ impl NlpEvaluator {
                 &mut scratch.regs_t,
                 &mut scratch.dregs,
                 &mut scratch.dregs_t,
+                &mut scratch.basis,
                 &mut scratch.grad,
                 &mut scratch.hv,
             );
@@ -596,6 +612,7 @@ impl NlpEvaluator {
                         &mut sc.regs_t,
                         &mut sc.dregs,
                         &mut sc.dregs_t,
+                        &mut sc.basis,
                         &mut sc.grad,
                         &mut sc.hv,
                     );
@@ -632,13 +649,14 @@ fn slot_gradient_into(
     params: &[f64],
     regs: &mut [f64],
     dregs: &mut [f64],
+    basis: &mut [f64],
     grad: &mut [f64],
 ) {
     match &slot.kind {
         SlotKind::Linear(t) => linear_gradient_add(t, 1.0, grad),
         SlotKind::Quadratic(q) => quadratic_gradient_add(q, x, 1.0, grad),
         SlotKind::Nonlinear(tape) => {
-            tape_gradient(tape, x, params, &[], regs, dregs, grad);
+            tape_gradient(tape, x, params, &[], regs, dregs, basis, grad);
         }
     }
 }
