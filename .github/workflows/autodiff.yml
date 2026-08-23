@@ -55,3 +55,25 @@ jobs:
         run: cargo test -p oximo --no-default-features --features pounce-enzyme --profile enzyme --test solve_pounce
         env:
           RUSTFLAGS: "-Zautodiff=Enable"
+
+  wasm:
+    name: Cargo test (oximo-autodiff, wasm32-wasip1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-26
+          components: enzyme
+          targets: wasm32-wasip1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+      - name: Test oximo-autodiff with Enzyme on WebAssembly
+        run: cargo test -p oximo-autodiff --features enzyme --profile enzyme --target wasm32-wasip1
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: "node ${{ github.workspace }}/.github/run-wasi.mjs"
+          RUSTFLAGS: "-Zautodiff=Enable"
