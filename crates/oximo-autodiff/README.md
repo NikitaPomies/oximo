@@ -3,7 +3,7 @@
 Automatic differentiation for [oximo](https://github.com/oximo-rs/oximo) models: gradients, sparse Jacobians, and sparse Hessians of the Lagrangian, computed exactly with [`std::autodiff`](https://doc.rust-lang.org/nightly/std/autodiff/) (Enzyme).
 
 Model expressions are runtime data, while Enzyme differentiates compiled Rust.
-This crate bridges the two by compiling each expression into a flat instruction tape and differentiating the tape interpreter once at compile time: reverse mode for gradients, forward-over-reverse for Hessian-vector products.
+This crate bridges the two by compiling each expression into a flat instruction tape and differentiating the tape interpreter at compile time. Native targets use reverse mode for gradients and forward-over-reverse for Hessian-vector products. WebAssembly targets use forward mode for gradients and forward-over-forward for Hessian-vector products because Enzyme's reverse-loop cache allocation currently traps on wasm32 ([rust-lang/rust#161110](https://github.com/rust-lang/rust/issues/161110)).
 
 Linear and quadratic expressions never hit the AD engine, since they use the closed-form `extract_linear`/`extract_quadratic` fast paths.
 

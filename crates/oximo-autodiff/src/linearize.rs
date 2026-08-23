@@ -22,8 +22,9 @@ pub fn gradient_at(model: &Model, expr: Expr<'_>, x: &[f64]) -> Result<Vec<f64>,
     let (tape, params) = compile(expr);
     let mut regs = vec![0.0; tape.n_regs()];
     let mut dregs = vec![0.0; tape.n_regs()];
+    let mut seed = vec![0.0; n];
     let mut grad = vec![0.0; n];
-    tape_gradient(&tape, x, &params, &[], &mut regs, &mut dregs, &mut grad);
+    tape_gradient(&tape, x, &params, &[], &mut regs, &mut dregs, &mut seed, &mut grad);
     Ok(grad)
 }
 
