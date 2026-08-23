@@ -5,314 +5,109 @@
 </picture>
 
 <a href="https://oximo.dev">
-    <img src="https://img.shields.io/badge/oximo-website-orange" alt = "Website">
+    <img src="https://img.shields.io/badge/oximo-website-orange" alt="Website">
 </a>
 <a href="https://github.com/oximo-rs/oximo/tree/main/crates/oximo/examples">
-    <img src="https://img.shields.io/badge/oximo-examples-orange" alt = "Examples">
+    <img src="https://img.shields.io/badge/oximo-examples-orange" alt="Examples">
 </a>
 <a href="https://crates.io/crates/oximo">
-    <img src="https://img.shields.io/crates/v/oximo?logo=rust&color=E05D44" alt="crates version" />
-</a>
-<a href="https://github.com/oximo-rs/oximo/actions/workflows/ci.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/oximo-rs/oximo/ci.yml?branch=main&label=oximo%20CI&logo=github" alt="CI" />
+    <img src="https://img.shields.io/crates/v/oximo?logo=rust&color=E05D44" alt="crates version">
 </a>
 <a href="https://docs.rs/oximo">
-    <img src="https://docs.rs/oximo/badge.svg" alt = "oximo Docs.rs Build Status">
-</a>
-<a href="https://codecov.io/gh/oximo-rs/oximo" > 
-	<img src="https://codecov.io/gh/oximo-rs/oximo/graph/badge.svg?token=ff0RIQTCA4"/> 
+    <img src="https://docs.rs/oximo/badge.svg" alt="oximo Docs.rs Build Status">
 </a>
 
-oximo is a Rust algebraic modeling library for mathematical optimization. Learn more at [oximo.dev](https://oximo.dev).
+# oximo
+
+oximo is a Rust algebraic modeling library for mathematical optimization. It
+provides a compact modeling API for variables, indexed domains, algebraic
+constraints, objectives, nonlinear expressions, and multiple solver backends.
+
+- [Webdocs](https://oximo.dev)
+- [API documentation](https://docs.rs/oximo)
+- [Examples](https://github.com/oximo-rs/oximo/tree/main/crates/oximo/examples)
+- [Repository](https://github.com/oximo-rs/oximo)
 
 ```rust,ignore
 use oximo::prelude::*;
 use oximo::solvers::Highs;
 
-let m = Model::new("transport");
-variable!(m, x >= 0.0);
-variable!(m, 0.0 <= y <= 4.0);
+let demand = [4.0, 6.0, 5.0];
 
-constraint!(m, c1, x + 2.0 * y <= 14.0);
-constraint!(m, c2, 3.0 * x >= y);
-constraint!(m, c3, x <= y + 2.0);
-objective!(m, Max, 3.0 * x + 4.0 * y);
+let m = Model::new("production");
+variable!(m, production[p in 0..2, t in 0..3] >= 0.0);
+constraint!(m, meet[t in 0..3],
+    sum!(production[p, t] for p in 0..2) >= demand[t]);
+objective!(m, Min, sum!(production[p, t] for p in 0..2, t in 0..3));
 
-let result = Highs.solve(&m, &HighsOptions::default())?;
-println!("obj = {:?}", result.objective()); // 34.0
-println!("x   = {:?}", result.value_of(x)); // 6.0
-println!("y   = {:?}", result.value_of(y)); // 4.0
+let mut solver = Highs;
+let result = solver.solve(&m, &HighsOptions::default())?;
+println!("objective = {:?}", result.objective());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Building models
-
-### Variables
+Expressions use standard Rust operators. Variable domains and bounds are
+declared directly in the model:
 
 ```rust,ignore
-let m = Model::new("my_model");
+variable!(m, x >= 0.0);       // continuous
+variable!(m, y, Bin);         // binary
+variable!(m, z >= 0.0, Int);  // integer
 
-variable!(m, x >= 0.0);                 // continuous, x >= 0
-variable!(m, 0.0 <= y <= 10.0);         // continuous, 0 <= y <= 10
-variable!(m, z);                        // free (unbounded by default)
-variable!(m, b, Bin);                   // binary {0, 1}   (also Binary)
-variable!(m, n >= 0.0, Int);            // general integer (also Integer)
-variable!(m, s <= 10.0, SemiCont(2.0)); // semicontinuous: 0 or in [2, 10] (SemiInt too)
+constraint!(m, capacity, 2.0 * x + y <= 10.0);
+objective!(m, Max, 3.0 * x + 4.0 * y);
 ```
 
-Bounds, domain, warm start, and fixing can also be given as keyword args after the
-name:
+Quadratic, nonlinear, and second-order-cone expressions are also available:
 
 ```rust,ignore
-variable!(m, x, lb = 0.0, ub = 1.0);       // same as `0.0 <= x <= 1.0`
-variable!(m, n, lb = 0.0, domain = Int);   // keyword domain
-variable!(m, w, lb = 0.0, ub = 10.0, Int); // mixed with positional domain token
-variable!(m, p, lb = 0.0, initial = 3.0);  // warm start (scalar only)
-variable!(m, q, fix = 5.0);                // fixed to 5.0 (scalar only)
-```
-
-### Constraints and objectives
-
-Expressions are built with standard Rust operators. The macros let you write the
-relational operators `==`, `<=`, `>=` directly. Scalar multiplication, addition,
-subtraction, and nonlinear operations (see [Nonlinear Expressions](#nonlinear-expressions)) all work out of the box:
-
-```rust,ignore
-constraint!(m, cap, 2.0 * x + 3.0 * y <= 100.0);
-constraint!(m, demand, x >= 5.0);
-constraint!(m, balance, x - y == 0.0);
-constraint!(m, band, 1.0 <= x + y <= 10.0); // two-sided range -> one constraint
-
-objective!(m, Min, 3.0 * x + 5.0 * y);
-// or
-objective!(m, Max, x + 2.0 * y); // also Minimize/min, Maximize/max
-// or, for a pure feasibility problem (no objective to optimize):
-objective!(m, Feasibility); // also `feasibility` / `feas`
-```
-
-### Indexed variables
-
-`variable!(m, x[k in set])` registers one scalar per key with auto-named entries
-like `x[seattle,nyc]`. Bounds apply uniformly by default; a multi-index family
-ranges over a Cartesian product.
-
-```rust,ignore
-let m = Model::new("transport");
-variable!(m, x[r in routes] >= 0.0);        // one var per route
-variable!(m, y[k in items] >= 0.0, Int);    // integer family
-variable!(m, z[a in rows, b in cols], Bin); // multi-index (Cartesian product)
-
-// Scalar lookup: any type that converts to IndexKey works.
-let e1 = x[("seattle", "nyc")];
-let e2 = z[a, b];
-
-// Per-key bounds may reference the index
-variable!(m, 0.0 <= w[(p, q) in routes] <= capacity_for(&p, &q));
-variable!(m, v[k in items], lb = 0.0, ub = cap[k]);
-
-// Filtered family: keep only matching keys (no trivial elements built).
-variable!(m, d[(i, j) in rc if i == j] >= 0.0);
-```
-
-### Summing over sets
-
-`sum!(body for k in set)` reads as `sum_{k in set} body`.
-
-```rust,ignore
-// Single sum: sum_{i in items} weights[i] * x[i]
-constraint!(m, cap, sum!(weights[i] * x[i] for i in items) <= capacity);
-
-// Double sum, flat: sum_{(p,q) in P*M} c[p,q] * x[p,q]
-let total_cost = sum!(c[p, q] * x[p, q] for p in plants, q in markets);
-
-// Filtered sum.
-let active = sum!(x[i] for i in 0..n if online[i]);
-```
-
-### Rule-style constraints
-
-The indexed form of `constraint!` emits one constraint per key, auto-named like
-`supply[seattle]`. A trailing `if` filters the keys, and `name = expr` gives a
-computed run-time name.
-
-```rust,ignore
-// Scalar set: one constraint per period.
-let periods = Set::range(0..T);
-constraint!(m, setup[t in periods], x[t] <= capacity * s[t]);
-
-// Tuple set + inner sum builds the LHS expression (key types inferred).
-constraint!(m, supply[p in plants], sum!(x[p, q] for q in markets) <= supply_of(&p));
-
-// Filtered family: only the keys passing the guard are built.
-constraint!(m, diag[(i, j) in arcs if i == j], x[i, j] <= 1.0);
-
-// Computed run-time name.
-constraint!(m, name = format!("bal_{p}"), inflow[p] - outflow[p] == 0.0);
-```
-
-### Index sets
-
-A `Set` is the modeling-layer container for an ordered, finite index set over
-integers, strings, or tuples. Most domains need no explicit `Set`: an integer
-range is already a domain (`x[i in 0..5]`, `sum!(.. for i in 0..n)`). Reach for
-`Set` when keys are strings, tuples, sparse, or a subset reused across statements.
-
-The `set!` macro binds a named set. A plain right side is normalized to an owned
-set, a `pat in domain[ if cond]` comprehension builds (and optionally filters)
-one.
-
-```rust,ignore
-use oximo::prelude::*;
-
-let plants = Set::strings(["seattle", "san-diego"]);
-
-set!(items = 0..5);             // range normalized to Set<usize>
-set!(routes = plants * plants); // Cartesian product
-
-// Comprehension: product domain + by-value `if`. These two are equivalent.
-set!(arcs = (p, q) in &plants * &plants if p != q); // single tuple pattern
-set!(arcs = i in plants, j in plants if i != j);    // multi-bind product
-
-// The typed filter is also a Set method (the receiver pins the key type):
-let diag = (&plants * &plants).filter_typed(|(p, q)| p == q);
-
-// Sparse / string leaf sets keep their constructors.
-let sparse = Set::from_ints([0, 2, 4, 8]);
-```
-
-### Nonlinear expressions
-
-`Pow`, `Sin`, `Cos`, `Exp`, `Log`, `Abs`, and bilinear products are first-class. The
-model's kind (`LP`/`MILP`/`QP`/`MIQP`/`NLP`/`MINLP`) is inferred from the
-expressions.
-
-```rust,ignore
-// Rosenbrock NLP
 objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
-
-// Quadratic constraint
 constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
-
-// Transcendental utility (MINLP when any variable is integer/binary)
-objective!(m, Max, sum!(u[i] * (1.0 + w[i] * x[i]).log() for i in items));
+soc_constraint!(m, cone, [x, y] <= t);
 ```
 
-## Solving
+## Problem types
 
-All backends implement the `Solver` trait:
+oximo supports the following algebraic problem classes. Which classes can be
+solved depends on the selected backend:
 
-```rust,ignore
-pub trait Solver {
-    fn solve(&mut self, model: &Model, opts: &Self::Options) -> Result<SolverResult, SolverError>;
-}
+- Linear programming (LP)
+- Quadratic programming and quadratically constrained programming (QP/QCP)
+- Nonlinear programming (NLP)
+- Mixed-integer linear programming (MILP)
+- Mixed-integer quadratic and quadratically constrained programming (MIQP/MIQCP)
+- Mixed-integer nonlinear programming (MINLP)
+- Second-order cone programming (SOCP/MISOCP)
+
+## Solver features
+
+| Feature         | Backend / capability                                         | Default |
+| --------------- | ------------------------------------------------------------ | ------- |
+| `highs`         | HiGHS - LP/MILP/QP (bundled, requires a C/C++ compiler)      | no      |
+| `io`            | NL, MPS, and LP readers and writers                          | yes     |
+| `gurobi`        | Gurobi v13+ (requires licensed install)                      | no      |
+| `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP                       | no      |
+| `gams`          | GAMS bridge - capability depends on the selected sub-solver  | no      |
+| `baron`         | BARON - global non-convex solver (requires licensed install) | no      |
+| `clarabel`      | Clarabel - LP/QP/SOCP (pure Rust, no install)                | no      |
+| `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend         | no      |
+| `pounce`        | POUNCE - pure-Rust LP/QP/QCP/NLP backend                     | no      |
+| `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)               | no      |
+
+For example, use HiGHS for a bundled LP/MILP/QP solver:
+
+```toml
+[dependencies]
+oximo = { version = "0.5", features = ["highs"] }
 ```
 
-## Features
+Licensed or external backends may require an installed solver, environment
+variables, and a valid license. See the backend documentation and the
+[webdocs](https://oximo.dev) for setup details.
 
-| Feature         | What it adds                                                   | Default |
-| --------------- | -------------------------------------------------------------- | ------- |
-| `highs`         | HiGHS - LP/MILP/QP solver (bundled; requires a C/C++ compiler) | no      |
-| `io`            | NL, MPS, and LP file readers and writers                       | yes     |
-| `gurobi`        | Gurobi v13+ solver (requires licensed install)                 | no      |
-| `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP solver                  | no      |
-| `gams`          | GAMS bridge - solve type depends on the selected sub-solver    | no      |
-| `baron`         | BARON - Global non-convex solver (requires licensed install)   | no      |
-| `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)     | no      |
-| `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend           | no      |
-| `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)        | no      |
-| `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)                 | no      |
+## Results
 
-### HiGHS
-
-No solver install is required, but HiGHS is compiled from source via the
-`highs` crate and requires a C/C++ compiler. Enable it with
-`features = ["highs"]`.
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Highs;
-
-let result = Highs.solve(&m, &HighsOptions::default()
-    .time_limit(Duration::from_secs(60))
-    .threads(4)
-    .mip_gap(0.01)
-    .method(HighsMethod::Ipm))?;
-```
-
-For other backends, see their respective documentation.
-
-## Reading results
-
-For a quick, model-aware summary, print `result.report(&m)`. For programmatic access:
-
-```rust,ignore
-let result = Highs.solve(&m, &HighsOptions::default())?;
-
-match result.termination {
-    TerminationStatus::Optimal => {
-        if let Some(obj) = result.objective() {
-            println!("optimal: {obj}");
-        }
-    }
-    TerminationStatus::Infeasible => println!("infeasible"),
-    TerminationStatus::TimeLimit if result.has_solution() => {
-        println!("time limit, best = {:?}", result.objective());
-    }
-    _ => {}
-}
-
-// Variable values (best solution)
-let x_val = result.value_of(x); // Option<f64>
-
-// Constraint duals
-let dual = result.dual_of(constraint_id); // Option<f64>
-
-// Reduced costs, keyed by VarId
-let rc = result.reduced_costs.get(&x.var_id().unwrap());
-
-// Solution pools (e.g. Gurobi, BARON with .num_sol(n)): all points, best first
-for i in 0..result.result_count() {
-    let point = result.solution(i).unwrap();
-    println!("objective {:?}", point.objective);
-}
-```
-
-## Inspecting a model
-
-`Model` implements `Display`, printing the whole model as readable algebra. Adapters give the same rendering for single pieces: `display_constraint`, `display_objective`, `display_expr`, `display_soc`.
-
-```rust
-use oximo::prelude::*;
-
-let m = Model::new("diet");
-variable!(m, x >= 0.0);
-variable!(m, y >= 0.0);
-constraint!(m, c1, x + 2.0 * y <= 14.0);
-objective!(m, Min, 3.0 * x + 4.0 * y);
-
-println!("{m}");
-// Model 'diet' (LP)
-// min 3 x + 4 y
-// s.t.
-//   c1: x + 2 y <= 14
-// vars
-//   x >= 0
-//   y >= 0
-
-let c1 = m.constraint_id("c1").unwrap();
-assert_eq!(m.display_constraint(c1).to_string(), "c1: x + 2 y <= 14");
-```
-
-## Model export
-
-With the `io` feature (default), you can export models to MPS, LP and NL format for inspection or use with external solvers.
-
-## Requirements
-
-- Gurobi feature: Gurobi, `GUROBI_HOME` set, valid license
-- MOSEK feature: MOSEK 11.2, `MOSEK_BINDIR_112` if needed, valid license
-- GAMS feature: GAMS on `PATH`, valid license
-- BARON feature: BARON on `PATH`, valid license
+`SolverResult` provides the termination status, objective value, variable values, duals, reduced costs, and (where supported) bounds, gaps, and solution pools.
 
 ## License
 
