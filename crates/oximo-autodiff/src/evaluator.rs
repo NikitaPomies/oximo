@@ -785,7 +785,6 @@ pub mod benchmark_support {
 }
 
 #[cfg(test)]
-#[expect(clippy::cast_precision_loss)]
 mod tests {
     //! Serial vs parallel equivalence of the threshold-gated derivative paths.
     //!
