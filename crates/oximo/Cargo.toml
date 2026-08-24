@@ -87,6 +87,10 @@ name = "baron_robot"
 doc-scrape-examples = false
 
 [[example]]
+name = "sos"
+required-features = ["gurobi"]
+
+[[example]]
 name = "transport"
 required-features = ["highs"]
 
