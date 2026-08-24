@@ -14,7 +14,9 @@
 
 use std::time::Duration;
 
-use oximo::gams::{GamsCplexOptions, GamsHighsOptions, GamsHighsSolver, GamsSolverConfig};
+use oximo::gams::{
+    GamsConoptOptions, GamsCplexOptions, GamsHighsOptions, GamsHighsSolver, GamsSolverConfig,
+};
 use oximo::prelude::*;
 use oximo::solvers::Gams;
 
@@ -73,7 +75,9 @@ fn gams_nlp_duals_at_local_point() {
     let cap = constraint!(m, cap, x >= 1.0);
     objective!(m, Min, x.exp());
 
-    let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
+    let opts = GamsOptions::default()
+        .solver(GamsSolverConfig::Conopt(GamsConoptOptions::default()))
+        .time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert!(
         result.has_solution(),
@@ -93,8 +97,8 @@ fn gams_nlp_duals_at_local_point() {
 #[test]
 fn gams_mip_duals_at_fixed_point() {
     // max 2a + 3b  s.t.  a + b <= 1,  a, b binary.
-    // GAMS MIP links re-solve with integers fixed, so `.m` carries
-    // the duals of the fixed problem at the optimum (0, 1).
+    // Ask CPLEX to re-solve with integers fixed, so `.m` carries the duals
+    // of the fixed problem at the optimum (0, 1).
     // The exact split between constraint duals and reduced costs is
     // solver-dependent. We assert presence, not values.
     let m = Model::new("mip_dual");
@@ -103,7 +107,9 @@ fn gams_mip_duals_at_fixed_point() {
     let cap = constraint!(m, cap, a + b <= 1.0);
     objective!(m, Max, 2.0 * a + 3.0 * b);
 
-    let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
+    let opts = GamsOptions::default()
+        .solver(GamsSolverConfig::Cplex(GamsCplexOptions::default().solvefinal(true)))
+        .time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 3.0).abs() < 1e-6);
@@ -273,7 +279,9 @@ fn gams_soc_dual_matches_norm_form_multiplier() {
     objective!(m, Min, x + y);
     assert_eq!(m.kind(), ModelKind::SOCP);
 
-    let r = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
+    let opts =
+        GamsOptions::default().solver(GamsSolverConfig::Conopt(GamsConoptOptions::default()));
+    let r = Gams::new().solve(&m, &opts).unwrap();
     assert!(r.has_solution());
     assert!((r.objective().unwrap() + std::f64::consts::SQRT_2).abs() < 1e-4);
     let z0 = r.soc_dual_of(disk).expect("SOC dual missing");
