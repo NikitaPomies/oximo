@@ -16,7 +16,7 @@ pub use options::{GurobiOptions, GurobiPresolve};
 pub use persistent::GurobiPersistent;
 pub use translate::solve;
 
-use oximo_core::{Model, ModelKind};
+use oximo_core::{Model, ModelKind, SosType};
 use oximo_solver::{
     Iis, InfeasibilityDiagnosis, PersistentSolver, Solver, SolverError, SolverResult,
 };
@@ -61,6 +61,10 @@ impl Solver for Gurobi {
 
     fn supports(&self, kind: ModelKind) -> bool {
         supported(kind)
+    }
+
+    fn supports_sos(&self, _sos_type: SosType) -> bool {
+        true
     }
 
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {

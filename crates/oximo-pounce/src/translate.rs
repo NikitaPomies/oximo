@@ -75,6 +75,9 @@ pub(crate) struct Outcome {
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    if model.has_sos_constraints() {
+        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    }
     let route = crate::convex::route(model, opts)?;
     if route != crate::convex::Route::Nlp {
         return crate::convex::solve(model, opts, route);

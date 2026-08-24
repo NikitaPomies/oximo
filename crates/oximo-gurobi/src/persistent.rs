@@ -1,5 +1,5 @@
 use gurobi_rs::prelude::*;
-use oximo_core::{Model, ModelKind};
+use oximo_core::{Model, ModelKind, SosType};
 use oximo_solver::{Iis, Snapshot, Solver, SolverError, SolverResult, snapshot};
 
 use crate::GurobiOptions;
@@ -218,6 +218,10 @@ impl Solver for GurobiPersistent {
 
     fn supports(&self, kind: ModelKind) -> bool {
         crate::supported(kind)
+    }
+
+    fn supports_sos(&self, _sos_type: SosType) -> bool {
+        true
     }
 
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {

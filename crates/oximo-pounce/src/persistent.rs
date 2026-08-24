@@ -79,6 +79,9 @@ impl PouncePersistent {
         model: &Model,
         opts: &PounceOptions,
     ) -> Result<SolverResult, SolverError> {
+        if model.has_sos_constraints() {
+            return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+        }
         let route = convex::route(model, opts)?;
         if route == Route::Nlp {
             return self.solve_nlp(model, opts);

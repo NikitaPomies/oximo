@@ -145,6 +145,9 @@ impl Problem {
 /// domains or a Clarabel setup failure, and [`SolverError::Nonlinear`] if an
 /// expression defeats extraction.
 pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, SolverError> {
+    if model.has_sos_constraints() {
+        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    }
     let problem = build_problem(model)?;
     let settings = build_settings(opts);
     let mut solver = DefaultSolver::new(
@@ -175,6 +178,9 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
 ///
 /// Panics if variable or constraint indices overflow `u32`.
 pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
+    if model.has_sos_constraints() {
+        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    }
     build_problem_with(model, None)
 }
 

@@ -263,7 +263,11 @@ fn push_row(out: &mut Vec<Triplet>, row: usize, terms: &LinearTerms, scale: f64)
     clippy::many_single_char_names,
     reason = "A, b, G, h, c, and n are the conventional standard-form QP symbols"
 )]
+#[expect(clippy::too_many_lines)]
 pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
+    if model.has_sos_constraints() {
+        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    }
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let arena = model.arena();
     let vars = model.variables();
