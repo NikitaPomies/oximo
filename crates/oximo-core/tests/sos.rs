@@ -139,3 +139,12 @@ fn sos_rejects_duplicate_weights() {
     variable!(m, y);
     m.add_sos_constraint("bad", SosType::Sos2, [(x, 1.0), (y, 1.0)]);
 }
+
+#[test]
+#[should_panic(expected = "duplicate weights")]
+fn sos_rejects_signed_zero_duplicate_weights() {
+    let m = Model::new("signed_zero_weights");
+    variable!(m, x);
+    variable!(m, y);
+    m.add_sos_constraint("signed_zero", SosType::Sos1, [(x, 0.0), (y, -0.0)]);
+}

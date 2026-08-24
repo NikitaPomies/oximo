@@ -58,11 +58,12 @@ pub(crate) fn validate_members(name: &str, members: &[SosMember]) {
             "SOS constraint {name:?} contains a duplicate variable"
         );
     }
-    #[expect(clippy::float_cmp, reason = "SOS weights must be exactly unique")]
-    for (i, member) in members.iter().enumerate() {
-        assert!(
-            !members[..i].iter().any(|other| other.weight == member.weight),
-            "SOS constraint {name:?} contains duplicate weights"
-        );
+    let mut weights = HashSet::with_capacity(members.len());
+    for member in members {
+        let key = match member.weight.to_bits() {
+            0 | 0x8000_0000_0000_0000 => 0,
+            bits => bits,
+        };
+        assert!(weights.insert(key), "SOS constraint {name:?} contains duplicate weights");
     }
 }
