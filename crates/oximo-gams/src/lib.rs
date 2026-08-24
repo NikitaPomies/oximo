@@ -16,7 +16,7 @@ pub use options::{GamsOptions, GamsSolver};
 pub use solver_options::*;
 pub use translate::solve;
 
-use oximo_core::{Model, ModelKind};
+use oximo_core::{Model, ModelKind, SosType};
 use oximo_solver::{Solver, SolverError, SolverResult};
 
 /// GAMS solver backend.
@@ -76,6 +76,10 @@ impl Solver for Gams {
 
     fn supports(&self, kind: ModelKind) -> bool {
         supported(kind)
+    }
+
+    fn supports_sos(&self, _sos_type: SosType) -> bool {
+        true
     }
 
     fn solve(&mut self, model: &Model, opts: &GamsOptions) -> Result<SolverResult, SolverError> {
