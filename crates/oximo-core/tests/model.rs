@@ -358,18 +358,22 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
     variable!(m, t >= 0.0);
     constraint!(m, shared, x <= 1.0);
     let soc_id = m.add_soc_constraint("shared", [x], t);
+    let sos_id = m.add_sos_constraint("sos", SosType::Sos1, [(x, 1.0)]);
 
-    assert_eq!(m.num_constraints(), 2);
+    assert_eq!(m.num_constraints(), 3);
     assert_eq!(m.constraints().algebraic().len(), 1);
     assert_eq!(m.num_soc_constraints(), 1);
+    assert_eq!(m.num_sos_constraints(), 1);
     assert_eq!(m.constraint_id("shared"), Some(ConstraintId(0)));
     assert_eq!(m.soc_constraint_id("shared"), Some(soc_id));
+    assert_eq!(m.sos_constraint_id("sos"), Some(sos_id));
 
     let constraints = m.constraints();
-    assert_eq!(constraints.len(), 2);
+    assert_eq!(constraints.len(), 3);
     assert!(!constraints.is_empty());
     assert_eq!(constraints.algebraic()[0].name, "shared");
     assert_eq!(constraints.second_order_cones()[0].name, "shared");
+    assert_eq!(constraints.special_ordered_sets()[0].name, "sos");
 
     let mut iter = constraints.iter();
     match iter.next().expect("algebraic constraint") {
@@ -387,6 +391,14 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
         }
         ConstraintRef::Algebraic { .. } => panic!("explicit cones come second"),
         ConstraintRef::SpecialOrderedSet { .. } => panic!("expected SOC constraint"),
+    }
+    match iter.next().expect("SOS constraint") {
+        ConstraintRef::SpecialOrderedSet { id, constraint } => {
+            assert_eq!(id, sos_id);
+            assert_eq!(constraint.name, "sos");
+        }
+        ConstraintRef::Algebraic { .. } => panic!("algebraic constraints come first"),
+        ConstraintRef::SecondOrderCone { .. } => panic!("SOS constraints come last"),
     }
     assert!(iter.next().is_none());
 }

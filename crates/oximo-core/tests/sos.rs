@@ -65,6 +65,73 @@ fn sos_auto_weight_method_accepts_dynamic_members() {
 }
 
 #[test]
+fn sos_registry_and_display_are_complete() {
+    let m = Model::new("sos_display");
+    variable!(m, x);
+    variable!(m, y);
+    let id = m.add_sos_constraint("choice", SosType::Sos2, [(x, 10.0), (y, 20.0)]);
+
+    assert_eq!(id.index(), 0);
+    assert_eq!(SosType::Sos1.label(), "SOS1");
+    assert_eq!(SosType::Sos2.label(), "SOS2");
+    assert!(m.has_sos_constraints());
+    assert_eq!(m.sos_constraint_id("choice"), Some(id));
+    assert_eq!(m.sos_constraint_id("missing"), None);
+    assert_eq!(m.display_sos(id).to_string(), "choice: SOS2 [x: 10, y: 20]");
+    assert!(m.to_string().contains("choice: SOS2 [x: 10, y: 20]"));
+    assert_eq!(m.constraints().special_ordered_sets()[0].name, "choice");
+}
+
+#[test]
+#[should_panic(expected = "has no members")]
+fn sos_rejects_empty_members() {
+    let m = Model::new("empty");
+    m.add_sos_constraint("empty", SosType::Sos1, []);
+}
+
+#[test]
+#[should_panic(expected = "duplicate variable")]
+fn sos_rejects_duplicate_variables() {
+    let m = Model::new("duplicate_variable");
+    variable!(m, x);
+    m.add_sos_constraint("duplicate", SosType::Sos1, [(x, 1.0), (x, 2.0)]);
+}
+
+#[test]
+#[should_panic(expected = "non-finite weight")]
+fn sos_rejects_nonfinite_weights() {
+    let m = Model::new("nonfinite");
+    variable!(m, x);
+    m.add_sos_constraint("nonfinite", SosType::Sos1, [(x, f64::NAN)]);
+}
+
+#[test]
+#[should_panic(expected = "must be bare variables")]
+fn sos_rejects_compound_members() {
+    let m = Model::new("compound");
+    variable!(m, x);
+    m.add_sos_constraint("compound", SosType::Sos1, [(x + 1.0, 1.0)]);
+}
+
+#[test]
+#[should_panic(expected = "belongs to another model")]
+fn sos_rejects_foreign_members() {
+    let m = Model::new("owner");
+    let other = Model::new("other");
+    variable!(other, x);
+    m.add_sos_constraint("foreign", SosType::Sos1, [(x, 1.0)]);
+}
+
+#[test]
+#[should_panic(expected = "already registered")]
+fn sos_rejects_duplicate_names() {
+    let m = Model::new("duplicate_name");
+    variable!(m, x);
+    m.add_sos_constraint("same", SosType::Sos1, [(x, 1.0)]);
+    m.add_sos_constraint("same", SosType::Sos1, [(x, 2.0)]);
+}
+
+#[test]
 #[should_panic(expected = "duplicate weights")]
 fn sos_rejects_duplicate_weights() {
     let m = Model::new("bad");

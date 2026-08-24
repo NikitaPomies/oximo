@@ -535,6 +535,21 @@ fn sos_and_quadratic_sections_round_trip_in_each_dialect_order() {
 }
 
 #[test]
+fn malformed_sos_sections_are_rejected() {
+    for text in [
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nSOS\n S3 set\n    x 1\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nSOS\n S1\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nSOS\n S1 set\n    x\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nSOS\n S1 set\n    x nope\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nSOS\n S1 set\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nSOS\n S1 set\n    x 1\n S1 set\n    x 2\nENDATA\n",
+        "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nSOS\n S1 set\n    x 1\n    x 2\nENDATA\n",
+    ] {
+        assert!(matches!(read_mps(text.as_bytes()), Err(IoError::InvalidMps { .. })), "{text}");
+    }
+}
+
+#[test]
 fn malformed_inputs_return_mps_diagnostics() {
     for text in [
         "NAME bad\nROWS\n N obj\nCOLUMNS\n x missing 1\nENDATA\n",

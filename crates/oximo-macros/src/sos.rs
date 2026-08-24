@@ -159,3 +159,39 @@ fn is_pair(tokens: &TokenStream2) -> bool {
 fn err(message: &str) -> syn::Error {
     syn::Error::new(Span::call_site(), format!("sos_constraint! {message}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(source: &str) -> TokenStream2 {
+        source.parse().expect("valid token stream")
+    }
+
+    #[test]
+    fn parses_inferred_and_explicit_members() {
+        match parse_members(tokens("[x, y[i]]")).expect("inferred members") {
+            Members::Auto(members) => assert_eq!(members.len(), 2),
+            Members::Explicit(_) => panic!("expected inferred members"),
+        }
+        match parse_members(tokens("[(x, 1.0), (y, 2.0)]")).expect("explicit members") {
+            Members::Explicit(members) => assert_eq!(members.len(), 2),
+            Members::Auto(_) => panic!("expected explicit members"),
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_member_lists() {
+        for source in ["x", "[]", "[(x, 1.0), y]", "[(x)]", "[(x, 1.0, 2.0)]"] {
+            assert!(parse_members(tokens(source)).is_err(), "expected rejection for {source}");
+        }
+    }
+
+    #[test]
+    fn parses_only_supported_types() {
+        assert!(parse_type(tokens("SOS1"), &tokens("::root")).is_ok());
+        assert!(parse_type(tokens("SOS2"), &tokens("::root")).is_ok());
+        assert!(parse_type(tokens("SOC"), &tokens("::root")).is_err());
+        assert!(parse_type(tokens("SOS1 SOS2"), &tokens("::root")).is_err());
+    }
+}

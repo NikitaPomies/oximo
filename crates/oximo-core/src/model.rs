@@ -1401,11 +1401,13 @@ mod tests {
         let t = m.__var("t").lb(0.0).build();
         m.__add_constraint("row", x.le(1.0));
         m.add_soc_constraint("cone", [x], t);
+        m.add_sos_constraint("sos", SosType::Sos1, [(x, 1.0)]);
         m.constraints.borrow_mut()[0].active = false;
         m.soc_constraints.borrow_mut()[0].active = false;
+        m.sos_constraints.borrow_mut()[0].active = false;
 
         let constraints = m.constraints();
-        assert_eq!(constraints.len(), 2);
+        assert_eq!(constraints.len(), 3);
         assert!(constraints.iter().all(|entry| match entry {
             ConstraintRef::Algebraic { constraint, .. } => !constraint.active,
             ConstraintRef::SecondOrderCone { constraint, .. } => !constraint.active,

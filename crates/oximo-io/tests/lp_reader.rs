@@ -223,6 +223,23 @@ fn sos_signed_weights_round_trip() {
 }
 
 #[test]
+fn malformed_sos_rows_are_rejected() {
+    for row in [
+        "choice S1 :: x : 1",
+        "choice: S3 :: x : 1",
+        "choice: S1 :: x",
+        "choice: S1 :: x : nope",
+        "choice: S1 :: x : NaN",
+        "choice: S1 ::",
+        "choice: S1 :: x : 1 x : 2",
+        "choice: S1 :: x : 1 y : 1",
+    ] {
+        let text = format!("Minimize\n obj: x + y\nSOS\n {row}\nEnd\n");
+        assert!(matches!(read_lp(text.as_bytes()), Err(IoError::InvalidLp { .. })), "{row}");
+    }
+}
+
+#[test]
 fn content_after_end_is_rejected() {
     let err = read_lp("Minimize\n obj: x\nEnd\nBounds\n x >= 0\n".as_bytes()).unwrap_err();
     assert!(matches!(err, IoError::InvalidLp { .. }));
