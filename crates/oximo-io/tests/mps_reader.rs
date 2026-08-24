@@ -509,6 +509,23 @@ fn sos_sections_round_trip() {
 }
 
 #[test]
+fn sos_member_names_s1_s2_round_trip() {
+    let model = Model::new("sos_member_names");
+    let s1 = model.__var("S1").build();
+    let s2 = model.__var("S2").build();
+    model.add_sos_constraint("set", SosType::Sos1, [(s1, 1.0), (s2, 2.0)]);
+    model.__minimize(s1 + s2);
+
+    let output = to_mps_string(&model).expect("write SOS MPS");
+    let roundtrip = read_mps(output.as_bytes()).expect("read written SOS MPS");
+    assert_eq!(roundtrip.num_sos_constraints(), 1);
+    let members = &roundtrip.sos_constraints()[0].members;
+    assert_eq!(members.len(), 2);
+    assert_eq!(roundtrip.variables()[members[0].variable.index()].name, "S1");
+    assert_eq!(roundtrip.variables()[members[1].variable.index()].name, "S2");
+}
+
+#[test]
 fn sos_and_quadratic_sections_round_trip_in_each_dialect_order() {
     let model = Model::new("qcp_sos");
     variable!(model, 0.0 <= x <= 1.0);

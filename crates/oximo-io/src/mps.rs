@@ -318,6 +318,10 @@ fn parse_number(field: &Field<'_>, line: usize) -> Result<f64, IoError> {
     Ok(value)
 }
 
+fn looks_like_number(text: &str) -> bool {
+    text.replace(['d', 'D'], "E").parse::<f64>().is_ok()
+}
+
 fn objective_sense(field: &Field<'_>, line: usize) -> Result<ObjectiveSense, IoError> {
     match field.text.to_ascii_uppercase().as_str() {
         "MIN" | "MINIMIZE" => Ok(ObjectiveSense::Minimize),
@@ -908,8 +912,11 @@ fn parse_mps_line(
 }
 
 fn parse_sos_record(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
-    if matches!(items.first().map(|item| item.text.to_ascii_uppercase()), Some(ty) if matches!(ty.as_str(), "S1" | "S2"))
-    {
+    // Headers carry a set name, while members carry a numeric weight.
+    // A variable named S1 or S2 must therefore follow the member path.
+    let is_header = matches!(items.first().map(|item| item.text.to_ascii_uppercase()), Some(ty) if matches!(ty.as_str(), "S1" | "S2"))
+        && (items.len() != 2 || !looks_like_number(items[1].text));
+    if is_header {
         if items.len() != 2 {
             return Err(invalid_mps(line, 1, "SOS set headers require type and name"));
         }
