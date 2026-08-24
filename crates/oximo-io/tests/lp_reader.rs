@@ -208,7 +208,19 @@ fn sos_sections_round_trip() {
     let output = to_lp_string(&model).expect("write SOS LP");
     let roundtrip = read_lp(output.as_bytes()).expect("read written SOS LP");
     assert_eq!(roundtrip.num_sos_constraints(), 2);
+    assert_eq!(roundtrip.sos_constraints()[0].name, "s1");
+    assert_eq!(roundtrip.sos_constraints()[1].name, "s2");
     assert!((roundtrip.sos_constraints()[1].members[2].weight - 3.0).abs() < 1e-12);
+}
+
+#[test]
+fn sos_name_with_colon_is_rejected_by_writer() {
+    let m = Model::new("sos_colon_name");
+    variable!(m, x);
+    m.add_sos_constraint("choice:colon", SosType::Sos1, [(x, 1.0)]);
+    objective!(m, Min, x);
+
+    assert!(matches!(to_lp_string(&m), Err(IoError::InvalidLp { .. })));
 }
 
 #[test]
@@ -226,6 +238,7 @@ fn sos_signed_weights_round_trip() {
 fn malformed_sos_rows_are_rejected() {
     for row in [
         "choice S1 :: x : 1",
+        "choice:colon: S1 :: x : 1",
         "choice: S3 :: x : 1",
         "choice: S1 :: x",
         "choice: S1 :: x : nope",

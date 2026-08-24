@@ -468,6 +468,9 @@ fn parse_sos_line(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), Io
     let (ty, members) = body
         .split_once("::")
         .ok_or_else(|| invalid_lp(line_no, 1, "SOS row needs `S1 ::` or `S2 ::`"))?;
+    if ty.contains(':') {
+        return Err(invalid_lp(line_no, 1, "SOS row names cannot contain `:`"));
+    }
     let sos_type = match ty.trim().to_ascii_uppercase().as_str() {
         "S1" => SosType::Sos1,
         "S2" => SosType::Sos2,
@@ -797,7 +800,7 @@ fn validate_lp_variable_name(name: &str) -> Result<(), IoError> {
 }
 
 fn validate_lp_row_name(name: &str) -> Result<(), IoError> {
-    if name.chars().any(char::is_control) || name.contains('\\') {
+    if name.chars().any(char::is_control) || name.contains('\\') || name.contains(':') {
         return Err(invalid_lp(
             1,
             1,
@@ -1118,6 +1121,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             vars.iter().map(|v| (v.id, v.name.as_str())).collect();
         writeln!(out, "SOS")?;
         for s in sos.iter() {
+            validate_lp_row_name(&s.name)?;
             write!(
                 out,
                 " {}: {} ::",
