@@ -41,6 +41,9 @@ pub fn solve(
     opts: &GamsOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
+    if model.has_sos_constraints() {
+        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    }
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     validate_solver(opts, kind)?;

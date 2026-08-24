@@ -14,6 +14,7 @@ mod objective;
 mod param;
 mod set;
 mod soc;
+mod sos;
 mod sum;
 mod variable;
 
@@ -62,6 +63,14 @@ pub fn constraint(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn soc_constraint(input: TokenStream) -> TokenStream {
     soc::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `sos_constraint!(model, [name|name[idx]], SOS1|SOS2, [var, ...])`.
+/// Explicit weights can be supplied as `[(var, weight), ...]`.
+/// The short form assigns consecutive weights starting at one.
+#[proc_macro]
+pub fn sos_constraint(input: TokenStream) -> TokenStream {
+    sos::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// `objective!(model, Min|Max, expr)`, set the model objective and sense.

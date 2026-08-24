@@ -186,7 +186,7 @@ fn file_reader_preserves_open_errors() {
 
 #[test]
 fn unsupported_sections_are_reported() {
-    let err = read_lp("Minimize\n obj: x\nSOS\n s1: S1:: x 1\nEnd\n".as_bytes()).unwrap_err();
+    let err = read_lp("Minimize\n obj: x\nIndicators\n x\nEnd\n".as_bytes()).unwrap_err();
     assert!(matches!(err, IoError::UnsupportedLp { .. }));
 }
 
@@ -196,6 +196,59 @@ fn inline_sos_and_indicators_are_explicitly_unsupported() {
         let text = format!("Minimize\n obj: x\nSubject To\n{row}\nEnd\n");
         let err = read_lp(text.as_bytes()).unwrap_err();
         assert!(matches!(err, IoError::UnsupportedLp { .. }), "{err:?}");
+    }
+}
+
+#[test]
+fn sos_sections_round_trip() {
+    let text = "Minimize\n obj: x + y + z\nSOS\n s1: S1 :: x : 1 y : 2\n s2: S2 :: x : 1 y : 2 z : 3\nEnd\n";
+    let model = read_lp(text.as_bytes()).expect("SOS LP");
+    assert_eq!(model.num_sos_constraints(), 2);
+    assert_eq!(model.kind(), oximo_core::ModelKind::MILP);
+    let output = to_lp_string(&model).expect("write SOS LP");
+    let roundtrip = read_lp(output.as_bytes()).expect("read written SOS LP");
+    assert_eq!(roundtrip.num_sos_constraints(), 2);
+    assert_eq!(roundtrip.sos_constraints()[0].name, "s1");
+    assert_eq!(roundtrip.sos_constraints()[1].name, "s2");
+    assert!((roundtrip.sos_constraints()[1].members[2].weight - 3.0).abs() < 1e-12);
+}
+
+#[test]
+fn sos_name_with_colon_is_rejected_by_writer() {
+    let m = Model::new("sos_colon_name");
+    variable!(m, x);
+    m.add_sos_constraint("choice:colon", SosType::Sos1, [(x, 1.0)]);
+    objective!(m, Min, x);
+
+    assert!(matches!(to_lp_string(&m), Err(IoError::InvalidLp { .. })));
+}
+
+#[test]
+fn sos_signed_weights_round_trip() {
+    let text = "Minimize\n obj: x + y + z\nSOS\n set: S2 :: x : -2.5 y : +1e-2 z : 3\nEnd\n";
+    let model = read_lp(text.as_bytes()).expect("signed SOS weights should parse");
+    let output = to_lp_string(&model).expect("write signed SOS weights");
+    let roundtrip = read_lp(output.as_bytes()).expect("read signed SOS weights");
+    let members = &roundtrip.sos_constraints()[0].members;
+    assert!((members[0].weight + 2.5).abs() < 1e-12);
+    assert!((members[1].weight - 1e-2).abs() < 1e-12);
+}
+
+#[test]
+fn malformed_sos_rows_are_rejected() {
+    for row in [
+        "choice S1 :: x : 1",
+        "choice:colon: S1 :: x : 1",
+        "choice: S3 :: x : 1",
+        "choice: S1 :: x",
+        "choice: S1 :: x : nope",
+        "choice: S1 :: x : NaN",
+        "choice: S1 ::",
+        "choice: S1 :: x : 1 x : 2",
+        "choice: S1 :: x : 1 y : 1",
+    ] {
+        let text = format!("Minimize\n obj: x + y\nSOS\n {row}\nEnd\n");
+        assert!(matches!(read_lp(text.as_bytes()), Err(IoError::InvalidLp { .. })), "{row}");
     }
 }
 

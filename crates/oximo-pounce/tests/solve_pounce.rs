@@ -147,6 +147,21 @@ fn integer_models_are_rejected() {
 }
 
 #[test]
+fn sos_constraints_are_rejected_consistently() {
+    let m = Model::new("sos");
+    variable!(m, x >= 0.0);
+    variable!(m, y >= 0.0);
+    objective!(m, Min, x + y);
+    sos_constraint!(m, ordered, SOS1, [(x, 1.0), (y, 2.0)]);
+
+    let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap_err();
+    assert!(matches!(cold, SolverError::UnsupportedConstraint("SOS1/SOS2")));
+    let mut persistent = Pounce.persistent();
+    let resident = persistent.solve(&m, &PounceOptions::default()).unwrap_err();
+    assert!(matches!(resident, SolverError::UnsupportedConstraint("SOS1/SOS2")));
+}
+
+#[test]
 fn soc_constraints_are_rejected_in_mixed_models() {
     let m = Model::new("mixed_soc");
     variable!(m, x >= 0.0);

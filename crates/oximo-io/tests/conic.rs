@@ -2,7 +2,10 @@
 //! constraints: LP/MPS/NL have no conic representation.
 
 use oximo_core::prelude::*;
-use oximo_io::{IoError, to_lp_string, to_mps_string, to_nl_string};
+use oximo_io::{
+    IoError, MpsQuadraticFormat, MpsWriteOptions, to_lp_string, to_mps_string, to_mps_string_with,
+    to_nl_string,
+};
 
 fn soc_model() -> Model {
     let m = Model::new("socp");
@@ -28,4 +31,30 @@ fn mps_writer_rejects_soc_constraints() {
 #[test]
 fn nl_writer_rejects_soc_constraints() {
     assert!(matches!(to_nl_string(&soc_model()), Err(IoError::Conic)));
+}
+
+fn sos_model() -> Model {
+    let m = Model::new("sos");
+    variable!(m, x);
+    variable!(m, y);
+    sos_constraint!(m, choice, SOS1, [x, y]);
+    objective!(m, Min, x + y);
+    m
+}
+
+#[test]
+fn nl_writer_rejects_sos_constraints() {
+    assert!(matches!(
+        to_nl_string(&sos_model()),
+        Err(IoError::UnsupportedNl { section, .. }) if section == "SOS"
+    ));
+}
+
+#[test]
+fn mosek_mps_writer_rejects_sos_constraints() {
+    let options = MpsWriteOptions { quadratic_format: MpsQuadraticFormat::Mosek };
+    assert!(matches!(
+        to_mps_string_with(&sos_model(), &options),
+        Err(IoError::UnsupportedMps { section, .. }) if section == "SOS"
+    ));
 }

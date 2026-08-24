@@ -16,7 +16,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
-use oximo_core::{Constraint, Domain, Model, ModelKind, ObjectiveSense, Sense, var_name};
+use oximo_core::{
+    Constraint, Domain, Model, ModelKind, ObjectiveSense, Sense, SosConstraint, SosType, var_name,
+};
 use oximo_expr::{Expr, QuadraticTerms, VarId, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::FxHashMap;
 
@@ -114,6 +116,7 @@ enum SectionRank {
     Ranges,
     Bounds,
     Quadratic,
+    Sos,
     End,
 }
 
@@ -130,6 +133,7 @@ enum Section {
     QMatrix,
     QcMatrix(String),
     QSec(String),
+    Sos,
     End,
 }
 
@@ -146,6 +150,7 @@ impl Section {
             Self::QuadObj | Self::QMatrix | Self::QcMatrix(_) | Self::QSec(_) => {
                 SectionRank::Quadratic
             }
+            Self::Sos => SectionRank::Sos,
             Self::End => SectionRank::End,
         }
     }
@@ -163,6 +168,7 @@ impl Section {
             Self::QMatrix => "QMATRIX",
             Self::QcMatrix(_) => "QCMATRIX",
             Self::QSec(_) => "QSECTION",
+            Self::Sos => "SOS",
             Self::End => "ENDATA",
         }
     }
@@ -192,7 +198,15 @@ struct ParsedMps {
     bounds_vector: Option<String>,
     objective_quadratic_source: Option<&'static str>,
     quadratic_rows: HashSet<String>,
+    sos: Vec<ParsedSos>,
+    current_sos: Option<usize>,
     seen_sections: u8,
+}
+
+struct ParsedSos {
+    name: String,
+    sos_type: SosType,
+    members: Vec<(String, f64)>,
 }
 
 const MPS_INFINITY_SENTINEL: f64 = 1e30;
@@ -221,6 +235,8 @@ impl ParsedMps {
             bounds_vector: None,
             objective_quadratic_source: None,
             quadratic_rows: HashSet::new(),
+            sos: Vec::new(),
+            current_sos: None,
             seen_sections: 0,
         }
     }
@@ -302,6 +318,10 @@ fn parse_number(field: &Field<'_>, line: usize) -> Result<f64, IoError> {
     Ok(value)
 }
 
+fn looks_like_number(text: &str) -> bool {
+    text.replace(['d', 'D'], "E").parse::<f64>().is_ok()
+}
+
 fn objective_sense(field: &Field<'_>, line: usize) -> Result<ObjectiveSense, IoError> {
     match field.text.to_ascii_uppercase().as_str() {
         "MIN" | "MINIMIZE" => Ok(ObjectiveSense::Minimize),
@@ -334,6 +354,7 @@ fn header(items: &[Field<'_>], current: &Section) -> Option<Section> {
         ("QMATRIX", 1) => Some(Section::QMatrix),
         ("QCMATRIX", 2) => Some(Section::QcMatrix(items[1].text.to_owned())),
         ("QSECTION", 2) => Some(Section::QSec(items[1].text.to_owned())),
+        ("SOS", 1) => Some(Section::Sos),
         ("ENDATA", 1) => Some(Section::End),
         _ => None,
     }
@@ -779,7 +800,12 @@ fn check_section_transition(
     next: &Section,
     line: usize,
 ) -> Result<(), IoError> {
-    if next.rank() < previous.rank() {
+    let quadratic_after_sos = matches!(previous, Section::Sos)
+        && matches!(
+            next,
+            Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_)
+        );
+    if next.rank() < previous.rank() && !quadratic_after_sos {
         return Err(invalid_mps(
             line,
             1,
@@ -817,14 +843,14 @@ fn parse_mps_line(
         return Err(invalid_mps(line_no, 1, "content after ENDATA"));
     }
     let items = fields(line);
-    if let Some(first) = items.first() {
-        let keyword = first.text.to_ascii_uppercase();
-        if items.len() == 1 && matches!(keyword.as_str(), "SOS" | "INDICATORS") {
-            return Err(IoError::UnsupportedMps {
-                section: keyword,
-                feature: "not represented by oximo-core".into(),
-            });
-        }
+    if let Some(first) = items.first()
+        && items.len() == 1
+        && first.text.eq_ignore_ascii_case("INDICATORS")
+    {
+        return Err(IoError::UnsupportedMps {
+            section: "INDICATORS".into(),
+            feature: "not represented by oximo-core".into(),
+        });
     }
     if let Some(next) = header(&items, section) {
         if matches!(next, Section::Name) {
@@ -853,6 +879,7 @@ fn parse_mps_line(
             Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
                 begin_quadratic_section(data, &next, line_no)?;
             }
+            Section::Sos => data.current_sos = None,
             Section::End => data.seen_sections |= SEEN_END,
             _ => {}
         }
@@ -877,9 +904,41 @@ fn parse_mps_line(
         Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
             parse_quadratic_record(data, section, &items, line_no, options)?;
         }
+        Section::Sos => parse_sos_record(data, &items, line_no)?,
         Section::Name => return Err(invalid_mps(line_no, 1, "expected NAME header")),
         Section::End => unreachable!(),
     }
+    Ok(())
+}
+
+fn parse_sos_record(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(), IoError> {
+    // Headers carry a set name, while members carry a numeric weight.
+    // A variable named S1 or S2 must therefore follow the member path.
+    let is_header = matches!(items.first().map(|item| item.text.to_ascii_uppercase()), Some(ty) if matches!(ty.as_str(), "S1" | "S2"))
+        && (items.len() != 2 || !looks_like_number(items[1].text));
+    if is_header {
+        if items.len() != 2 {
+            return Err(invalid_mps(line, 1, "SOS set headers require type and name"));
+        }
+        let sos_type = match items[0].text.to_ascii_uppercase().as_str() {
+            "S1" => SosType::Sos1,
+            _ => SosType::Sos2,
+        };
+        if items[1].text.is_empty() {
+            return Err(invalid_mps(line, items[1].column, "SOS set needs a name"));
+        }
+        data.sos.push(ParsedSos { name: items[1].text.to_owned(), sos_type, members: Vec::new() });
+        data.current_sos = Some(data.sos.len() - 1);
+        return Ok(());
+    }
+    let Some(index) = data.current_sos else {
+        return Err(invalid_mps(line, 1, "SOS member appears before an S1/S2 header"));
+    };
+    if items.len() != 2 {
+        return Err(invalid_mps(line, 1, "SOS member needs variable name and weight"));
+    }
+    let weight = parse_number(&items[1], line)?;
+    data.sos[index].members.push((items[0].text.to_owned(), weight));
     Ok(())
 }
 
@@ -1011,6 +1070,34 @@ fn write_quadratic_section<W: Write>(
     Ok(())
 }
 
+fn write_sos_section<W: Write>(
+    out: &mut W,
+    constraints: &[SosConstraint],
+    variable_names: &[String],
+) -> Result<(), IoError> {
+    writeln!(out, "SOS")?;
+    let sos_names = unique_mps_names(
+        constraints.iter().map(|s| s.name.as_str()),
+        "S",
+        std::iter::empty::<&str>(),
+    );
+    for (set, set_name) in constraints.iter().zip(sos_names.iter()) {
+        writeln!(
+            out,
+            " S{} {}",
+            match set.sos_type {
+                SosType::Sos1 => 1,
+                SosType::Sos2 => 2,
+            },
+            set_name
+        )?;
+        for member in &set.members {
+            writeln!(out, "    {:<10} {}", variable_names[member.variable.index()], member.weight)?;
+        }
+    }
+    Ok(())
+}
+
 fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
     for column in &data.columns {
         if column.lower > column.upper {
@@ -1033,6 +1120,30 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
     for row in &data.rows {
         if row.lower > row.upper {
             return Err(invalid_mps(1, 1, format!("inconsistent range for row {:?}", row.name)));
+        }
+    }
+    let mut sos_names = HashSet::new();
+    for set in &data.sos {
+        if !sos_names.insert(set.name.clone()) {
+            return Err(invalid_mps(1, 1, format!("duplicate SOS name {:?}", set.name)));
+        }
+        if set.members.is_empty() {
+            return Err(invalid_mps(1, 1, format!("SOS {:?} has no members", set.name)));
+        }
+        let mut members = HashSet::new();
+        let mut weights = Vec::new();
+        for (var, weight) in &set.members {
+            if !data.column_index.contains_key(var) {
+                return Err(invalid_mps(1, 1, format!("unknown SOS variable {var:?}")));
+            }
+            if !members.insert(var) || weights.contains(weight) {
+                return Err(invalid_mps(
+                    1,
+                    1,
+                    format!("duplicate SOS member or weight in {:?}", set.name),
+                ));
+            }
+            weights.push(*weight);
         }
     }
     let model = Model::new(data.name);
@@ -1060,6 +1171,13 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
     for row in data.rows {
         let expr = expression(&model, &variables, row.linear, row.quadratic, 0.0);
         model.__add_constraint_interval(row.name, expr, row.lower, row.upper);
+    }
+    for set in data.sos {
+        let members = set.members.into_iter().map(|(name, weight)| {
+            let index = *data.column_index.get(&name).expect("validated SOS variable");
+            (variables[index], weight)
+        });
+        model.add_sos_constraint(set.name, set.sos_type, members);
     }
     let objective = expression(
         &model,
@@ -1149,6 +1267,13 @@ pub fn write_mps_with<W: Write>(
     out: &mut W,
     options: &MpsWriteOptions,
 ) -> Result<(), IoError> {
+    if !model.sos_constraints().is_empty() && options.quadratic_format == MpsQuadraticFormat::Mosek
+    {
+        return Err(IoError::UnsupportedMps {
+            section: "SOS".into(),
+            feature: "SOS is not supported by the MOSEK MPS dialect".into(),
+        });
+    }
     if model.num_soc_constraints() > 0
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
     {
@@ -1329,6 +1454,11 @@ pub fn write_mps_with<W: Write>(
         }
     }
 
+    let sos = model.sos_constraints();
+    if options.quadratic_format == MpsQuadraticFormat::Cplex && !sos.is_empty() {
+        write_sos_section(out, &sos, &variable_names)?;
+    }
+
     if !obj_terms.hessian.is_empty() {
         let header = if options.quadratic_format == MpsQuadraticFormat::Mosek {
             "QSECTION OBJ"
@@ -1362,6 +1492,10 @@ pub fn write_mps_with<W: Write>(
             options.quadratic_format,
             false,
         )?;
+    }
+
+    if options.quadratic_format != MpsQuadraticFormat::Cplex && !sos.is_empty() {
+        write_sos_section(out, &sos, &variable_names)?;
     }
 
     writeln!(out, "ENDATA")?;

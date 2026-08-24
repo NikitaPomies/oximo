@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
-use oximo_core::{Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, var_name};
+use oximo_core::{Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, SosType, var_name};
 use oximo_expr::{Expr, QuadraticTerms, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::FxHashSet;
 
@@ -408,6 +408,13 @@ struct ParsedLp {
     semi: Vec<String>,
     vars: Vec<String>,
     var_set: FxHashSet<String>,
+    sos: Vec<ParsedLpSos>,
+}
+
+struct ParsedLpSos {
+    name: String,
+    sos_type: SosType,
+    members: Vec<(String, f64)>,
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -444,11 +451,58 @@ fn section(line: &str) -> Option<&'static str> {
         "binary" | "binaries" | "bin" => Some("binary"),
         "semi-continuous" | "semis" | "semi" => Some("semi"),
         "end" => Some("end"),
-        "sos" | "indicators" | "lazy constraints" | "user cuts" | "pwl" | "multi-objective" => {
+        "indicators" | "lazy constraints" | "user cuts" | "pwl" | "multi-objective" => {
             Some("unsupported")
         }
+        "sos" => Some("sos"),
         _ => None,
     }
+}
+
+fn parse_sos_line(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoError> {
+    let (name, body) = line
+        .split_once(':')
+        .ok_or_else(|| invalid_lp(line_no, 1, "SOS row needs a name and colon"))?;
+    let name = name.trim().to_owned();
+    validate_lp_row_name(&name)?;
+    let (ty, members) = body
+        .split_once("::")
+        .ok_or_else(|| invalid_lp(line_no, 1, "SOS row needs `S1 ::` or `S2 ::`"))?;
+    if ty.contains(':') {
+        return Err(invalid_lp(line_no, 1, "SOS row names cannot contain `:`"));
+    }
+    let sos_type = match ty.trim().to_ascii_uppercase().as_str() {
+        "S1" => SosType::Sos1,
+        "S2" => SosType::Sos2,
+        _ => return Err(invalid_lp(line_no, 1, "SOS type must be S1 or S2")),
+    };
+    let toks = lex(members, line_no)?;
+    let mut parsed = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let Some(Token { kind: Tok::Word(var), .. }) = toks.get(i) else {
+            return Err(invalid_lp(line_no, 1, "SOS member needs a variable name"));
+        };
+        i += 1;
+        if !matches!(toks.get(i).map(|t| &t.kind), Some(Tok::Colon)) {
+            return Err(invalid_lp(line_no, 1, "SOS member needs `variable: weight`"));
+        }
+        i += 1;
+        let mut weight_pos = i;
+        let Some(weight) = bound_value(&toks, &mut weight_pos) else {
+            return Err(invalid_lp(line_no, 1, "SOS member needs a numeric weight"));
+        };
+        if !weight.is_finite() {
+            return Err(invalid_lp(line_no, 1, "SOS weight must be finite"));
+        }
+        parsed.push((var.clone(), weight));
+        i = weight_pos;
+    }
+    if parsed.is_empty() {
+        return Err(invalid_lp(line_no, 1, "SOS row has no members"));
+    }
+    p.sos.push(ParsedLpSos { name, sos_type, members: parsed });
+    Ok(())
 }
 
 fn parse_constraint_line(
@@ -536,7 +590,7 @@ fn parse_lp<R: BufRead>(mut input: R, model_name: &str) -> Result<Model, IoError
                 continue;
             }
             if s == "unsupported" {
-                // TODO: Add native SOS, indicator, PWL, and MO
+                // TODO: Add native indicator, PWL, and MO
                 // representations before importing these sections.
                 return Err(IoError::UnsupportedLp {
                     section: line.to_owned(),
@@ -559,6 +613,7 @@ fn parse_lp<R: BufRead>(mut input: R, model_name: &str) -> Result<Model, IoError
             "rows" => {
                 parse_constraint_line(line, line_count, &mut pending, &mut pending_line, &mut p)?;
             }
+            "sos" => parse_sos_line(line, line_count, &mut p)?,
             "bounds" => parse_bound(line, line_count, &mut p)?,
             "general" => p.general.extend(line.split_whitespace().map(str::to_owned)),
             "binary" => p.binary.extend(line.split_whitespace().map(str::to_owned)),
@@ -582,6 +637,7 @@ fn parse_lp<R: BufRead>(mut input: R, model_name: &str) -> Result<Model, IoError
     build_model(p, objective_lines, model_name)
 }
 
+#[expect(clippy::too_many_lines)]
 fn build_model(
     mut p: ParsedLp,
     objective_lines: Vec<String>,
@@ -598,7 +654,34 @@ fn build_model(
     let general_names: FxHashSet<String> = p.general.iter().cloned().collect();
     let binary_names: FxHashSet<String> = p.binary.iter().cloned().collect();
     let semi_names: FxHashSet<String> = p.semi.iter().cloned().collect();
-    for n in p.bounds.keys().chain(p.general.iter()).chain(p.binary.iter()).chain(p.semi.iter()) {
+    let mut sos_names = HashSet::new();
+    for sos in &p.sos {
+        let name = &sos.name;
+        let members = &sos.members;
+        if !sos_names.insert(name.clone()) {
+            return Err(invalid_lp(1, 1, format!("duplicate SOS name {name:?}")));
+        }
+        let mut vars_seen = HashSet::new();
+        let mut weights_seen = Vec::new();
+        for (var, weight) in members {
+            if !vars_seen.insert(var) || weights_seen.contains(weight) {
+                return Err(invalid_lp(
+                    1,
+                    1,
+                    format!("duplicate SOS member or weight in {name:?}"),
+                ));
+            }
+            weights_seen.push(*weight);
+        }
+    }
+    for n in p
+        .bounds
+        .keys()
+        .chain(p.general.iter())
+        .chain(p.binary.iter())
+        .chain(p.semi.iter())
+        .chain(p.sos.iter().flat_map(|sos| sos.members.iter().map(|(n, _)| n)))
+    {
         if p.var_set.insert(n.clone()) {
             p.vars.push(n.clone());
         }
@@ -670,6 +753,18 @@ fn build_model(
             },
         );
     }
+    for ParsedLpSos { name, sos_type, members } in p.sos {
+        let members = members
+            .into_iter()
+            .map(|(var, weight)| {
+                vars.get(&var)
+                    .copied()
+                    .ok_or_else(|| invalid_lp(1, 1, format!("unknown SOS variable {var:?}")))
+                    .map(|v| (v, weight))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        m.add_sos_constraint(name, sos_type, members);
+    }
     let e = lower(&m, &vars, obj)?;
     match p.sense.unwrap() {
         ObjectiveSense::Minimize => m.__minimize(e),
@@ -705,7 +800,7 @@ fn validate_lp_variable_name(name: &str) -> Result<(), IoError> {
 }
 
 fn validate_lp_row_name(name: &str) -> Result<(), IoError> {
-    if name.chars().any(char::is_control) || name.contains('\\') {
+    if name.chars().any(char::is_control) || name.contains('\\') || name.contains(':') {
         return Err(invalid_lp(
             1,
             1,
@@ -1018,6 +1113,30 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     if !semi_vars.is_empty() {
         writeln!(out, "Semi-Continuous")?;
         writeln!(out, " {}", semi_vars.join(" "))?;
+    }
+
+    let sos = model.sos_constraints();
+    if !sos.is_empty() {
+        let vars_by_id: HashMap<oximo_core::VarId, &str> =
+            vars.iter().map(|v| (v.id, v.name.as_str())).collect();
+        writeln!(out, "SOS")?;
+        for s in sos.iter() {
+            validate_lp_row_name(&s.name)?;
+            write!(
+                out,
+                " {}: {} ::",
+                s.name,
+                match s.sos_type {
+                    SosType::Sos1 => "S1",
+                    SosType::Sos2 => "S2",
+                }
+            )?;
+            for member in &s.members {
+                let name = vars_by_id.get(&member.variable).copied().unwrap_or("<unknown>");
+                write!(out, " {} : {}", name, member.weight)?;
+            }
+            writeln!(out)?;
+        }
     }
 
     writeln!(out, "End")?;

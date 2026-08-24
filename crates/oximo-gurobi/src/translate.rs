@@ -5,7 +5,7 @@ use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
 use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraint,
-    SocConstraintId, VarId, Variable, var_name,
+    SocConstraintId, SosConstraint, SosConstraintId, SosType, VarId, Variable, var_name,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term, extract_linear};
 use oximo_solver::{
@@ -54,6 +54,7 @@ pub(crate) struct Built {
     pub constrs: Vec<ConstraintHandle>,
     pub objective_generated: Vec<GeneratedConstraint>,
     pub soc_rows: Vec<SocHandle>,
+    pub sos: Vec<(SosConstraintId, gurobi_rs::SOS)>,
     pub obj_constant: f64,
     pub has_semi: bool,
 }
@@ -82,6 +83,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     let socs = model.soc_constraints();
+    let sos = model.sos_constraints();
     let objective = model.objective();
     let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
 
@@ -95,6 +97,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     let gurobi_constrs =
         add_constraints(&arena, constraints, &mut gurobi_model, &gurobi_vars, &mut aux_counter)?;
     let soc_rows = add_soc_rows(&arena, &vars, &socs, &mut gurobi_model, &gurobi_vars)?;
+    let special_ordered_sets = add_sos_constraints(&sos, &mut gurobi_model, &gurobi_vars)?;
 
     let (obj_constant, objective_generated) = match objective.as_ref() {
         Some(o) => set_objective(
@@ -126,6 +129,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         constrs: gurobi_constrs,
         objective_generated,
         soc_rows,
+        sos: special_ordered_sets,
         obj_constant,
         has_semi,
     })
@@ -356,6 +360,12 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
         }
     }
 
+    for (id, sos) in &built.sos {
+        if model.get_obj_attr(attr::IISSOS, sos).map_err(map_gurobi_err)? != 0 {
+            iis.sos_constraints.push(*id);
+        }
+    }
+
     // Only model variables are scanned.
     for (i, v) in built.vars.iter().enumerate() {
         let id = VarId(u32::try_from(i).expect("var index fits u32"));
@@ -403,6 +413,33 @@ fn add_variables(
         gurobi_rs::VarSpec::new(v.name.as_str(), vtype, 0.0, floor, v.ub, [])
     });
     gurobi_model.add_vars(specs).map_err(map_gurobi_err)
+}
+
+fn add_sos_constraints(
+    constraints: &[SosConstraint],
+    gurobi_model: &mut gurobi_rs::Model,
+    gurobi_vars: &[gurobi_rs::Var],
+) -> Result<Vec<(SosConstraintId, gurobi_rs::SOS)>, SolverError> {
+    active_sos_constraints(constraints)
+        .map(|(id, s)| {
+            let members = s.members.iter().map(|m| (gurobi_vars[m.variable.index()], m.weight));
+            let ty = match s.sos_type {
+                SosType::Sos1 => SOSType::Ty1,
+                SosType::Sos2 => SOSType::Ty2,
+            };
+            gurobi_model.add_sos(members, ty).map(|handle| (id, handle)).map_err(map_gurobi_err)
+        })
+        .collect()
+}
+
+fn active_sos_constraints(
+    constraints: &[SosConstraint],
+) -> impl Iterator<Item = (SosConstraintId, &SosConstraint)> {
+    constraints.iter().enumerate().filter(|(_, constraint)| constraint.active).map(
+        |(index, constraint)| {
+            (SosConstraintId(u32::try_from(index).expect("sos index fits u32")), constraint)
+        },
+    )
 }
 
 fn apply_initial_values(
@@ -953,6 +990,8 @@ fn map_status(status: Status) -> TerminationStatus {
 
 #[cfg(test)]
 mod status_tests {
+    use oximo_core::{SosConstraint, SosMember, VarId};
+
     use super::*;
 
     #[test]
@@ -972,6 +1011,32 @@ mod status_tests {
         assert_eq!(map_status(Status::MemLimit), TerminationStatus::MemoryLimit);
         assert_eq!(map_status(Status::LocallyInfeasible), TerminationStatus::LocallyInfeasible);
         assert_eq!(map_status(Status::Interrupted), TerminationStatus::Interrupted);
+    }
+
+    #[test]
+    fn inactive_sos_constraints_are_skipped_without_compacting_ids() {
+        let constraints = vec![
+            SosConstraint {
+                name: "inactive".into(),
+                sos_type: SosType::Sos1,
+                members: vec![SosMember { variable: VarId(0), weight: 1.0 }],
+                active: false,
+            },
+            SosConstraint {
+                name: "first".into(),
+                sos_type: SosType::Sos1,
+                members: vec![SosMember { variable: VarId(1), weight: 1.0 }],
+                active: true,
+            },
+            SosConstraint {
+                name: "second".into(),
+                sos_type: SosType::Sos2,
+                members: vec![SosMember { variable: VarId(2), weight: 1.0 }],
+                active: true,
+            },
+        ];
+        let ids: Vec<_> = active_sos_constraints(&constraints).map(|(id, _)| id).collect();
+        assert_eq!(ids, [SosConstraintId(1), SosConstraintId(2)]);
     }
 }
 

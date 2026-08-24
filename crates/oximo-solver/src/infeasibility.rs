@@ -1,4 +1,4 @@
-use oximo_core::{ConstraintId, Model, SocConstraintId, VarId};
+use oximo_core::{ConstraintId, Model, SocConstraintId, SosConstraintId, VarId};
 
 use crate::result::SolverResult;
 use crate::solver::Solver;
@@ -28,6 +28,7 @@ pub struct Iis {
     pub constraints: Vec<ConstraintId>,
     /// Second-order-cone constraints in the IIS.
     pub soc_constraints: Vec<SocConstraintId>,
+    pub sos_constraints: Vec<SosConstraintId>,
     /// Variable bounds in the IIS, each `(variable, which bound)`.
     pub var_bounds: Vec<(VarId, VarBoundKind)>,
 }
@@ -36,14 +37,20 @@ impl Iis {
     /// Whether the IIS carries no members.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.constraints.is_empty() && self.soc_constraints.is_empty() && self.var_bounds.is_empty()
+        self.constraints.is_empty()
+            && self.soc_constraints.is_empty()
+            && self.sos_constraints.is_empty()
+            && self.var_bounds.is_empty()
     }
 
     /// The total number of members (constraints, SOC constraints, and variable
     /// bounds) in the IIS.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.constraints.len() + self.soc_constraints.len() + self.var_bounds.len()
+        self.constraints.len()
+            + self.soc_constraints.len()
+            + self.sos_constraints.len()
+            + self.var_bounds.len()
     }
 
     /// A human-readable, model-aware listing of this IIS.
@@ -89,6 +96,17 @@ impl std::fmt::Display for IisReport<'_> {
                 match socs.get(id.index()) {
                     Some(s) => writeln!(f, "  {}", s.name)?,
                     None => writeln!(f, "  <soc #{}>", id.index())?,
+                }
+            }
+        }
+
+        if !iis.sos_constraints.is_empty() {
+            let sos = m.sos_constraints();
+            writeln!(f, "\nsos constraints ({})", iis.sos_constraints.len())?;
+            for id in &iis.sos_constraints {
+                match sos.get(id.index()) {
+                    Some(s) => writeln!(f, "  {}", s.name)?,
+                    None => writeln!(f, "  <sos #{}>", id.index())?,
                 }
             }
         }
@@ -141,7 +159,7 @@ pub fn is_infeasible(result: &SolverResult) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use oximo_core::{constraint, variable};
+    use oximo_core::{SosType, constraint, variable};
 
     use super::*;
 
@@ -151,21 +169,36 @@ mod tests {
         variable!(m, x >= 0.0);
         let lo = constraint!(m, floor, x >= 2.0);
         let hi = constraint!(m, ceil, x <= 1.0);
+        let sos = {
+            variable!(m, y);
+            m.add_sos_constraint("choice", SosType::Sos1, [(y, 1.0)])
+        };
 
         let iis = Iis {
             constraints: vec![lo, hi],
             soc_constraints: Vec::new(),
+            sos_constraints: vec![sos],
             var_bounds: vec![(x.var_id().unwrap(), VarBoundKind::Lower)],
         };
 
-        assert_eq!(iis.len(), 3);
+        assert_eq!(iis.len(), 4);
         assert!(!iis.is_empty());
 
         let out = iis.report(&m).to_string();
-        assert!(out.contains("irreducible infeasible subsystem (3 members)"), "{out}");
+        assert!(out.contains("irreducible infeasible subsystem (4 members)"), "{out}");
         assert!(out.contains("floor"), "{out}");
         assert!(out.contains("ceil"), "{out}");
+        assert!(out.contains("sos constraints (1)"), "{out}");
+        assert!(out.contains("choice"), "{out}");
         assert!(out.contains("x (lower bound)"), "{out}");
+    }
+
+    #[test]
+    fn report_handles_unknown_sos_ids() {
+        let m = Model::new("unknown");
+        let iis = Iis { sos_constraints: vec![SosConstraintId(9)], ..Iis::default() };
+        let out = iis.report(&m).to_string();
+        assert!(out.contains("<sos #9>"), "{out}");
     }
 
     #[test]

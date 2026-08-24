@@ -89,6 +89,12 @@ pub fn write_nl_with<W: Write>(
     if model.num_soc_constraints() > 0 {
         return Err(IoError::Conic);
     }
+    if model.has_sos_constraints() {
+        return Err(IoError::UnsupportedNl {
+            section: "SOS".into(),
+            feature: "SOS constraints have no native NL segment".into(),
+        });
+    }
     let vars = model.variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();

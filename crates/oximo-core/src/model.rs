@@ -14,6 +14,7 @@ use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::soc::{SocConstraint, SocConstraintId, is_detected_soc};
+use crate::sos::{SosConstraint, SosConstraintId, SosMember, SosType, validate_members};
 use crate::var::{VarBuilder, Variable};
 
 const PAR_KIND_THRESHOLD: usize = 256;
@@ -50,13 +51,14 @@ pub enum ModelKind {
 
 /// A borrowed constraint from a [`Model`].
 ///
-/// Algebraic constraints and explicitly declared second-order-cone constraints
+/// Algebraic, explicitly declared second-order-cone, and SOS constraints
 /// retain their typed IDs and storage. This enum provides a unified inspection
 /// boundary without changing either representation.
 #[derive(Copy, Clone, Debug)]
 pub enum ConstraintRef<'a> {
     Algebraic { id: ConstraintId, constraint: &'a Constraint },
     SecondOrderCone { id: SocConstraintId, constraint: &'a SocConstraint },
+    SpecialOrderedSet { id: SosConstraintId, constraint: &'a SosConstraint },
 }
 
 /// Unified borrowed view of every constraint declared on a [`Model`].
@@ -64,11 +66,12 @@ pub enum ConstraintRef<'a> {
 /// The underlying algebraic and explicit-SOC registries remain separate, so
 /// backends can iterate a homogeneous slice without a per-constraint branch.
 /// [`Self::iter`] visits algebraic constraints in [`ConstraintId`] order,
-/// followed by explicit cones in [`SocConstraintId`] order.
+/// followed by explicit cones and SOS constraints in their respective ID order.
 #[derive(Debug)]
 pub struct ModelConstraints<'a> {
     algebraic: Ref<'a, Vec<Constraint>>,
     second_order_cones: Ref<'a, Vec<SocConstraint>>,
+    special_ordered_sets: Ref<'a, Vec<SosConstraint>>,
 }
 
 impl ModelConstraints<'_> {
@@ -80,6 +83,10 @@ impl ModelConstraints<'_> {
     /// Explicit second-order-cone constraints in [`SocConstraintId`] order.
     pub fn second_order_cones(&self) -> &[SocConstraint] {
         &self.second_order_cones
+    }
+
+    pub fn special_ordered_sets(&self) -> &[SosConstraint] {
+        &self.special_ordered_sets
     }
 
     /// Iterate over all declared constraints without allocating.
@@ -95,16 +102,22 @@ impl ModelConstraints<'_> {
             self.second_order_cones.iter().enumerate().map(|(index, constraint)| {
                 ConstraintRef::SecondOrderCone { id: SocConstraintId(index as u32), constraint }
             });
-        algebraic.chain(second_order_cones)
+        let special_ordered_sets =
+            self.special_ordered_sets.iter().enumerate().map(|(index, constraint)| {
+                ConstraintRef::SpecialOrderedSet { id: SosConstraintId(index as u32), constraint }
+            });
+        algebraic.chain(second_order_cones).chain(special_ordered_sets)
     }
 
-    /// Total number of algebraic and explicit second-order-cone constraints.
+    /// Total number of algebraic, SOC, and SOS constraints.
     pub fn len(&self) -> usize {
-        self.algebraic.len() + self.second_order_cones.len()
+        self.algebraic.len() + self.second_order_cones.len() + self.special_ordered_sets.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.algebraic.is_empty() && self.second_order_cones.is_empty()
+        self.algebraic.is_empty()
+            && self.second_order_cones.is_empty()
+            && self.special_ordered_sets.is_empty()
     }
 }
 
@@ -127,6 +140,8 @@ pub struct Model {
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
     pub(crate) soc_constraints: RefCell<Vec<SocConstraint>>,
     pub(crate) soc_names: RefCell<FxHashMap<SmolStr, SocConstraintId>>,
+    pub(crate) sos_constraints: RefCell<Vec<SosConstraint>>,
+    pub(crate) sos_names: RefCell<FxHashMap<SmolStr, SosConstraintId>>,
     pub(crate) objective: RefCell<Option<Objective>>,
     objective_declared: Cell<bool>,
     cached_kind: Cell<Option<ModelKind>>,
@@ -143,6 +158,7 @@ impl std::fmt::Debug for Model {
             .field("params", &self.parameters.borrow().len())
             .field("constraints", &self.constraints.borrow().len())
             .field("soc_constraints", &self.soc_constraints.borrow().len())
+            .field("sos_constraints", &self.sos_constraints.borrow().len())
             .field("has_objective", &self.objective.borrow().is_some())
             .field("feasibility", &self.is_feasibility())
             .finish()
@@ -162,6 +178,8 @@ impl Model {
             constraint_names: RefCell::new(FxHashMap::default()),
             soc_constraints: RefCell::new(Vec::new()),
             soc_names: RefCell::new(FxHashMap::default()),
+            sos_constraints: RefCell::new(Vec::new()),
+            sos_names: RefCell::new(FxHashMap::default()),
             objective: RefCell::new(None),
             objective_declared: Cell::new(false),
             cached_kind: Cell::new(None),
@@ -654,18 +672,21 @@ impl Model {
         }
     }
 
-    /// Unified view of every algebraic and explicit second-order-cone
-    /// constraint declared on this model.
+    /// Unified view of every algebraic, explicit SOC, and SOS constraint
+    /// declared on this model.
     pub fn constraints(&self) -> ModelConstraints<'_> {
         ModelConstraints {
             algebraic: self.constraints.borrow(),
             second_order_cones: self.soc_constraints.borrow(),
+            special_ordered_sets: self.sos_constraints.borrow(),
         }
     }
 
-    /// Total number of algebraic and explicit second-order-cone constraints.
+    /// Total number of algebraic, SOC, and SOS constraints.
     pub fn num_constraints(&self) -> usize {
-        self.constraints.borrow().len() + self.soc_constraints.borrow().len()
+        self.constraints.borrow().len()
+            + self.soc_constraints.borrow().len()
+            + self.sos_constraints.borrow().len()
     }
 
     pub fn constraint_id(&self, name: &str) -> Option<ConstraintId> {
@@ -792,6 +813,155 @@ impl Model {
         !self.soc_constraints.borrow().is_empty()
     }
 
+    /// Register an explicit SOS1 or SOS2 constraint. Members must be bare
+    /// variables belonging to this model and have finite, unique weights.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a member belongs to another model, is not a bare variable,
+    /// or the name, members, variables, or weights violate SOS invariants.
+    pub fn add_sos_constraint<'a>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        sos_type: SosType,
+        members: impl IntoIterator<Item = (Expr<'a>, f64)>,
+    ) -> SosConstraintId {
+        let name = name.into();
+        let members: Vec<SosMember> = members
+            .into_iter()
+            .map(|(expr, weight)| {
+                assert!(
+                    std::ptr::eq(expr.arena, &raw const self.arena),
+                    "SOS member belongs to another model"
+                );
+                let variable = expr.var_id().expect("SOS members must be bare variables");
+                SosMember { variable, weight }
+            })
+            .collect();
+        validate_members(&name, &members);
+        let mut by_name = self.sos_names.borrow_mut();
+        assert!(!by_name.contains_key(&name), "SOS constraint name {name:?} already registered");
+        let mut all = self.sos_constraints.borrow_mut();
+        let id = SosConstraintId(u32::try_from(all.len()).expect("SOS constraint count overflow"));
+        all.push(SosConstraint { name: name.clone(), sos_type, members, active: true });
+        by_name.insert(name, id);
+        self.cached_kind.set(None);
+        id
+    }
+
+    /// Register an SOS1 or SOS2 constraint with consecutive positional
+    /// weights `1, 2, ...` inferred from the member order.
+    ///
+    /// This is a convenience for models where the ordering is already
+    /// represented by the iterator order. Use [`Self::add_sos_constraint`]
+    /// when the weights are meaningful values that should be preserved.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Self::add_sos_constraint`], or
+    /// when the iterator contains more than `u32::MAX` members.
+    pub fn add_sos_constraint_auto_weights<'a>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        sos_type: SosType,
+        variables: impl IntoIterator<Item = Expr<'a>>,
+    ) -> SosConstraintId {
+        self.add_sos_constraint(
+            name,
+            sos_type,
+            variables.into_iter().enumerate().map(|(index, variable)| {
+                let weight = index
+                    .checked_add(1)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .expect("SOS member count exceeds positional weight range");
+                (variable, f64::from(weight))
+            }),
+        )
+    }
+
+    fn next_auto_sos_name(&self) -> SmolStr {
+        loop {
+            let n = self.auto_seq.get();
+            self.auto_seq.set(n + 1);
+            let candidate: SmolStr = format!("_sos{n}").into();
+            if !self.sos_names.borrow().contains_key(&candidate) {
+                break candidate;
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __add_sos_constraint_auto<'a>(
+        &'a self,
+        sos_type: SosType,
+        members: impl IntoIterator<Item = (Expr<'a>, f64)>,
+    ) -> SosConstraintId {
+        self.add_sos_constraint(self.next_auto_sos_name(), sos_type, members)
+    }
+
+    #[doc(hidden)]
+    pub fn __add_sos_constraint_auto_weights<'a>(
+        &'a self,
+        sos_type: SosType,
+        variables: impl IntoIterator<Item = Expr<'a>>,
+    ) -> SosConstraintId {
+        self.add_sos_constraint_auto_weights(self.next_auto_sos_name(), sos_type, variables)
+    }
+
+    #[doc(hidden)]
+    pub fn __add_sos_constraints_over<'a, K, T, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        sos_type: SosType,
+        mut rule: F,
+    ) where
+        K: FromIndexKey,
+        T: IntoIterator<Item = (Expr<'a>, f64)>,
+        F: FnMut(K) -> T,
+    {
+        for key in set {
+            let typed = K::from_index_key(&key);
+            let name: SmolStr = format_index_name(name_prefix, &key).into();
+            self.add_sos_constraint(name, sos_type, rule(typed));
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __add_sos_constraints_over_auto_weights<'a, K, T, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        sos_type: SosType,
+        mut rule: F,
+    ) where
+        K: FromIndexKey,
+        T: IntoIterator<Item = Expr<'a>>,
+        F: FnMut(K) -> T,
+    {
+        for key in set {
+            let typed = K::from_index_key(&key);
+            let name: SmolStr = format_index_name(name_prefix, &key).into();
+            self.add_sos_constraint_auto_weights(name, sos_type, rule(typed));
+        }
+    }
+
+    pub fn sos_constraints(&self) -> Ref<'_, Vec<SosConstraint>> {
+        self.sos_constraints.borrow()
+    }
+
+    pub fn num_sos_constraints(&self) -> usize {
+        self.sos_constraints.borrow().len()
+    }
+
+    pub fn sos_constraint_id(&self, name: &str) -> Option<SosConstraintId> {
+        self.sos_names.borrow().get(name).copied()
+    }
+
+    pub fn has_sos_constraints(&self) -> bool {
+        !self.sos_constraints.borrow().is_empty()
+    }
+
     // Objective
 
     /// Macro-facing entry point backing `objective!(m, Min, ..)`. Not part of the
@@ -897,7 +1067,8 @@ impl Model {
     fn infer_kind_impl(&self, parallel: Option<bool>) -> ModelKind {
         let arena = self.arena.borrow();
         let vars = self.variables.borrow();
-        let has_int = vars.iter().any(|v| v.domain.is_integer());
+        let has_int =
+            vars.iter().any(|v| v.domain.is_integer()) || !self.sos_constraints.borrow().is_empty();
         let obj_class = self
             .objective
             .borrow()
@@ -1230,14 +1401,17 @@ mod tests {
         let t = m.__var("t").lb(0.0).build();
         m.__add_constraint("row", x.le(1.0));
         m.add_soc_constraint("cone", [x], t);
+        m.add_sos_constraint("sos", SosType::Sos1, [(x, 1.0)]);
         m.constraints.borrow_mut()[0].active = false;
         m.soc_constraints.borrow_mut()[0].active = false;
+        m.sos_constraints.borrow_mut()[0].active = false;
 
         let constraints = m.constraints();
-        assert_eq!(constraints.len(), 2);
+        assert_eq!(constraints.len(), 3);
         assert!(constraints.iter().all(|entry| match entry {
             ConstraintRef::Algebraic { constraint, .. } => !constraint.active,
             ConstraintRef::SecondOrderCone { constraint, .. } => !constraint.active,
+            ConstraintRef::SpecialOrderedSet { constraint, .. } => !constraint.active,
         }));
     }
 

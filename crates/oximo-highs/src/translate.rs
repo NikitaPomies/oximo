@@ -43,6 +43,9 @@ use crate::options::apply as apply_options;
 ///
 /// Panics if model variable IDs overflow `u32`.
 pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
+    if model.has_sos_constraints() {
+        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    }
     let (prob, meta) = build_problem(model)?;
     let live = make_live(prob, opts)?;
     let started = Instant::now();
@@ -92,6 +95,9 @@ pub(crate) struct Meta {
 /// Returns a [`SolverError`] if the model kind is unsupported, a domain cannot be
 /// represented, or an expression is not linear/quadratic as required.
 pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> {
+    if model.has_sos_constraints() {
+        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    }
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {

@@ -62,17 +62,19 @@ Names are unique per registry. Registering a duplicate variable or constraint na
 
 ```rust,ignore
 m.num_variables()   // usize
-m.num_constraints() // algebraic + explicit SOC constraints
+m.num_constraints() // algebraic + SOC + SOS constraints
 m.variables()       // Ref<'_, Vec<Variable>>
 m.constraints()     // ModelConstraints<'_>
 m.constraints().algebraic()          // typed algebraic registry
 m.constraints().second_order_cones() // typed explicit-SOC registry
+m.constraints().special_ordered_sets() // typed SOS registry
 m.arena()          // Ref<'_, ExprArena>
 m.kind()           // ModelKind, cached, invalidated on change
 m.try_objective()  // Result<Objective, Error>
 m.variable_id("x") // Option<VarId>
 m.constraint_id("cap")      // Option<ConstraintId> (algebraic)
 m.soc_constraint_id("cone") // Option<SocConstraintId>
+m.sos_constraint_id("choice") // Option<SosConstraintId>
 ```
 
 `ModelConstraints::iter()` visits every declared constraint. Its `algebraic()`
@@ -170,6 +172,32 @@ constraint!(m, lhs >= rhs);                        // anonymous (auto-named _c0,
 constraint!(m, band, 1.0 <= e <= 3.0);             // two-sided range -> one constraint (expr bounds -> band_lo/band_hi)
 constraint!(m, name = format!("c_{k}"), e == rhs); // computed run-time name
 ```
+
+### Special ordered sets
+
+SOS1 and SOS2 constraints apply ordering weights to bare variables. SOS1 allows
+at most one nonzero member. SOS2 allows at most two adjacent nonzero members.
+Weights must be finite and unique within each set.
+
+```rust,ignore
+variable!(m, 0.0 <= choice_a <= 1.0);
+variable!(m, 0.0 <= choice_b <= 1.0);
+variable!(m, 0.0 <= choice_c <= 1.0);
+
+sos_constraint!(m, one_choice, SOS1, [choice_a, choice_b, choice_c]);
+sos_constraint!(m, adjacent_choice, SOS2, [choice_a, choice_b, choice_c]);
+sos_constraint!(m, weighted, SOS2, [
+    (choice_a, 10.0), (choice_b, 20.0), (choice_c, 30.0),
+]);
+```
+
+They are currently passed through only to backends with native SOS support.
+
+The indexed form creates one set for every key in the binder. The binder is
+required because the macro cannot infer an index domain from an `IndexedVar`:
+`choice[i in 0..n]` produces `choice[0]`, ..., `choice[n - 1]`. To create one
+SOS over a dynamically assembled collection, use
+`m.add_sos_constraint_auto_weights("choice", SosType::Sos1, members)`.
 
 ### Indexed family over a set
 

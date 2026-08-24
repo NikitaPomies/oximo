@@ -116,6 +116,8 @@ impl PrimalStatus {
 pub enum SolverError {
     #[error("solver does not support model kind {0:?}")]
     UnsupportedKind(oximo_core::ModelKind),
+    #[error("solver does not support native {0} constraints")]
+    UnsupportedConstraint(&'static str),
     #[error("model is missing an objective")]
     NoObjective,
     #[error("{location} contains a nonlinear term unsupported by this backend: {term}")]
