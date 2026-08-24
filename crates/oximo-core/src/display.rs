@@ -13,6 +13,7 @@ use crate::domain::Domain;
 use crate::model::Model;
 use crate::objective::ObjectiveSense;
 use crate::soc::SocConstraintId;
+use crate::sos::SosConstraintId;
 use crate::var::{Variable, var_name};
 
 /// Compact `f64` rendering (shortest round-trip).
@@ -103,6 +104,32 @@ pub struct SocDisplay<'a> {
     id: SocConstraintId,
 }
 
+#[derive(Debug)]
+pub struct SosDisplay<'a> {
+    model: &'a Model,
+    id: SosConstraintId,
+}
+
+impl fmt::Display for SosDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let vars = self.model.variables.borrow();
+        let sos = self.model.sos_constraints.borrow();
+        let c = &sos[self.id.index()];
+        write!(f, "{}: {} [", c.name, c.sos_type.label())?;
+        for (i, member) in c.members.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{}: {}", var_name(&vars, member.variable), fmt_num(member.weight))?;
+        }
+        f.write_str("]")?;
+        if !c.active {
+            f.write_str(" (inactive)")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for SocDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let arena = self.model.arena.borrow();
@@ -183,6 +210,11 @@ impl Model {
     pub fn display_soc(&self, id: SocConstraintId) -> SocDisplay<'_> {
         SocDisplay { model: self, id }
     }
+
+    #[must_use]
+    pub fn display_sos(&self, id: SosConstraintId) -> SosDisplay<'_> {
+        SosDisplay { model: self, id }
+    }
 }
 
 /// Pretty-print the whole model as readable algebra:
@@ -208,15 +240,20 @@ impl fmt::Display for Model {
         }
         let n_constraints = self.constraints.borrow().len();
         let n_socs = self.soc_constraints.borrow().len();
-        if n_constraints + n_socs > 0 {
+        let n_sos = self.sos_constraints.borrow().len();
+        if n_constraints + n_socs + n_sos > 0 {
             let n_constraints = u32::try_from(n_constraints).expect("constraint count fits u32");
             let n_socs = u32::try_from(n_socs).expect("soc count fits u32");
+            let n_sos = u32::try_from(n_sos).expect("sos count fits u32");
             writeln!(f, "s.t.")?;
             for i in 0..n_constraints {
                 writeln!(f, "  {}", self.display_constraint(ConstraintId(i)))?;
             }
             for i in 0..n_socs {
                 writeln!(f, "  {}", self.display_soc(SocConstraintId(i)))?;
+            }
+            for i in 0..n_sos {
+                writeln!(f, "  {}", self.display_sos(SosConstraintId(i)))?;
             }
         }
         {

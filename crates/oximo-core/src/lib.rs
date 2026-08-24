@@ -17,11 +17,12 @@ pub mod param;
 pub mod prelude;
 pub mod set;
 pub mod soc;
+pub mod sos;
 pub mod sum;
 pub mod var;
 
 pub use constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
-pub use display::{ConstraintDisplay, ExprDisplay, ObjectiveDisplay, SocDisplay};
+pub use display::{ConstraintDisplay, ExprDisplay, ObjectiveDisplay, SocDisplay, SosDisplay};
 pub use domain::Domain;
 pub use error::{Error, Result};
 pub use indexed::{IndexedParam, IndexedVar};
@@ -32,6 +33,7 @@ pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;
 pub use set::{Axis, FromIndexKey, IndexKey, IndexTuple, KeyCat, ScalarKey, Set, SetIter};
 pub use soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
+pub use sos::{SosConstraint, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;
 pub use var::{VarBuilder, Variable, var_name};
 
@@ -42,4 +44,6 @@ pub use oximo_expr::{
     render_expr, render_linear_terms,
 };
 
-pub use oximo_macros::{constraint, objective, param, set, soc_constraint, sum, variable};
+pub use oximo_macros::{
+    constraint, objective, param, set, soc_constraint, sos_constraint, sum, variable,
+};

@@ -378,6 +378,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
             assert_eq!(constraint.name, "shared");
         }
         ConstraintRef::SecondOrderCone { .. } => panic!("algebraic constraints come first"),
+        ConstraintRef::SpecialOrderedSet { .. } => panic!("SOS constraints come last"),
     }
     match iter.next().expect("SOC constraint") {
         ConstraintRef::SecondOrderCone { id, constraint } => {
@@ -385,6 +386,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
             assert_eq!(constraint.name, "shared");
         }
         ConstraintRef::Algebraic { .. } => panic!("explicit cones come second"),
+        ConstraintRef::SpecialOrderedSet { .. } => panic!("expected SOC constraint"),
     }
     assert!(iter.next().is_none());
 }

@@ -7,6 +7,7 @@
 extern crate self as oximo;
 
 pub use oximo_core as core;
+pub use oximo_core::SosType;
 
 // Runtime glue the modeling macros expand into.
 #[doc(hidden)]
