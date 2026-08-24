@@ -488,12 +488,50 @@ fn file_reader_uses_name_then_file_stem_fallback() {
 
 #[test]
 fn rejects_unsupported_sections_and_multiple_vectors() {
-    for section in ["SOS", "INDICATORS"] {
+    {
+        let section = "INDICATORS";
         let text = format!("NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\n{section}\nENDATA\n");
         assert!(matches!(read_mps(text.as_bytes()), Err(IoError::UnsupportedMps { .. })));
     }
     let vectors = "NAME bad\nROWS\n N obj\n L row\nCOLUMNS\n x row 1\nRHS\n first row 1\n second row 2\nENDATA\n";
     assert!(matches!(read_mps(vectors.as_bytes()), Err(IoError::UnsupportedMps { .. })));
+}
+
+#[test]
+fn sos_sections_round_trip() {
+    let text = "NAME sos\nROWS\n N OBJ\nCOLUMNS\n x OBJ 1\n y OBJ 1\n z OBJ 1\nRHS\nBOUNDS\nSOS\n S1 set1\n    x 1\n    y 2\n S2 set2\n    x 1\n    y 2\n    z 3\nENDATA\n";
+    let model = read_mps(text.as_bytes()).expect("SOS MPS");
+    assert_eq!(model.num_sos_constraints(), 2);
+    let output = to_mps_string(&model).expect("write SOS MPS");
+    let roundtrip = read_mps(output.as_bytes()).expect("read written SOS MPS");
+    assert_eq!(roundtrip.num_sos_constraints(), 2);
+    assert!((roundtrip.sos_constraints()[1].members[2].weight - 3.0).abs() < 1e-12);
+}
+
+#[test]
+fn sos_and_quadratic_sections_round_trip_in_each_dialect_order() {
+    let model = Model::new("qcp_sos");
+    variable!(model, 0.0 <= x <= 1.0);
+    variable!(model, 0.0 <= y <= 1.0);
+    constraint!(model, disk, x.powi(2) + x * y + y.powi(2) <= 1.0);
+    objective!(model, Min, x.powi(2) + y.powi(2));
+    sos_constraint!(model, ordered, SOS2, [(x, 1.0), (y, 2.0)]);
+
+    for format in [MpsQuadraticFormat::Gurobi, MpsQuadraticFormat::Cplex] {
+        let options = MpsWriteOptions { quadratic_format: format };
+        let output = to_mps_string_with(&model, &options).expect("write QCP+SOS MPS");
+        let sos_pos = output.find("\nSOS\n").expect("SOS section");
+        let qcmatrix_pos = output.find("\nQCMATRIX disk\n").expect("QCMATRIX section");
+        match format {
+            MpsQuadraticFormat::Gurobi => assert!(qcmatrix_pos < sos_pos),
+            MpsQuadraticFormat::Cplex => assert!(sos_pos < qcmatrix_pos),
+            MpsQuadraticFormat::Mosek => unreachable!(),
+        }
+        let read_options = MpsReadOptions { quadratic_format: format };
+        let roundtrip = read_mps_with(output.as_bytes(), &read_options).expect("read QCP+SOS MPS");
+        assert_eq!(roundtrip.num_sos_constraints(), 1);
+        assert_eq!(roundtrip.kind(), ModelKind::MIQCP);
+    }
 }
 
 #[test]
