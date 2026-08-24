@@ -283,6 +283,7 @@ impl fmt::Display for Model {
 mod tests {
     use super::*;
     use crate::constraint::Relate;
+    use crate::sos::SosType;
 
     #[test]
     fn full_model_snapshot() {
@@ -380,6 +381,23 @@ mod tests {
         let id = m.add_soc_constraint("q1", [x, y], t);
         assert_eq!(m.display_soc(id).to_string(), "q1: ||x, y|| <= t");
         assert!(format!("{m}").contains("  q1: ||x, y|| <= t\n"));
+    }
+
+    #[test]
+    fn sos_row_renders_after_soc_in_model_display() {
+        let m = Model::new("t");
+        let x = m.__var("x").build();
+        let y = m.__var("y").build();
+        let t = m.__var("t").lb(0.0).build();
+        m.add_soc_constraint("q1", [x, y], t);
+        let id = m.add_sos_constraint("choice", SosType::Sos1, [(x, 1.0), (y, 2.5)]);
+        m.__minimize(x + y);
+
+        assert_eq!(m.display_sos(id).to_string(), "choice: SOS1 [x: 1, y: 2.5]");
+        let out = format!("{m}");
+        let soc_pos = out.find("  q1: ||x, y|| <= t\n").expect("SOC block");
+        let sos_pos = out.find("  choice: SOS1 [x: 1, y: 2.5]\n").expect("SOS block");
+        assert!(soc_pos < sos_pos, "SOC must render before SOS:\n{out}");
     }
 
     #[test]
