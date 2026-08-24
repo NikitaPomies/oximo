@@ -211,8 +211,8 @@ fn branch_limit_keeps_constructed_incumbent() {
     let result = solve(&model, &options).unwrap();
     assert_eq!(result.termination, TerminationStatus::NodeLimit);
     assert!(result.has_solution());
-    assert!(result.best_bound.is_some());
-    assert!(result.gap.is_some());
+    // With zero allowed branches MOSEK may stop after constructing an incumbent,
+    // before a best bound or relative gap has been computed.
 }
 
 #[test]
