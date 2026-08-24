@@ -1,4 +1,4 @@
-use oximo_core::{ConstraintId, Model, SocConstraintId, VarId};
+use oximo_core::{ConstraintId, Model, SocConstraintId, SosConstraintId, VarId};
 
 use crate::result::SolverResult;
 use crate::solver::Solver;
@@ -28,6 +28,7 @@ pub struct Iis {
     pub constraints: Vec<ConstraintId>,
     /// Second-order-cone constraints in the IIS.
     pub soc_constraints: Vec<SocConstraintId>,
+    pub sos_constraints: Vec<SosConstraintId>,
     /// Variable bounds in the IIS, each `(variable, which bound)`.
     pub var_bounds: Vec<(VarId, VarBoundKind)>,
 }
@@ -36,14 +37,20 @@ impl Iis {
     /// Whether the IIS carries no members.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.constraints.is_empty() && self.soc_constraints.is_empty() && self.var_bounds.is_empty()
+        self.constraints.is_empty()
+            && self.soc_constraints.is_empty()
+            && self.sos_constraints.is_empty()
+            && self.var_bounds.is_empty()
     }
 
     /// The total number of members (constraints, SOC constraints, and variable
     /// bounds) in the IIS.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.constraints.len() + self.soc_constraints.len() + self.var_bounds.len()
+        self.constraints.len()
+            + self.soc_constraints.len()
+            + self.sos_constraints.len()
+            + self.var_bounds.len()
     }
 
     /// A human-readable, model-aware listing of this IIS.
@@ -89,6 +96,17 @@ impl std::fmt::Display for IisReport<'_> {
                 match socs.get(id.index()) {
                     Some(s) => writeln!(f, "  {}", s.name)?,
                     None => writeln!(f, "  <soc #{}>", id.index())?,
+                }
+            }
+        }
+
+        if !iis.sos_constraints.is_empty() {
+            let sos = m.sos_constraints();
+            writeln!(f, "\nsos constraints ({})", iis.sos_constraints.len())?;
+            for id in &iis.sos_constraints {
+                match sos.get(id.index()) {
+                    Some(s) => writeln!(f, "  {}", s.name)?,
+                    None => writeln!(f, "  <sos #{}>", id.index())?,
                 }
             }
         }
@@ -155,6 +173,7 @@ mod tests {
         let iis = Iis {
             constraints: vec![lo, hi],
             soc_constraints: Vec::new(),
+            sos_constraints: Vec::new(),
             var_bounds: vec![(x.var_id().unwrap(), VarBoundKind::Lower)],
         };
 

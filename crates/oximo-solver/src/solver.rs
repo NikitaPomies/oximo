@@ -1,4 +1,4 @@
-use oximo_core::{Model, ModelKind};
+use oximo_core::{Model, ModelKind, SosType};
 
 use crate::result::SolverResult;
 use crate::status::SolverError;
@@ -24,6 +24,17 @@ pub trait Solver {
     fn name(&self) -> &str;
 
     fn supports(&self, kind: ModelKind) -> bool;
+
+    /// Whether this backend can consume native SOS constraints of `sos_type`.
+    fn supports_sos(&self, _sos_type: SosType) -> bool {
+        false
+    }
+
+    /// Whether this backend can consume all features present in `model`.
+    fn supports_model(&self, model: &Model) -> bool {
+        self.supports(model.kind())
+            && model.sos_constraints().iter().all(|s| self.supports_sos(s.sos_type))
+    }
 
     /// Solves the given `Model` using this solver.
     ///

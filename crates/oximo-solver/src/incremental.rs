@@ -96,6 +96,18 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
         hash_row(&mut hasher, c.lower - t.constant, c.upper - t.constant, &t.coeffs);
     }
 
+    for sos in model.sos_constraints().iter() {
+        hasher.write_u8(match sos.sos_type {
+            oximo_core::SosType::Sos1 => 1,
+            oximo_core::SosType::Sos2 => 2,
+        });
+        hasher.write_usize(sos.members.len());
+        for member in &sos.members {
+            hasher.write_u32(member.variable.0);
+            hasher.write_u64(member.weight.to_bits());
+        }
+    }
+
     Ok(Snapshot { obj_costs, obj_constant, lb, ub, fingerprint: hasher.finish() })
 }
 
