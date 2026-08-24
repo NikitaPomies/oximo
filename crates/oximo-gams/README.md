@@ -2,7 +2,7 @@
 
 GAMS backend for [oximo](https://github.com/oximo-rs/oximo).
 
-Writes an oximo `Model` to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP`, `MILP`, `QP`, `MIQP`, `NLP`, and `MINLP` model kinds.
+Writes an oximo `Model` to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP`, `MILP`, `QP`, `MIQP`, `QCP`, `MIQCP`, `SOCP`, `MISOCP`, `NLP`, and `MINLP` model kinds, including native `SOS1` and `SOS2` constraints.
 
 The sub-solver is determined by the GAMS installation (default) or set explicitly via `GamsOptions::solver`. Any solver available in your GAMS distribution can be targeted, see [Sub-solver selection](#sub-solver-selection) below.
 

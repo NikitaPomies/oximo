@@ -156,6 +156,45 @@ fn gams_semicontinuous_respects_threshold_gap() {
 }
 
 #[test]
+fn gams_sos1_allows_at_most_one_signed_nonzero_member() {
+    let m = Model::new("sos1_signed");
+    variable!(m, -3.0 <= x <= 3.0);
+    variable!(m, -4.0 <= y <= 4.0);
+    sos_constraint!(m, choice, SOS1, [(x, 1.0), (y, 2.0)]);
+    objective!(m, Min, x + y);
+
+    let result = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+    assert!((result.objective().unwrap() + 4.0).abs() < 1e-6);
+    let x_value = result.value_of(x).unwrap();
+    let y_value = result.value_of(y).unwrap();
+    assert!(
+        x_value.abs() <= 1e-6 || y_value.abs() <= 1e-6,
+        "both SOS1 members are nonzero: x={x_value}, y={y_value}"
+    );
+}
+
+#[test]
+fn gams_sos2_uses_weight_order_for_adjacency() {
+    let m = Model::new("sos2_weight_order");
+    variable!(m, 0.0 <= x <= 1.0);
+    variable!(m, 0.0 <= y <= 1.0);
+    variable!(m, 0.0 <= z <= 1.0);
+    objective!(m, Max, x + z);
+    sos_constraint!(m, adjacent, SOS2, [(z, 3.0), (x, 1.0), (y, 2.0)]);
+
+    let result = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+    assert!(result.objective().unwrap() <= 1.0 + 1e-6);
+    let x_value = result.value_of(x).unwrap();
+    let z_value = result.value_of(z).unwrap();
+    assert!(
+        x_value <= 1e-6 || z_value <= 1e-6,
+        "nonadjacent SOS2 members selected: x={x_value}, z={z_value}"
+    );
+}
+
+#[test]
 fn gams_infeasible_returns_status() {
     let m = Model::new("infeas");
     variable!(m, 0.0 <= x <= 1.0);

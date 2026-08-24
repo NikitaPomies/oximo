@@ -10,7 +10,7 @@ static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
 use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense,
-    SocConstraint, SocConstraintId, VarId, Variable,
+    SocConstraint, SocConstraintId, SosConstraint, SosMember, SosType, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
 use oximo_solver::{
@@ -41,9 +41,6 @@ pub fn solve(
     opts: &GamsOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
-    if model.has_sos_constraints() {
-        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
-    }
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     validate_solver(opts, kind)?;
@@ -52,6 +49,7 @@ pub fn solve(
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     let socs = model.soc_constraints();
+    let sos_constraints = model.sos_constraints();
     let objective = model.objective();
     let sense = objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
 
@@ -68,6 +66,7 @@ pub fn solve(
         &vars,
         constraints,
         &socs,
+        &sos_constraints,
         objective.as_ref(),
         sense_kw,
         opts,
@@ -127,6 +126,7 @@ pub fn solve(
     drop(arena);
     drop(vars);
     drop(socs);
+    drop(sos_constraints);
 
     // - Write .gms file
     let gms_path = tmp_dir.join("model.gms");
@@ -672,6 +672,7 @@ fn build_model_section(
     vars: &[Variable],
     constraints: &[Constraint],
     socs: &[SocConstraint],
+    sos_constraints: &[SosConstraint],
     objective: Option<&Objective>,
     sense_kw: &str,
     opts: &GamsOptions,
@@ -681,8 +682,9 @@ fn build_model_section(
 
     write_preamble(gms);
     write_var_declarations(gms, vars);
-    write_bounds_and_initials(gms, vars);
-    write_equations(gms, arena, constraints, socs, objective);
+    write_sos_declarations(gms, sos_constraints);
+    write_bounds_and_initials(gms, vars, sos_constraints);
+    write_equations(gms, arena, constraints, socs, sos_constraints, objective);
     write_options(gms, opts, solve_type);
     write_model_and_solve(gms, solve_type, sense_kw, solver_opt.is_some());
 
@@ -777,7 +779,37 @@ fn write_typed_var_section(gms: &mut String, header: &str, vars: &[&Variable]) {
     writeln!(gms, ";").unwrap();
 }
 
-fn write_bounds_and_initials(gms: &mut String, vars: &[Variable]) {
+/// Emit one indexed GAMS SOS variable for each active oximo SOS constraint.
+///
+/// GAMS defines an SOS over the right-most ordered index of an `SOS1 Variable`
+/// or `SOS2 Variable`. A dedicated auxiliary variable per constraint also lets
+/// one original oximo variable participate in multiple SOS constraints.
+fn write_sos_declarations(gms: &mut String, constraints: &[SosConstraint]) {
+    for (sos_id, constraint) in active_sos_constraints(constraints) {
+        write!(gms, "Set oximo_sos{sos_id}_members / ").unwrap();
+        for member_index in 0..constraint.members.len() {
+            if member_index > 0 {
+                write!(gms, ", ").unwrap();
+            }
+            write!(gms, "m{member_index}").unwrap();
+        }
+        writeln!(gms, " /;").unwrap();
+        let keyword = match constraint.sos_type {
+            SosType::Sos1 => "SOS1",
+            SosType::Sos2 => "SOS2",
+        };
+        writeln!(gms, "{keyword} Variable oximo_sos{sos_id}(oximo_sos{sos_id}_members);").unwrap();
+    }
+    if constraints.iter().any(|constraint| constraint.active) {
+        writeln!(gms).unwrap();
+    }
+}
+
+fn write_bounds_and_initials(
+    gms: &mut String,
+    vars: &[Variable],
+    sos_constraints: &[SosConstraint],
+) {
     for v in vars {
         write_var_bounds(gms, v);
     }
@@ -786,7 +818,28 @@ fn write_bounds_and_initials(gms: &mut String, vars: &[Variable]) {
             writeln!(gms, "v{}.l = {};", v.id.index(), fmt(val)).unwrap();
         }
     }
+    write_sos_bounds_and_initials(gms, vars, sos_constraints);
     writeln!(gms).unwrap();
+}
+
+/// GAMS SOS variables default to a zero lower bound.
+/// oximo SOS members may be signed, so we make the linked auxiliaries free
+/// below and let the equality link plus the original variable's
+/// bounds/domain determine their feasible values.
+fn write_sos_bounds_and_initials(
+    gms: &mut String,
+    vars: &[Variable],
+    constraints: &[SosConstraint],
+) {
+    for (sos_id, constraint) in active_sos_constraints(constraints) {
+        for (member_index, member) in ordered_sos_members(constraint).into_iter().enumerate() {
+            writeln!(gms, "oximo_sos{sos_id}.lo('m{member_index}') = -Inf;").unwrap();
+            if let Some(initial) = vars[member.variable.index()].initial {
+                writeln!(gms, "oximo_sos{sos_id}.l('m{member_index}') = {};", fmt(initial))
+                    .unwrap();
+            }
+        }
+    }
 }
 
 fn write_var_bounds(gms: &mut String, v: &Variable) {
@@ -829,6 +882,7 @@ fn write_equations(
     arena: &ExprArena,
     constraints: &[Constraint],
     socs: &[SocConstraint],
+    sos_constraints: &[SosConstraint],
     objective: Option<&Objective>,
 ) {
     write!(gms, "Equations\n    eq_obj").unwrap();
@@ -841,6 +895,11 @@ fn write_equations(
     }
     for i in 0..socs.len() {
         write!(gms, ", eq_soc{i}, eq_soc{i}_sign").unwrap();
+    }
+    for (sos_id, constraint) in active_sos_constraints(sos_constraints) {
+        for member_index in 0..constraint.members.len() {
+            write!(gms, ", eq_sos{sos_id}_m{member_index}").unwrap();
+        }
     }
     writeln!(gms, ";").unwrap();
     writeln!(gms).unwrap();
@@ -898,7 +957,35 @@ fn write_equations(
         }
     }
     write_soc_equations(gms, arena, socs);
+    write_sos_link_equations(gms, sos_constraints);
     writeln!(gms).unwrap();
+}
+
+/// Link each ordered GAMS SOS component to the corresponding original oximo
+/// variable. Sorting by weight since it is what gives SOS2 its oximo adjacency order.
+fn write_sos_link_equations(gms: &mut String, constraints: &[SosConstraint]) {
+    for (sos_id, constraint) in active_sos_constraints(constraints) {
+        for (member_index, member) in ordered_sos_members(constraint).into_iter().enumerate() {
+            writeln!(
+                gms,
+                "eq_sos{sos_id}_m{member_index}.. oximo_sos{sos_id}('m{member_index}') =e= v{};",
+                member.variable.index()
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn active_sos_constraints(
+    constraints: &[SosConstraint],
+) -> impl Iterator<Item = (usize, &SosConstraint)> {
+    constraints.iter().enumerate().filter(|(_, constraint)| constraint.active)
+}
+
+fn ordered_sos_members(constraint: &SosConstraint) -> Vec<&SosMember> {
+    let mut members: Vec<_> = constraint.members.iter().collect();
+    members.sort_by(|left, right| left.weight.total_cmp(&right.weight));
+    members
 }
 
 /// Emit each explicit SOC constraint `||terms||_2 <= bound` as the quadratic
@@ -1166,7 +1253,7 @@ pub mod benchmark_support {
         if parallel {
             write_parallel(&mut out, &arena, &constraints, &socs);
         } else {
-            write_equations(&mut out, &arena, &constraints, &socs, None);
+            write_equations(&mut out, &arena, &constraints, &socs, &[], None);
         }
         out
     }
@@ -1256,6 +1343,7 @@ mod tests {
         let model_constraints = model.constraints();
         let constraints = model_constraints.algebraic();
         let socs = model.soc_constraints();
+        let sos_constraints = model.sos_constraints();
         let objective = model.objective();
         let sense_kw = match objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense) {
             ObjectiveSense::Minimize => "minimizing",
@@ -1269,6 +1357,7 @@ mod tests {
             &vars,
             constraints,
             &socs,
+            &sos_constraints,
             objective.as_ref(),
             sense_kw,
             opts,
@@ -1470,6 +1559,67 @@ mod tests {
         assert_eq!(gams_solve_type(ModelKind::MISOCP), "MIQCP");
         assert_eq!(gams_solve_type(ModelKind::NLP), "NLP");
         assert_eq!(gams_solve_type(ModelKind::MINLP), "MINLP");
+    }
+
+    #[test]
+    fn sos_constraints_emit_ordered_signed_auxiliaries_and_links() {
+        let m = Model::new("sos_render");
+        let x = m.__var("x").bounds(-2.0, 2.0).initial(-1.0).build();
+        let y = m.__var("y").bounds(0.0, 3.0).build();
+        let z = m.__var("z").bounds(0.0, 4.0).build();
+        objective!(m, Max, x + y + z);
+        // Input order is z, x, y.
+        // GAMS adjacency must follow weights x, y, z.
+        sos_constraint!(m, ordered, SOS2, [(z, 30.0), (x, 10.0), (y, 20.0)]);
+        // A second set overlaps the first one, requiring its own SOS auxiliary.
+        sos_constraint!(m, choice, SOS1, [(z, 2.0), (x, 1.0)]);
+
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("Set oximo_sos0_members / m0, m1, m2 /;"), "got:\n{gms}");
+        assert!(gms.contains("SOS2 Variable oximo_sos0(oximo_sos0_members);"), "got:\n{gms}");
+        assert!(gms.contains("SOS1 Variable oximo_sos1(oximo_sos1_members);"), "got:\n{gms}");
+        assert!(gms.contains("oximo_sos0.lo('m0') = -Inf;"), "got:\n{gms}");
+        assert!(gms.contains("oximo_sos0.l('m0') = -1;"), "got:\n{gms}");
+        assert!(
+            gms.contains("eq_sos0_m0.. oximo_sos0('m0') =e= v0;"),
+            "lowest weight should link x:\n{gms}"
+        );
+        assert!(
+            gms.contains("eq_sos0_m1.. oximo_sos0('m1') =e= v1;"),
+            "middle weight should link y:\n{gms}"
+        );
+        assert!(
+            gms.contains("eq_sos0_m2.. oximo_sos0('m2') =e= v2;"),
+            "highest weight should link z:\n{gms}"
+        );
+        assert!(
+            gms.contains("eq_sos1_m0.. oximo_sos1('m0') =e= v0;"),
+            "overlapping set should independently link x:\n{gms}"
+        );
+        assert!(gms.contains("Solve oximo_m using MIP maximizing v_obj;"), "got:\n{gms}");
+    }
+
+    #[test]
+    fn inactive_sos_constraints_emit_nothing() {
+        let constraints = vec![SosConstraint {
+            name: "inactive".into(),
+            sos_type: SosType::Sos1,
+            members: vec![SosMember { variable: VarId(0), weight: 1.0 }],
+            active: false,
+        }];
+        let vars = vec![Variable {
+            id: VarId(0),
+            name: "x".into(),
+            domain: Domain::Real,
+            lb: f64::NEG_INFINITY,
+            ub: f64::INFINITY,
+            initial: Some(1.0),
+        }];
+        let mut gms = String::new();
+        write_sos_declarations(&mut gms, &constraints);
+        write_sos_bounds_and_initials(&mut gms, &vars, &constraints);
+        write_sos_link_equations(&mut gms, &constraints);
+        assert!(gms.is_empty(), "inactive SOS leaked into GAMS:\n{gms}");
     }
 
     #[test]
