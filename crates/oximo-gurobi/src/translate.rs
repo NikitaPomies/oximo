@@ -54,7 +54,7 @@ pub(crate) struct Built {
     pub constrs: Vec<ConstraintHandle>,
     pub objective_generated: Vec<GeneratedConstraint>,
     pub soc_rows: Vec<SocHandle>,
-    pub sos: Vec<gurobi_rs::SOS>,
+    pub sos: Vec<(SosConstraintId, gurobi_rs::SOS)>,
     pub obj_constant: f64,
     pub has_semi: bool,
 }
@@ -360,10 +360,9 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
         }
     }
 
-    for (i, sos) in built.sos.iter().enumerate() {
+    for (id, sos) in &built.sos {
         if model.get_obj_attr(attr::IISSOS, sos).map_err(map_gurobi_err)? != 0 {
-            iis.sos_constraints
-                .push(SosConstraintId(u32::try_from(i).expect("sos index fits u32")));
+            iis.sos_constraints.push(*id);
         }
     }
 
@@ -420,18 +419,27 @@ fn add_sos_constraints(
     constraints: &[SosConstraint],
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
-) -> Result<Vec<gurobi_rs::SOS>, SolverError> {
-    constraints
-        .iter()
-        .map(|s| {
+) -> Result<Vec<(SosConstraintId, gurobi_rs::SOS)>, SolverError> {
+    active_sos_constraints(constraints)
+        .map(|(id, s)| {
             let members = s.members.iter().map(|m| (gurobi_vars[m.variable.index()], m.weight));
             let ty = match s.sos_type {
                 SosType::Sos1 => SOSType::Ty1,
                 SosType::Sos2 => SOSType::Ty2,
             };
-            gurobi_model.add_sos(members, ty).map_err(map_gurobi_err)
+            gurobi_model.add_sos(members, ty).map(|handle| (id, handle)).map_err(map_gurobi_err)
         })
         .collect()
+}
+
+fn active_sos_constraints(
+    constraints: &[SosConstraint],
+) -> impl Iterator<Item = (SosConstraintId, &SosConstraint)> {
+    constraints.iter().enumerate().filter(|(_, constraint)| constraint.active).map(
+        |(index, constraint)| {
+            (SosConstraintId(u32::try_from(index).expect("sos index fits u32")), constraint)
+        },
+    )
 }
 
 fn apply_initial_values(
@@ -982,6 +990,8 @@ fn map_status(status: Status) -> TerminationStatus {
 
 #[cfg(test)]
 mod status_tests {
+    use oximo_core::{SosConstraint, SosMember, VarId};
+
     use super::*;
 
     #[test]
@@ -1001,6 +1011,32 @@ mod status_tests {
         assert_eq!(map_status(Status::MemLimit), TerminationStatus::MemoryLimit);
         assert_eq!(map_status(Status::LocallyInfeasible), TerminationStatus::LocallyInfeasible);
         assert_eq!(map_status(Status::Interrupted), TerminationStatus::Interrupted);
+    }
+
+    #[test]
+    fn inactive_sos_constraints_are_skipped_without_compacting_ids() {
+        let constraints = vec![
+            SosConstraint {
+                name: "inactive".into(),
+                sos_type: SosType::Sos1,
+                members: vec![SosMember { variable: VarId(0), weight: 1.0 }],
+                active: false,
+            },
+            SosConstraint {
+                name: "first".into(),
+                sos_type: SosType::Sos1,
+                members: vec![SosMember { variable: VarId(1), weight: 1.0 }],
+                active: true,
+            },
+            SosConstraint {
+                name: "second".into(),
+                sos_type: SosType::Sos2,
+                members: vec![SosMember { variable: VarId(2), weight: 1.0 }],
+                active: true,
+            },
+        ];
+        let ids: Vec<_> = active_sos_constraints(&constraints).map(|(id, _)| id).collect();
+        assert_eq!(ids, [SosConstraintId(1), SosConstraintId(2)]);
     }
 }
 
