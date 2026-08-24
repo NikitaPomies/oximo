@@ -60,7 +60,8 @@ Widely supported by commercial and open-source solvers.
 | Linear models      | `ROWS`, `COLUMNS`, `RHS`, `RANGES`, bounds, integer markers, binary and semi domains                       |
 | Quadratic import   | `QUADOBJ`, `QMATRIX`, `QCMATRIX`, and `QSECTION`. Gurobi, CPLEX or MOSEK constraint scaling is selectable. |
 | Quadratic export   | `QUADOBJ`/`QCMATRIX` for Gurobi and CPLEX, `QSECTION` for MOSEK                                            |
-| Unsupported import | SOS and indicator sections return `IoError::UnsupportedMps`                                                |
+| SOS sections       | Native SOS1/SOS2 sections are imported and exported. MOSEK MPS export rejects SOS                          |
+| Unsupported import | Indicator sections return `IoError::UnsupportedMps`                                                        |
 | Constant terms     | Objective constants use `RHS OBJ`, constraint constants are folded into `RHS`                              |
 
 ```rust,ignore
@@ -94,7 +95,7 @@ let quadratic_mps = to_mps_string_with(&model, &write_options)?;
 
 ### LP (CPLEX LP format)
 
-Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Maximize`, `Subject To`, `Bounds` (non-default only), `General`, `Binaries`, `Semi-Continuous`, `End`.
+Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Maximize`, `Subject To`, `Bounds` (non-default only), `General`, `Binaries`, `Semi-Continuous`, `SOS`, `End`.
 
 | Feature            | Behavior                                                           |
 | ------------------ | ------------------------------------------------------------------ |
