@@ -7,9 +7,12 @@ pub use crate::model::{
 };
 pub use crate::objective::{Objective, ObjectiveSense};
 pub use crate::param::Parameter;
+pub use crate::reformulation::{
+    ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
+};
 pub use crate::set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
 pub use crate::soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
-pub use crate::sos::{SosConstraint, SosConstraintId, SosMember, SosType};
+pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use crate::sum::SumDomain;
 pub use crate::var::{VarBuilder, Variable};
 pub use oximo_expr::{Expr, ExprId, ParamId, VarId, dot};

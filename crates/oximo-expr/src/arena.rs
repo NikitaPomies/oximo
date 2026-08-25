@@ -69,6 +69,22 @@ impl ExprArena {
         Self { nodes: Vec::with_capacity(cap), param_values: Vec::new() }
     }
 
+    /// Clone this arena while reserving room for nodes that will immediately
+    /// be appended to the copy.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __clone_with_additional_capacity(&self, additional_nodes: usize) -> Self {
+        let mut nodes = Vec::with_capacity(self.nodes.len().saturating_add(additional_nodes));
+        nodes.extend_from_slice(&self.nodes);
+        Self { nodes, param_values: self.param_values.clone() }
+    }
+
+    /// Reserve room for additional expression nodes without changing IDs.
+    #[doc(hidden)]
+    pub fn __reserve_nodes(&mut self, additional: usize) {
+        self.nodes.reserve(additional);
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.nodes.len()
