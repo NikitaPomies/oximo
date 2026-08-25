@@ -97,6 +97,9 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     }
 
     for sos in model.sos_constraints().iter() {
+        if !sos.active {
+            continue;
+        }
         hasher.write_u8(match sos.sos_type {
             oximo_core::SosType::Sos1 => 1,
             oximo_core::SosType::Sos2 => 2,
@@ -171,6 +174,21 @@ mod tests {
         let s2 = snapshot(&m).unwrap();
         assert_eq!(s1.fingerprint, s2.fingerprint, "structure unchanged");
         assert_ne!(s1.ub, s2.ub, "bound moved");
+    }
+
+    #[test]
+    fn reformulated_inactive_sos_snapshots_as_linear_structure() {
+        let m = Model::new("reformulated_sos");
+        variable!(m, 0.0 <= x <= 1.0);
+        variable!(m, 0.0 <= y <= 1.0);
+        sos_constraint!(m, choice, SOS1, [x, y]);
+        objective!(m, Max, x + y);
+
+        let transformed = m
+            .to_reformulated_sos_model(SosReformulationOptions::default())
+            .expect("bounded SOS reformulates");
+        assert!(!transformed.has_active_sos_constraints());
+        assert!(snapshot(&transformed).is_ok());
     }
 
     #[test]

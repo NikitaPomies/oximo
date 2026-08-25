@@ -33,7 +33,11 @@ pub trait Solver {
     /// Whether this backend can consume all features present in `model`.
     fn supports_model(&self, model: &Model) -> bool {
         self.supports(model.kind())
-            && model.sos_constraints().iter().all(|s| self.supports_sos(s.sos_type))
+            && model
+                .sos_constraints()
+                .iter()
+                .filter(|constraint| constraint.active)
+                .all(|constraint| self.supports_sos(constraint.sos_type))
     }
 
     /// Solves the given `Model` using this solver.
@@ -106,5 +110,13 @@ mod tests {
         let model = sos_model();
         assert!(!NoSos.supports_model(&model));
         assert!(NativeSos.supports_model(&model));
+
+        let transformed = model
+            .to_reformulated_sos_model(
+                oximo_core::SosReformulationOptions::default().with_fallback_big_m(100.0),
+            )
+            .unwrap();
+        assert!(NoSos.supports_model(&transformed));
+        assert!(NativeSos.supports_model(&transformed));
     }
 }
