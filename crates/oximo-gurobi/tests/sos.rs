@@ -38,3 +38,23 @@ fn native_sos2_rejects_nonadjacent_optimum() {
         "non-adjacent members selected: x={x_value}, z={z_value}"
     );
 }
+
+#[test]
+fn reformulated_sos1_solves_and_preserves_original_ids() {
+    let m = Model::new("reformulated_sos1");
+    variable!(m, 0.0 <= x <= 1.0);
+    variable!(m, 0.0 <= y <= 1.0);
+    objective!(m, Max, x + y);
+    let choice = sos_constraint!(m, choice, SOS1, [x, y]);
+
+    let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    assert!(Gurobi.supports_model(&transformed));
+    let result = Gurobi
+        .solve(&transformed, &GurobiOptions::default())
+        .expect("Gurobi reformulated SOS solve");
+
+    assert!((result.objective().unwrap() - 1.0).abs() < 1e-6);
+    assert!(result.value_of(x).unwrap() + result.value_of(y).unwrap() <= 1.0 + 1e-6);
+    assert_eq!(choice.id().index(), 0);
+    assert!(!transformed.sos_constraints()[choice.index()].active);
+}

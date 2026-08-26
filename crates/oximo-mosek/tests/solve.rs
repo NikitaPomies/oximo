@@ -173,6 +173,19 @@ fn unsupported_nonlinear_and_semi_domains() {
 }
 
 #[test]
+fn unsupported_sos_reports_explicit_reformulation_hint() {
+    let model = Model::new("mosek_sos");
+    variable!(model, 0.0 <= x <= 1.0);
+    variable!(model, 0.0 <= y <= 1.0);
+    objective!(model, Max, x + y);
+    sos_constraint!(model, choice, SOS1, [x, y]);
+
+    let error = solve(&model, &MosekOptions::default()).unwrap_err();
+    assert!(matches!(error, SolverError::UnsupportedSos));
+    assert!(error.to_string().contains("Model::to_reformulated_sos_model"));
+}
+
+#[test]
 fn mosek_reports_nonconvex_quadratic_data() {
     let model = Model::new("nonconvex");
     variable!(model, -1.0 <= x <= 1.0);

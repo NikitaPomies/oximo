@@ -155,10 +155,10 @@ fn sos_constraints_are_rejected_consistently() {
     sos_constraint!(m, ordered, SOS1, [(x, 1.0), (y, 2.0)]);
 
     let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap_err();
-    assert!(matches!(cold, SolverError::UnsupportedConstraint("SOS1/SOS2")));
+    assert!(matches!(cold, SolverError::UnsupportedSos));
     let mut persistent = Pounce.persistent();
     let resident = persistent.solve(&m, &PounceOptions::default()).unwrap_err();
-    assert!(matches!(resident, SolverError::UnsupportedConstraint("SOS1/SOS2")));
+    assert!(matches!(resident, SolverError::UnsupportedSos));
 }
 
 #[test]

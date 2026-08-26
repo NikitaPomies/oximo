@@ -46,8 +46,8 @@ pub fn solve(
     opts: &BaronOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
-    if model.has_sos_constraints() {
-        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    if model.has_active_sos_constraints() {
+        return Err(SolverError::UnsupportedSos);
     }
     let sense = model.objective().as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
     let (bar, var_order, con_order, soc_bounds) = build_bar(model, opts)?;
@@ -218,8 +218,8 @@ fn run_baron(bar: &str, opts: &BaronOptions, exec: Option<&str>) -> Result<Baron
 type BarParts = (String, Vec<VarId>, Vec<ConstraintId>, Vec<LinearTerms>);
 
 fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError> {
-    if model.has_sos_constraints() {
-        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    if model.has_active_sos_constraints() {
+        return Err(SolverError::UnsupportedSos);
     }
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let arena = model.arena();

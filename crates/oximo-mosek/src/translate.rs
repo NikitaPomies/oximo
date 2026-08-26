@@ -39,8 +39,8 @@ struct TaskScratch {
 /// Returns an error for unsupported model kinds or variable domains, invalid
 /// expressions, and native MOSEK setup, optimization, or solution-query errors.
 pub fn solve(model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
-    if model.has_sos_constraints() {
-        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    if model.has_active_sos_constraints() {
+        return Err(SolverError::UnsupportedSos);
     }
     let (mut task, meta) = build_task(model, opts)?;
     solve_task(model, &mut task, &meta)
@@ -54,8 +54,8 @@ pub(crate) fn build_task(
     model: &Model,
     opts: &MosekOptions,
 ) -> Result<(TaskCB, Meta), SolverError> {
-    if model.has_sos_constraints() {
-        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    if model.has_active_sos_constraints() {
+        return Err(SolverError::UnsupportedSos);
     }
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
