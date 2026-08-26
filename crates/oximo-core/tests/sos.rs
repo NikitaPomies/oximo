@@ -411,6 +411,23 @@ fn in_place_reformulation_validates_all_sets_before_mutating() {
 }
 
 #[test]
+fn model_exposes_in_place_reformulation_history_after_artifacts_drop() {
+    let m = Model::new("in_place_history");
+    variable!(m, 0.0 <= x <= 1.0);
+    variable!(m, 0.0 <= y <= 1.0);
+    sos_constraint!(m, choice, SOS1, [x, y]);
+
+    let artifacts = m.reformulate_sos(SosReformulationOptions::default()).unwrap();
+    assert_eq!(artifacts.len(), 1);
+    drop(artifacts);
+
+    let history = m.sos_reformulations();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].source, SosConstraintId(0));
+    assert_eq!(history[0].variables.len(), 2);
+}
+
+#[test]
 fn preserving_reformulation_leaves_source_member_bounds_mutable() {
     let m = Model::new("preserved_source_bounds");
     variable!(m, 0.0 <= x <= 1.0);

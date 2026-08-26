@@ -209,12 +209,25 @@ impl Model {
     ///
     /// Returns [`ReformulationError`] before modifying the model when the
     /// fallback Big-M or any required member bound is invalid.
+    ///
+    /// Reformulation history remains available through
+    /// [`Self::sos_reformulations`] after the returned artifacts are dropped.
     pub fn reformulate_sos(
         &self,
         options: SosReformulationOptions,
     ) -> Result<Vec<SosReformulationArtifacts>, ReformulationError> {
         let plan = SosReformulationPlan::for_all(self, options)?;
         Ok(plan.apply(self))
+    }
+
+    /// Complete SOS reformulation history accumulated by this model.
+    ///
+    /// The returned guard dereferences to a slice of artifacts. This is useful
+    /// after an in-place reformulation when the `Vec` returned by
+    /// [`Self::reformulate_sos`] is no longer available.
+    #[must_use]
+    pub fn sos_reformulations(&self) -> Ref<'_, [SosReformulationArtifacts]> {
+        Ref::map(self.sos_reformulations.borrow(), Vec::as_slice)
     }
 }
 
