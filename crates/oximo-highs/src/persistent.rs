@@ -147,8 +147,8 @@ impl Solver for HighsPersistent {
     }
 
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
-        if model.has_sos_constraints() {
-            return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+        if model.has_active_sos_constraints() {
+            return Err(SolverError::UnsupportedSos);
         }
         match self.solve_resident(model, opts) {
             Ok(result) => Ok(result),

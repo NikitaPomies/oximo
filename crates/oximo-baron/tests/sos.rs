@@ -11,6 +11,6 @@ fn baron_rejects_sos_constraints_before_launching_executable() {
     let mut solver = Baron::with_exec("definitely-not-a-baron");
     assert!(matches!(
         solver.solve(&model, &BaronOptions::default()),
-        Err(SolverError::UnsupportedConstraint("SOS1/SOS2"))
+        Err(SolverError::UnsupportedSos)
     ));
 }

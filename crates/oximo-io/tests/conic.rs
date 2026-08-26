@@ -58,3 +58,20 @@ fn mosek_mps_writer_rejects_sos_constraints() {
         Err(IoError::UnsupportedMps { section, .. }) if section == "SOS"
     ));
 }
+
+#[test]
+fn text_writers_omit_reformulated_source_sos_constraints() {
+    let transformed = sos_model()
+        .to_reformulated_sos_model(SosReformulationOptions::default().with_fallback_big_m(10.0))
+        .expect("SOS reformulation");
+
+    let lp = to_lp_string(&transformed).expect("reformulated LP");
+    assert!(!lp.contains("\nSOS\n"));
+
+    for format in [MpsQuadraticFormat::Gurobi, MpsQuadraticFormat::Cplex, MpsQuadraticFormat::Mosek]
+    {
+        let options = MpsWriteOptions { quadratic_format: format };
+        let mps = to_mps_string_with(&transformed, &options).expect("reformulated MPS");
+        assert!(!mps.contains("\nSOS\n"));
+    }
+}

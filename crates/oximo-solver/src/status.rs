@@ -118,6 +118,11 @@ pub enum SolverError {
     UnsupportedKind(oximo_core::ModelKind),
     #[error("solver does not support native {0} constraints")]
     UnsupportedConstraint(&'static str),
+    #[error(
+        "solver does not support native SOS1/SOS2 constraints. Explicitly reformulate them with \
+         Model::reformulate_sos or Model::to_reformulated_sos_model"
+    )]
+    UnsupportedSos,
     #[error("model is missing an objective")]
     NoObjective,
     #[error("{location} contains a nonlinear term unsupported by this backend: {term}")]
@@ -141,6 +146,13 @@ impl std::fmt::Debug for SolverError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_sos_error_points_to_explicit_reformulation_methods() {
+        let message = SolverError::UnsupportedSos.to_string();
+        assert!(message.contains("Model::reformulate_sos"));
+        assert!(message.contains("Model::to_reformulated_sos_model"));
+    }
 
     /// The contract for a single termination: whether it admits a primal point
     /// ([`TerminationStatus::admits_primal`]) and what [`PrimalStatus::infer`]

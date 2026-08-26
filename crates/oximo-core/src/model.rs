@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use oximo_expr::{EvalError, Expr, ExprArena, ExprClass, ExprId, ParamId, VarId, classify};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use smol_str::SmolStr;
 
 use crate::constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
@@ -12,9 +12,12 @@ use crate::error::{Error, Result};
 use crate::indexed::{IndexedFamily, IndexedParam, IndexedVar, build_storage};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
+use crate::reformulation::SosReformulationArtifacts;
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::soc::{SocConstraint, SocConstraintId, is_detected_soc};
-use crate::sos::{SosConstraint, SosConstraintId, SosMember, SosType, validate_members};
+use crate::sos::{
+    SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType, validate_members,
+};
 use crate::var::{VarBuilder, Variable};
 
 const PAR_KIND_THRESHOLD: usize = 256;
@@ -142,12 +145,70 @@ pub struct Model {
     pub(crate) soc_names: RefCell<FxHashMap<SmolStr, SocConstraintId>>,
     pub(crate) sos_constraints: RefCell<Vec<SosConstraint>>,
     pub(crate) sos_names: RefCell<FxHashMap<SmolStr, SosConstraintId>>,
+    pub(crate) sos_reformulations: RefCell<Vec<SosReformulationArtifacts>>,
     pub(crate) objective: RefCell<Option<Objective>>,
     objective_declared: Cell<bool>,
     cached_kind: Cell<Option<ModelKind>>,
     /// Monotonic counter for auto-naming anonymous constraints registered via
     /// the `constraint!` macro.
     auto_seq: Cell<u32>,
+}
+
+impl Model {
+    /// Deep-copy every registry while preserving stable IDs.
+    pub(crate) fn clone_preserving_ids_with_capacity(
+        &self,
+        additional_variables: usize,
+        additional_constraints: usize,
+        additional_expr_nodes: usize,
+    ) -> Self {
+        let variables = self.variables.borrow();
+        let mut cloned_variables =
+            Vec::with_capacity(variables.len().saturating_add(additional_variables));
+        cloned_variables.extend_from_slice(&variables);
+
+        let var_names = self.var_names.borrow();
+        let mut cloned_var_names = FxHashMap::with_capacity_and_hasher(
+            var_names.len().saturating_add(additional_variables),
+            FxBuildHasher,
+        );
+        cloned_var_names.extend(var_names.iter().map(|(name, id)| (name.clone(), *id)));
+
+        let constraints = self.constraints.borrow();
+        let mut cloned_constraints =
+            Vec::with_capacity(constraints.len().saturating_add(additional_constraints));
+        cloned_constraints.extend_from_slice(&constraints);
+
+        let constraint_names = self.constraint_names.borrow();
+        let mut cloned_constraint_names = FxHashMap::with_capacity_and_hasher(
+            constraint_names.len().saturating_add(additional_constraints),
+            FxBuildHasher,
+        );
+        cloned_constraint_names
+            .extend(constraint_names.iter().map(|(name, id)| (name.clone(), *id)));
+
+        Self {
+            name: self.name.clone(),
+            arena: RefCell::new(
+                self.arena.borrow().__clone_with_additional_capacity(additional_expr_nodes),
+            ),
+            variables: RefCell::new(cloned_variables),
+            var_names: RefCell::new(cloned_var_names),
+            parameters: RefCell::new(self.parameters.borrow().clone()),
+            param_names: RefCell::new(self.param_names.borrow().clone()),
+            constraints: RefCell::new(cloned_constraints),
+            constraint_names: RefCell::new(cloned_constraint_names),
+            soc_constraints: RefCell::new(self.soc_constraints.borrow().clone()),
+            soc_names: RefCell::new(self.soc_names.borrow().clone()),
+            sos_constraints: RefCell::new(self.sos_constraints.borrow().clone()),
+            sos_names: RefCell::new(self.sos_names.borrow().clone()),
+            sos_reformulations: RefCell::new(self.sos_reformulations.borrow().clone()),
+            objective: RefCell::new(self.objective.borrow().clone()),
+            objective_declared: Cell::new(self.objective_declared.get()),
+            cached_kind: Cell::new(self.cached_kind.get()),
+            auto_seq: Cell::new(self.auto_seq.get()),
+        }
+    }
 }
 
 impl std::fmt::Debug for Model {
@@ -166,6 +227,10 @@ impl std::fmt::Debug for Model {
 }
 
 impl Model {
+    pub(crate) fn invalidate_kind(&self) {
+        self.cached_kind.set(None);
+    }
+
     pub fn new(name: impl Into<SmolStr>) -> Self {
         Self {
             name: name.into(),
@@ -180,6 +245,7 @@ impl Model {
             soc_names: RefCell::new(FxHashMap::default()),
             sos_constraints: RefCell::new(Vec::new()),
             sos_names: RefCell::new(FxHashMap::default()),
+            sos_reformulations: RefCell::new(Vec::new()),
             objective: RefCell::new(None),
             objective_declared: Cell::new(false),
             cached_kind: Cell::new(None),
@@ -299,14 +365,21 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `e` is not a bare variable handle.
+    /// Panics if `e` is not a bare variable handle or if the variable belongs
+    /// to an SOS constraint that has already been reformulated.
     pub fn fix(&self, e: Expr<'_>, value: f64) {
         let id = e.var_id().expect("Model::fix expects a single-variable expression");
         self.fix_var(id, value);
     }
 
     /// Fix variable `id` to `value` by setting `lb = ub = value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the variable belongs to an SOS constraint that has already
+    /// been reformulated, because its bounds are embedded in generated rows.
     pub fn fix_var(&self, id: VarId, value: f64) {
+        self.assert_sos_member_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
         v.lb = value;
@@ -329,13 +402,36 @@ impl Model {
 
     /// Restore bounds on variable `id`. Pass `f64::NEG_INFINITY` / `f64::INFINITY`
     /// to restore an unbounded direction.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the variable belongs to an SOS constraint that has already
+    /// been reformulated, because its bounds are embedded in generated rows.
     pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
+        self.assert_sos_member_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
         v.lb = lb;
         v.ub = ub;
         drop(vars);
         self.cached_kind.set(None);
+    }
+
+    /// Reformulation embeds the member bounds in generated Big-M rows.
+    /// Once an SOS has been reformulated, changing one of its member bounds
+    /// would make those rows stale and could either truncate or enlarge
+    /// the feasible set.
+    fn assert_sos_member_bounds_mutable(&self, id: VarId) {
+        if let Some(source) = self.sos_constraints.borrow().iter().find(|constraint| {
+            !constraint.active && constraint.members.iter().any(|member| member.variable == id)
+        }) {
+            panic!(
+                "cannot change bounds of variable {:?} after SOS constraint {:?} was reformulated; \
+                 change bounds before reformulating or create a new reformulated model",
+                self.variables.borrow()[id.index()].name,
+                source.name,
+            );
+        }
     }
 
     // Parameters
@@ -825,7 +921,7 @@ impl Model {
         name: impl Into<SmolStr>,
         sos_type: SosType,
         members: impl IntoIterator<Item = (Expr<'a>, f64)>,
-    ) -> SosConstraintId {
+    ) -> SosConstraintHandle<'a> {
         let name = name.into();
         let members: Vec<SosMember> = members
             .into_iter()
@@ -846,7 +942,7 @@ impl Model {
         all.push(SosConstraint { name: name.clone(), sos_type, members, active: true });
         by_name.insert(name, id);
         self.cached_kind.set(None);
-        id
+        SosConstraintHandle { model: self, id }
     }
 
     /// Register an SOS1 or SOS2 constraint with consecutive positional
@@ -865,7 +961,7 @@ impl Model {
         name: impl Into<SmolStr>,
         sos_type: SosType,
         variables: impl IntoIterator<Item = Expr<'a>>,
-    ) -> SosConstraintId {
+    ) -> SosConstraintHandle<'a> {
         self.add_sos_constraint(
             name,
             sos_type,
@@ -895,7 +991,7 @@ impl Model {
         &'a self,
         sos_type: SosType,
         members: impl IntoIterator<Item = (Expr<'a>, f64)>,
-    ) -> SosConstraintId {
+    ) -> SosConstraintHandle<'a> {
         self.add_sos_constraint(self.next_auto_sos_name(), sos_type, members)
     }
 
@@ -904,7 +1000,7 @@ impl Model {
         &'a self,
         sos_type: SosType,
         variables: impl IntoIterator<Item = Expr<'a>>,
-    ) -> SosConstraintId {
+    ) -> SosConstraintHandle<'a> {
         self.add_sos_constraint_auto_weights(self.next_auto_sos_name(), sos_type, variables)
     }
 
@@ -960,6 +1056,13 @@ impl Model {
 
     pub fn has_sos_constraints(&self) -> bool {
         !self.sos_constraints.borrow().is_empty()
+    }
+
+    /// Whether at least one SOS constraint still requires native backend
+    /// handling. Reformulation retains source SOS entries but marks them
+    /// inactive so their stable IDs and provenance are preserved.
+    pub fn has_active_sos_constraints(&self) -> bool {
+        self.sos_constraints.borrow().iter().any(|constraint| constraint.active)
     }
 
     // Objective
@@ -1067,8 +1170,8 @@ impl Model {
     fn infer_kind_impl(&self, parallel: Option<bool>) -> ModelKind {
         let arena = self.arena.borrow();
         let vars = self.variables.borrow();
-        let has_int =
-            vars.iter().any(|v| v.domain.is_integer()) || !self.sos_constraints.borrow().is_empty();
+        let has_int = vars.iter().any(|v| v.domain.is_integer())
+            || self.sos_constraints.borrow().iter().any(|constraint| constraint.active);
         let obj_class = self
             .objective
             .borrow()

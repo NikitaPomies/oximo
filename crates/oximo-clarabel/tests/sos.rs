@@ -16,7 +16,7 @@ fn clarabel_rejects_sos_constraints() {
     let mut solver = Clarabel;
     assert!(matches!(
         solver.solve(&model, &ClarabelOptions::default()),
-        Err(SolverError::UnsupportedConstraint("SOS1/SOS2"))
+        Err(SolverError::UnsupportedSos)
     ));
 }
 
@@ -26,6 +26,6 @@ fn clarabel_persistent_rejects_sos_constraints() {
     let mut solver = Clarabel.persistent();
     assert!(matches!(
         solver.solve(&model, &ClarabelOptions::default()),
-        Err(SolverError::UnsupportedConstraint("SOS1/SOS2"))
+        Err(SolverError::UnsupportedSos)
     ));
 }

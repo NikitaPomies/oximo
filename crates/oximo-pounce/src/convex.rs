@@ -265,8 +265,8 @@ fn push_row(out: &mut Vec<Triplet>, row: usize, terms: &LinearTerms, scale: f64)
 )]
 #[expect(clippy::too_many_lines)]
 pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
-    if model.has_sos_constraints() {
-        return Err(SolverError::UnsupportedConstraint("SOS1/SOS2"));
+    if model.has_active_sos_constraints() {
+        return Err(SolverError::UnsupportedSos);
     }
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let arena = model.arena();

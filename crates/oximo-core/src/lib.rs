@@ -15,6 +15,7 @@ pub mod model;
 pub mod objective;
 pub mod param;
 pub mod prelude;
+pub mod reformulation;
 pub mod set;
 pub mod soc;
 pub mod sos;
@@ -31,9 +32,12 @@ pub use model::{
 };
 pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;
+pub use reformulation::{
+    ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
+};
 pub use set::{Axis, FromIndexKey, IndexKey, IndexTuple, KeyCat, ScalarKey, Set, SetIter};
 pub use soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
-pub use sos::{SosConstraint, SosConstraintId, SosMember, SosType};
+pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;
 pub use var::{VarBuilder, Variable, var_name};
 

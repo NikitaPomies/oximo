@@ -171,7 +171,7 @@ mod tests {
         let hi = constraint!(m, ceil, x <= 1.0);
         let sos = {
             variable!(m, y);
-            m.add_sos_constraint("choice", SosType::Sos1, [(y, 1.0)])
+            m.add_sos_constraint("choice", SosType::Sos1, [(y, 1.0)]).id()
         };
 
         let iis = Iis {

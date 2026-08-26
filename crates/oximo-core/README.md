@@ -173,32 +173,6 @@ constraint!(m, band, 1.0 <= e <= 3.0);             // two-sided range -> one con
 constraint!(m, name = format!("c_{k}"), e == rhs); // computed run-time name
 ```
 
-### Special ordered sets
-
-SOS1 and SOS2 constraints apply ordering weights to bare variables. SOS1 allows
-at most one nonzero member. SOS2 allows at most two adjacent nonzero members.
-Weights must be finite and unique within each set.
-
-```rust,ignore
-variable!(m, 0.0 <= choice_a <= 1.0);
-variable!(m, 0.0 <= choice_b <= 1.0);
-variable!(m, 0.0 <= choice_c <= 1.0);
-
-sos_constraint!(m, one_choice, SOS1, [choice_a, choice_b, choice_c]);
-sos_constraint!(m, adjacent_choice, SOS2, [choice_a, choice_b, choice_c]);
-sos_constraint!(m, weighted, SOS2, [
-    (choice_a, 10.0), (choice_b, 20.0), (choice_c, 30.0),
-]);
-```
-
-They are currently passed through only to backends with native SOS support.
-
-The indexed form creates one set for every key in the binder. The binder is
-required because the macro cannot infer an index domain from an `IndexedVar`:
-`choice[i in 0..n]` produces `choice[0]`, ..., `choice[n - 1]`. To create one
-SOS over a dynamically assembled collection, use
-`m.add_sos_constraint_auto_weights("choice", SosType::Sos1, members)`.
-
 ### Indexed family over a set
 
 ```rust,ignore
@@ -211,6 +185,78 @@ constraint!(m, flow[i in 0..n, j in 0..m], x[i, j] >= 0.0);
 // Filtered family: only keys passing the guard.
 constraint!(m, diag[(i, j) in rc if i == j], x[i, j] <= 1.0);
 ```
+
+### Summation
+
+`sum!(body for k in domain)` reads as `sum_{k in domain} body`. Nest with extra
+clauses and filter with a trailing `if`:
+
+```rust,ignore
+constraint!(m, cap, sum!(weights[i] * x[i] for i in items) <= capacity);
+objective!(m, Min, sum!(c[i, j] * x[i, j] for i in rows, j in cols));
+let evens = sum!(x[i] for i in items if i % 2 == 0); // filtered
+```
+
+### Special ordered sets
+
+SOS1 and SOS2 constraints apply ordering weights to bare variables. SOS1 allows
+at most one nonzero member. SOS2 allows at most two adjacent nonzero members.
+Weights must be finite and unique within each set.
+
+```rust,ignore
+variable!(m, 0.0 <= choice_a <= 1.0);
+variable!(m, 0.0 <= choice_b <= 1.0);
+variable!(m, 0.0 <= choice_c <= 1.0);
+
+let one_choice = sos_constraint!(m, one_choice, SOS1, [choice_a, choice_b, choice_c]);
+sos_constraint!(m, adjacent_choice, SOS2, [choice_a, choice_b, choice_c]);
+sos_constraint!(m, weighted, SOS2, [
+    (choice_a, 10.0), (choice_b, 20.0), (choice_c, 30.0),
+]);
+```
+
+The indexed form creates one set for every key in the binder. The binder is
+required because the macro cannot infer an index domain from an `IndexedVar`:
+`choice[i in 0..n]` produces `choice[0]`, ..., `choice[n - 1]`. To create one
+SOS over a dynamically assembled collection, use
+`m.add_sos_constraint_auto_weights("choice", SosType::Sos1, members)`.
+
+The single-constraint form returns a model-bound `SosConstraintHandle`.
+Backends without native SOS support return an error.
+Reformulate one constraint through its handle, or every active SOS in a model explicitly:
+
+```rust,ignore
+let transformed = one_choice.to_reformulated_model(SosReformulationOptions::default())?;
+solver.solve(&transformed, &options)?;
+
+let transformed = m.to_reformulated_sos_model(
+    SosReformulationOptions::default().with_fallback_big_m(1.0e6),
+)?;
+
+// Reformulate every active SOS in place when the native form is no longer needed.
+let artifacts = m.reformulate_sos(
+    SosReformulationOptions::default().with_fallback_big_m(1.0e6),
+)?;
+solver.solve(&m, &options)?;
+```
+
+The `to_reformulated_*` methods produce an independent model.
+`reformulate*` methods modify the source model.
+
+All forms preserve original IDs, append binary variables and linear rows,
+and retain the source SOS entries as inactive provenance. Finite variable bounds
+are used as member-specific Big-M values. An infinite bound is an error unless
+the caller explicitly supplies a positive finite fallback. A fallback that is too small can truncate
+the feasible region.
+
+Prefer solving the original model with a backend that supports native SOS.
+Reformulate when the selected backend lacks that capability or when you intentionally
+need a MILP representation. In-place reformulation first validates every active set,
+then appends all generated artifacts without copying the source model.
+
+Because the generated rows embed the current member bounds, those bounds cannot
+be changed on a reformulated model. Change bounds before reformulating, or
+produce a fresh reformulated copy after changing the source model.
 
 ### Second-order cone constraints
 
@@ -225,17 +271,6 @@ soc_constraint!(m, risk[i in assets], [s[i] * w[i]] <= cap); // family: risk[key
 ```
 
 The method form `m.add_soc_constraint("cone", [x, y], t)` is equivalent.
-
-### Summation
-
-`sum!(body for k in domain)` reads as `sum_{k in domain} body`. Nest with extra
-clauses and filter with a trailing `if`:
-
-```rust,ignore
-constraint!(m, cap, sum!(weights[i] * x[i] for i in items) <= capacity);
-objective!(m, Min, sum!(c[i, j] * x[i, j] for i in rows, j in cols));
-let evens = sum!(x[i] for i in items if i % 2 == 0); // filtered
-```
 
 ## Objectives
 

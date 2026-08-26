@@ -212,8 +212,8 @@ impl Model {
     }
 
     #[must_use]
-    pub fn display_sos(&self, id: SosConstraintId) -> SosDisplay<'_> {
-        SosDisplay { model: self, id }
+    pub fn display_sos(&self, id: impl Into<SosConstraintId>) -> SosDisplay<'_> {
+        SosDisplay { model: self, id: id.into() }
     }
 }
 
