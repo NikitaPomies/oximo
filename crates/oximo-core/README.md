@@ -215,6 +215,12 @@ sos_constraint!(m, weighted, SOS2, [
 ]);
 ```
 
+The indexed form creates one set for every key in the binder. The binder is
+required because the macro cannot infer an index domain from an `IndexedVar`:
+`choice[i in 0..n]` produces `choice[0]`, ..., `choice[n - 1]`. To create one
+SOS over a dynamically assembled collection, use
+`m.add_sos_constraint_auto_weights("choice", SosType::Sos1, members)`.
+
 The single-constraint form returns a model-bound `SosConstraintHandle`.
 Backends without native SOS support return an error.
 Reformulate one constraint through its handle, or every active SOS in a model explicitly:
@@ -251,12 +257,6 @@ then appends all generated artifacts without copying the source model.
 Because the generated rows embed the current member bounds, those bounds cannot
 be changed on a reformulated model. Change bounds before reformulating, or
 produce a fresh reformulated copy after changing the source model.
-
-The indexed form creates one set for every key in the binder. The binder is
-required because the macro cannot infer an index domain from an `IndexedVar`:
-`choice[i in 0..n]` produces `choice[0]`, ..., `choice[n - 1]`. To create one
-SOS over a dynamically assembled collection, use
-`m.add_sos_constraint_auto_weights("choice", SosType::Sos1, members)`.
 
 ### Second-order cone constraints
 
