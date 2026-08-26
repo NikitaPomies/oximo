@@ -1076,12 +1076,10 @@ fn write_sos_section<W: Write>(
     variable_names: &[String],
 ) -> Result<(), IoError> {
     writeln!(out, "SOS")?;
-    let sos_names = unique_mps_names(
-        constraints.iter().map(|s| s.name.as_str()),
-        "S",
-        std::iter::empty::<&str>(),
-    );
-    for (set, set_name) in constraints.iter().zip(sos_names.iter()) {
+    let active = || constraints.iter().filter(|constraint| constraint.active);
+    let sos_names =
+        unique_mps_names(active().map(|s| s.name.as_str()), "S", std::iter::empty::<&str>());
+    for (set, set_name) in active().zip(sos_names.iter()) {
         writeln!(
             out,
             " S{} {}",
@@ -1267,8 +1265,7 @@ pub fn write_mps_with<W: Write>(
     out: &mut W,
     options: &MpsWriteOptions,
 ) -> Result<(), IoError> {
-    if !model.sos_constraints().is_empty() && options.quadratic_format == MpsQuadraticFormat::Mosek
-    {
+    if model.has_active_sos_constraints() && options.quadratic_format == MpsQuadraticFormat::Mosek {
         return Err(IoError::UnsupportedMps {
             section: "SOS".into(),
             feature: "SOS is not supported by the MOSEK MPS dialect".into(),
@@ -1455,7 +1452,8 @@ pub fn write_mps_with<W: Write>(
     }
 
     let sos = model.sos_constraints();
-    if options.quadratic_format == MpsQuadraticFormat::Cplex && !sos.is_empty() {
+    let has_active_sos = sos.iter().any(|constraint| constraint.active);
+    if options.quadratic_format == MpsQuadraticFormat::Cplex && has_active_sos {
         write_sos_section(out, &sos, &variable_names)?;
     }
 
@@ -1494,7 +1492,7 @@ pub fn write_mps_with<W: Write>(
         )?;
     }
 
-    if options.quadratic_format != MpsQuadraticFormat::Cplex && !sos.is_empty() {
+    if options.quadratic_format != MpsQuadraticFormat::Cplex && has_active_sos {
         write_sos_section(out, &sos, &variable_names)?;
     }
 

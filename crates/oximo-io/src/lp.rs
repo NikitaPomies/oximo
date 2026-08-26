@@ -1116,11 +1116,11 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     }
 
     let sos = model.sos_constraints();
-    if !sos.is_empty() {
+    if sos.iter().any(|constraint| constraint.active) {
         let vars_by_id: HashMap<oximo_core::VarId, &str> =
             vars.iter().map(|v| (v.id, v.name.as_str())).collect();
         writeln!(out, "SOS")?;
-        for s in sos.iter() {
+        for s in sos.iter().filter(|constraint| constraint.active) {
             validate_lp_row_name(&s.name)?;
             write!(
                 out,
