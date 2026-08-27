@@ -215,3 +215,13 @@ fn sparsity_patterns() {
     // Linear contributes nothing.
     assert_eq!(hessian_lagrangian_structure(&slots), vec![(2, 0), (2, 2)]);
 }
+
+#[test]
+fn lagrangian_structure_handles_wide_sparse_variable_ids() {
+    let mut arena = ExprArena::new();
+    let high = arena.var(VarId(1_024));
+    let nonlinear = arena.push(ExprNode::Sin(high));
+    let slots = [FunctionSlot::classify(&arena, nonlinear)];
+
+    assert_eq!(hessian_lagrangian_structure(&slots), vec![(1_024, 1_024)]);
+}

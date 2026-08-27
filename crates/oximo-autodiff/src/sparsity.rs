@@ -701,6 +701,54 @@ pub fn hessian_lagrangian_structure<'a, I>(slots: I) -> Vec<(usize, usize)>
 where
     I: IntoIterator<Item = &'a FunctionSlot>,
 {
+    let slots: Vec<_> = slots.into_iter().collect();
+    let mut max_variable = None;
+    for slot in &slots {
+        match &slot.kind {
+            SlotKind::Linear(_) => {}
+            SlotKind::Quadratic(q) => {
+                for &(r, c, _) in &q.hessian {
+                    max_variable = max_variable.max(Some(r.index().max(c.index())));
+                }
+            }
+            SlotKind::Nonlinear(_) => {
+                for &(r, c) in &slot.hess_pairs {
+                    max_variable = max_variable.max(Some((r as usize).max(c as usize)));
+                }
+            }
+        }
+    }
+
+    if max_variable.is_none_or(|index| index < DENSE_SPARSITY_MAX_VARS) {
+        let variables = max_variable.map_or(0, |index| index + 1);
+        let pair_count = variables * (variables + 1) / 2;
+        let mut pairs = vec![0; words_for(pair_count)];
+        for slot in &slots {
+            match &slot.kind {
+                SlotKind::Linear(_) => {}
+                SlotKind::Quadratic(q) => {
+                    for &(r, c, _) in &q.hessian {
+                        set_pair(&mut pairs, r.index(), c.index());
+                    }
+                }
+                SlotKind::Nonlinear(_) => {
+                    for &(r, c) in &slot.hess_pairs {
+                        set_pair(&mut pairs, r as usize, c as usize);
+                    }
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        for row in 0..variables {
+            for col in 0..=row {
+                if has_bit(&pairs, row * (row + 1) / 2 + col) {
+                    entries.push((row, col));
+                }
+            }
+        }
+        return entries;
+    }
+
     let mut entries = FxHashSet::default();
     for slot in slots {
         match &slot.kind {
@@ -715,7 +763,7 @@ where
             }
         }
     }
-    let mut entries: Vec<(usize, usize)> = entries.into_iter().collect();
+    let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_unstable();
     entries
 }
