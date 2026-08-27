@@ -348,3 +348,21 @@ fn disconnected_graph_recovers_exactly() {
     let edges = [(1, 0), (2, 0), (2, 1), (4, 3), (5, 3), (5, 4)];
     assert_recovers(&graph_pattern(6, &edges));
 }
+
+#[test]
+fn empty_pattern_has_no_coloring_state() {
+    let coloring = star_hessian_coloring(&[]);
+    assert!(coloring.groups.is_empty());
+    assert!(coloring.recover.is_empty());
+}
+
+#[test]
+fn sparse_ids_and_duplicate_entries_are_deterministic() {
+    let pattern = [(7, 7), (42, 7), (42, 7), (42, 42)];
+    let first = assert_recovers(&pattern);
+    let second = star_hessian_coloring(&pattern);
+
+    assert_eq!(first.groups, second.groups);
+    assert_eq!(first.recover, second.recover);
+    assert_eq!(first.groups.len(), 2);
+}

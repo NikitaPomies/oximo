@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use oximo_expr::{ExprArena, ExprId, ExprNode};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use crate::slot::{FunctionSlot, SlotKind};
 
@@ -793,54 +793,25 @@ pub struct HessianColoring {
 ///
 /// `pattern` is a normalized lower-triangle pattern (`row >= col`).
 pub fn star_hessian_coloring(pattern: &[(usize, usize)]) -> HessianColoring {
-    let mut adj: FxHashMap<usize, FxHashSet<usize>> = FxHashMap::default();
-    for &(r, c) in pattern {
-        adj.entry(r).or_default(); // ensure diagonal-only vertices are colored
-        if r != c {
-            adj.entry(r).or_default().insert(c);
-            adj.entry(c).or_default().insert(r);
-        }
-    }
+    let graph = CsrGraph::from_pattern(pattern);
+    let color = greedy_star_coloring(&graph);
+    let neighbor_colors = NeighborColorCounts::new(&graph, &color);
+    let classes = ColorClasses::new(&graph, &color);
 
-    let color = greedy_star_coloring(&adj);
+    let mut groups = Vec::new();
+    let mut group_of_color = vec![None; classes.len()];
+    let mut singleton_of = vec![None; graph.len()];
+    let mut recover = Vec::with_capacity(pattern.len());
 
-    let mut nbr_colors: FxHashMap<usize, FxHashMap<usize, usize>> = FxHashMap::default();
-    for (&v, nbrs) in &adj {
-        let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
-        for &w in nbrs {
-            *counts.entry(color[&w]).or_insert(0) += 1;
-        }
-        nbr_colors.insert(v, counts);
-    }
-
-    // Members of each color class (sorted), materialized into a seed group only
-    // when some entry reads from that class.
-    let mut class: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-    for (&v, &col) in &color {
-        class.entry(col).or_default().push(v);
-    }
-    for members in class.values_mut() {
-        members.sort_unstable();
-    }
-
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut group_of_color: FxHashMap<usize, usize> = FxHashMap::default();
-    let mut singleton_of: FxHashMap<usize, usize> = FxHashMap::default();
-    let mut recover: Vec<(usize, usize)> = Vec::with_capacity(pattern.len());
-
-    let unique = |v: usize, col: usize| nbr_colors[&v].get(&col) == Some(&1);
-
-    for &(r, c) in pattern {
+    for (&(r, c), &(dense_r, dense_c)) in pattern.iter().zip(&graph.dense_pattern) {
         let entry = if r == c {
-            (color_group(color[&r], &class, &mut groups, &mut group_of_color), r)
-        } else if unique(r, color[&c]) {
-            // `c` is `r`'s only color[c] neighbor -> seed color[c], read row r.
-            (color_group(color[&c], &class, &mut groups, &mut group_of_color), r)
-        } else if unique(c, color[&r]) {
-            (color_group(color[&r], &class, &mut groups, &mut group_of_color), c)
+            (color_group(color[dense_r], &classes, &mut groups, &mut group_of_color), r)
+        } else if neighbor_colors.count(dense_r, color[dense_c]) == 1 {
+            (color_group(color[dense_c], &classes, &mut groups, &mut group_of_color), r)
+        } else if neighbor_colors.count(dense_c, color[dense_r]) == 1 {
+            (color_group(color[dense_r], &classes, &mut groups, &mut group_of_color), c)
         } else {
-            // No clean class read (a non-star edge).
-            (singleton_group(r, &mut groups, &mut singleton_of), c)
+            (singleton_group(dense_r, &graph, &mut groups, &mut singleton_of), c)
         };
         recover.push(entry);
     }
@@ -848,118 +819,304 @@ pub fn star_hessian_coloring(pattern: &[(usize, usize)]) -> HessianColoring {
     HessianColoring { groups, recover }
 }
 
-/// Greedy star coloring of `adj`, a proper coloring in which no path on four
-/// vertices is two-colored, so every pair of colors induces a star forest and
-/// the Hessian is directly recoverable.
-fn greedy_star_coloring(adj: &FxHashMap<usize, FxHashSet<usize>>) -> FxHashMap<usize, usize> {
-    let mut order: Vec<usize> = adj.keys().copied().collect();
-    order.sort_unstable_by_key(|&v| (usize::MAX - adj[&v].len(), v));
+struct CsrGraph {
+    vertices: Vec<usize>,
+    offsets: Vec<usize>,
+    neighbors: Vec<usize>,
+    dense_pattern: Vec<(usize, usize)>,
+}
 
-    let mut color: FxHashMap<usize, usize> = FxHashMap::default();
-    for &v in &order {
-        let nbrs = &adj[&v];
-        // Colored-neighbor color multiplicities, for the internal-P4 rule.
-        let mut nbr_count: FxHashMap<usize, usize> = FxHashMap::default();
-        for &w in nbrs {
-            if let Some(&cw) = color.get(&w) {
-                *nbr_count.entry(cw).or_insert(0) += 1;
+impl CsrGraph {
+    fn from_pattern(pattern: &[(usize, usize)]) -> Self {
+        let mut vertices: Vec<_> = pattern.iter().flat_map(|&(r, c)| [r, c]).collect();
+        vertices.sort_unstable();
+        vertices.dedup();
+
+        let dense_pattern: Vec<_> = pattern
+            .iter()
+            .map(|&(r, c)| {
+                (
+                    vertices.binary_search(&r).expect("pattern vertex was collected"),
+                    vertices.binary_search(&c).expect("pattern vertex was collected"),
+                )
+            })
+            .collect();
+
+        let mut degrees = vec![0_usize; vertices.len()];
+        for &(r, c) in &dense_pattern {
+            if r != c {
+                degrees[r] += 1;
+                degrees[c] += 1;
             }
         }
-        // Proper coloring forbids neighbor colors outright.
-        let mut forbidden: FxHashSet<usize> = nbr_count.keys().copied().collect();
 
-        // Each colored neighbor `w` of `v` (with color `b = color[w]`) can close
-        // a two-colored path on four vertices in two distinct ways.
-        for &w in nbrs {
-            let Some(&b) = color.get(&w) else { continue };
-            forbid_endpoint_p4(adj, &color, v, w, b, &mut forbidden);
-            forbid_internal_p4(adj, &color, v, w, nbr_count[&b] >= 2, &mut forbidden);
+        let mut raw_offsets = Vec::with_capacity(vertices.len() + 1);
+        raw_offsets.push(0);
+        for degree in degrees {
+            raw_offsets.push(raw_offsets.last().copied().unwrap_or(0) + degree);
+        }
+        let mut raw_neighbors = vec![0; raw_offsets.last().copied().unwrap_or(0)];
+        let mut cursors = raw_offsets[..vertices.len()].to_vec();
+        for &(r, c) in &dense_pattern {
+            if r != c {
+                raw_neighbors[cursors[r]] = c;
+                cursors[r] += 1;
+                raw_neighbors[cursors[c]] = r;
+                cursors[c] += 1;
+            }
         }
 
-        let mut c = 0;
-        while forbidden.contains(&c) {
-            c += 1;
+        let mut offsets = Vec::with_capacity(vertices.len() + 1);
+        let mut neighbors = Vec::with_capacity(raw_neighbors.len());
+        offsets.push(0);
+        for vertex in 0..vertices.len() {
+            let row = &mut raw_neighbors[raw_offsets[vertex]..raw_offsets[vertex + 1]];
+            row.sort_unstable();
+            let mut previous = None;
+            for &neighbor in row.iter() {
+                if previous != Some(neighbor) {
+                    neighbors.push(neighbor);
+                    previous = Some(neighbor);
+                }
+            }
+            offsets.push(neighbors.len());
         }
-        color.insert(v, c);
+
+        Self { vertices, offsets, neighbors, dense_pattern }
+    }
+
+    fn len(&self) -> usize {
+        self.vertices.len()
+    }
+
+    fn neighbors(&self, vertex: usize) -> &[usize] {
+        &self.neighbors[self.offsets[vertex]..self.offsets[vertex + 1]]
+    }
+}
+
+const UNCOLORED: usize = usize::MAX;
+
+/// Greedy star coloring of a CSR graph: a proper coloring in which no path on
+/// four vertices is two-colored.
+fn greedy_star_coloring(graph: &CsrGraph) -> Vec<usize> {
+    let mut order: Vec<_> = (0..graph.len()).collect();
+    order.sort_unstable_by_key(|&vertex| {
+        (std::cmp::Reverse(graph.neighbors(vertex).len()), graph.vertices[vertex])
+    });
+
+    let mut color = vec![UNCOLORED; graph.len()];
+    let mut neighbor_color_count = vec![0_usize; graph.len()];
+    let mut touched_colors = Vec::new();
+    let mut forbidden_epoch = vec![0_u32; graph.len()];
+    let mut epoch = 0_u32;
+
+    for vertex in order {
+        epoch = epoch.wrapping_add(1);
+        if epoch == 0 {
+            forbidden_epoch.fill(0);
+            epoch = 1;
+        }
+        touched_colors.clear();
+
+        for &neighbor in graph.neighbors(vertex) {
+            let neighbor_color = color[neighbor];
+            if neighbor_color == UNCOLORED {
+                continue;
+            }
+            if neighbor_color_count[neighbor_color] == 0 {
+                touched_colors.push(neighbor_color);
+            }
+            neighbor_color_count[neighbor_color] += 1;
+            forbidden_epoch[neighbor_color] = epoch;
+        }
+
+        for &neighbor in graph.neighbors(vertex) {
+            let neighbor_color = color[neighbor];
+            if neighbor_color == UNCOLORED {
+                continue;
+            }
+            forbid_endpoint_p4(
+                graph,
+                &color,
+                vertex,
+                neighbor,
+                neighbor_color,
+                &mut forbidden_epoch,
+                epoch,
+            );
+            forbid_internal_p4(
+                graph,
+                &color,
+                vertex,
+                neighbor,
+                neighbor_color_count[neighbor_color] >= 2,
+                &mut forbidden_epoch,
+                epoch,
+            );
+        }
+
+        let selected =
+            (0..graph.len()).find(|&candidate| forbidden_epoch[candidate] != epoch).unwrap_or(0);
+        color[vertex] = selected;
+        for &touched in &touched_colors {
+            neighbor_color_count[touched] = 0;
+        }
     }
     color
 }
 
-/// Endpoint-P4 rule while choosing `v`'s color, for a candidate path
-/// `v - w - x - y` colored `c, b, c, b` (with `b = color[w]`).
-///
-/// For each colored neighbor `x` of `w` (`x != v`): if `x` has some other
-/// `b`-colored neighbor `y != w`, then giving `v` the color `c = color[x]` would
-/// complete the two-colored P4 `v-w-x-y`. Forbid `color[x]`.
+/// Endpoint-P4 rule while choosing `vertex`'s color.
 fn forbid_endpoint_p4(
-    adj: &FxHashMap<usize, FxHashSet<usize>>,
-    color: &FxHashMap<usize, usize>,
-    v: usize,
-    w: usize,
-    b: usize,
-    forbidden: &mut FxHashSet<usize>,
+    graph: &CsrGraph,
+    color: &[usize],
+    vertex: usize,
+    neighbor: usize,
+    neighbor_color: usize,
+    forbidden_epoch: &mut [u32],
+    epoch: u32,
 ) {
-    for &x in &adj[&w] {
-        if x == v {
+    for &next in graph.neighbors(neighbor) {
+        if next == vertex {
             continue;
         }
-        let Some(&cx) = color.get(&x) else { continue };
-        if adj[&x].iter().any(|&y| y != w && color.get(&y) == Some(&b)) {
-            forbidden.insert(cx);
+        let next_color = color[next];
+        if next_color == UNCOLORED {
+            continue;
+        }
+        if graph
+            .neighbors(next)
+            .iter()
+            .any(|&last| last != neighbor && color[last] == neighbor_color)
+        {
+            forbidden_epoch[next_color] = epoch;
         }
     }
 }
 
-/// Internal-P4 rule while choosing `v`'s color, for a candidate path
-/// `u - v - w - x` colored `b, c, b, c` (with `b = color[w]`).
-///
-/// Applies only when `v` already has another `b`-colored neighbor `u`. Then
-/// giving `v` the color `c = color[x]` of any colored neighbor `x != v` of `w`
-/// completes the two-colored P4 `u-v-w-x`. Forbid every such `color[x]`.
+/// Internal-P4 rule while choosing `vertex`'s color.
 fn forbid_internal_p4(
-    adj: &FxHashMap<usize, FxHashSet<usize>>,
-    color: &FxHashMap<usize, usize>,
-    v: usize,
-    w: usize,
-    v_has_another_b_neighbor: bool,
-    forbidden: &mut FxHashSet<usize>,
+    graph: &CsrGraph,
+    color: &[usize],
+    vertex: usize,
+    neighbor: usize,
+    vertex_has_another_neighbor_of_color: bool,
+    forbidden_epoch: &mut [u32],
+    epoch: u32,
 ) {
-    if !v_has_another_b_neighbor {
+    if !vertex_has_another_neighbor_of_color {
         return;
     }
-    for &x in &adj[&w] {
-        if x == v {
-            continue;
-        }
-        if let Some(&cx) = color.get(&x) {
-            forbidden.insert(cx);
+    for &next in graph.neighbors(neighbor) {
+        if next != vertex && color[next] != UNCOLORED {
+            forbidden_epoch[color[next]] = epoch;
         }
     }
 }
 
-/// Index of the seed group for color `col`, creating it on first use.
-fn color_group(
-    col: usize,
-    class: &FxHashMap<usize, Vec<usize>>,
-    groups: &mut Vec<Vec<usize>>,
-    group_of_color: &mut FxHashMap<usize, usize>,
-) -> usize {
-    *group_of_color.entry(col).or_insert_with(|| {
-        let idx = groups.len();
-        groups.push(class[&col].clone());
-        idx
-    })
+struct NeighborColorCounts {
+    offsets: Vec<usize>,
+    entries: Vec<(usize, usize)>,
 }
 
-/// Index of a lone-column seed group for `v`, created once per vertex.
-fn singleton_group(
-    v: usize,
+impl NeighborColorCounts {
+    fn new(graph: &CsrGraph, color: &[usize]) -> Self {
+        let mut offsets = Vec::with_capacity(graph.len() + 1);
+        let mut entries = Vec::new();
+        let mut scratch = Vec::new();
+        offsets.push(0);
+
+        for vertex in 0..graph.len() {
+            scratch.clear();
+            scratch.extend(graph.neighbors(vertex).iter().map(|&neighbor| color[neighbor]));
+            scratch.sort_unstable();
+
+            let mut index = 0;
+            while index < scratch.len() {
+                let current = scratch[index];
+                let start = index;
+                while index < scratch.len() && scratch[index] == current {
+                    index += 1;
+                }
+                entries.push((current, index - start));
+            }
+            offsets.push(entries.len());
+        }
+        Self { offsets, entries }
+    }
+
+    fn count(&self, vertex: usize, color: usize) -> usize {
+        let entries = &self.entries[self.offsets[vertex]..self.offsets[vertex + 1]];
+        entries
+            .binary_search_by_key(&color, |&(entry_color, _)| entry_color)
+            .map_or(0, |index| entries[index].1)
+    }
+}
+
+struct ColorClasses {
+    offsets: Vec<usize>,
+    members: Vec<usize>,
+}
+
+impl ColorClasses {
+    fn new(graph: &CsrGraph, color: &[usize]) -> Self {
+        let count = color.iter().copied().max().map_or(0, |maximum| maximum + 1);
+        let mut sizes = vec![0_usize; count];
+        for &entry in color {
+            sizes[entry] += 1;
+        }
+
+        let mut offsets = Vec::with_capacity(count + 1);
+        offsets.push(0);
+        for size in sizes {
+            offsets.push(offsets.last().copied().unwrap_or(0) + size);
+        }
+
+        let mut cursors = offsets[..count].to_vec();
+        let mut members = vec![0; graph.len()];
+        for (vertex, &entry) in color.iter().enumerate() {
+            members[cursors[entry]] = graph.vertices[vertex];
+            cursors[entry] += 1;
+        }
+        Self { offsets, members }
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    fn members(&self, color: usize) -> &[usize] {
+        &self.members[self.offsets[color]..self.offsets[color + 1]]
+    }
+}
+
+/// Index of the seed group for `color`, creating it on first use.
+fn color_group(
+    color: usize,
+    classes: &ColorClasses,
     groups: &mut Vec<Vec<usize>>,
-    singleton_of: &mut FxHashMap<usize, usize>,
+    group_of_color: &mut [Option<usize>],
 ) -> usize {
-    *singleton_of.entry(v).or_insert_with(|| {
-        let idx = groups.len();
-        groups.push(vec![v]);
-        idx
-    })
+    if let Some(group) = group_of_color[color] {
+        return group;
+    }
+    let group = groups.len();
+    groups.push(classes.members(color).to_vec());
+    group_of_color[color] = Some(group);
+    group
+}
+
+/// Index of a lone-column seed group for `vertex`, created once per vertex.
+fn singleton_group(
+    vertex: usize,
+    graph: &CsrGraph,
+    groups: &mut Vec<Vec<usize>>,
+    singleton_of: &mut [Option<usize>],
+) -> usize {
+    if let Some(group) = singleton_of[vertex] {
+        return group;
+    }
+    let group = groups.len();
+    groups.push(vec![graph.vertices[vertex]]);
+    singleton_of[vertex] = Some(group);
+    group
 }
