@@ -865,4 +865,19 @@ mod tests {
         ev.hessian_seeds_parallel(&POINT, sigma, &lambda, &mut parallel);
         assert_eq!(serial, parallel);
     }
+
+    #[test]
+    fn wide_sparse_objective_builds_the_expected_pattern() {
+        let model = Model::new("wide_sparse");
+        let vars: Vec<_> = (0..1_025).map(|i| model.__var(format!("x{i}")).build()).collect();
+        let mut linear = vars[0];
+        for &var in &vars[1..] {
+            linear = linear + var;
+        }
+        model.__minimize((vars[0] + vars[1_024]).sin() + linear);
+
+        let evaluator = NlpEvaluator::new(&model).unwrap();
+        assert_eq!(evaluator.num_variables(), 1_025);
+        assert_eq!(evaluator.hessian_lagrangian_structure(), &[(0, 0), (1_024, 0), (1_024, 1_024)]);
+    }
 }

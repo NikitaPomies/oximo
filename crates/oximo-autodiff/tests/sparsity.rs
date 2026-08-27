@@ -158,6 +158,19 @@ fn packed_support_spans_multiple_words() {
 }
 
 #[test]
+fn wide_sparse_support_avoids_dense_pair_storage() {
+    let mut arena = ExprArena::new();
+    let vars: Vec<_> = (0..1_025).map(|i| var(&mut arena, i)).collect();
+    let endpoints = arena.push(ExprNode::Add([vars[0], vars[1_024]].into_iter().collect()));
+    let nonlinear = arena.push(ExprNode::Sin(endpoints));
+    let root =
+        arena.push(ExprNode::Add(vars.into_iter().chain(std::iter::once(nonlinear)).collect()));
+
+    assert_eq!(variable_support(&arena, root).len(), 1_025);
+    assert_eq!(hessian_pattern(&arena, root), vec![(0, 0), (1_024, 0), (1_024, 1_024)]);
+}
+
+#[test]
 fn sparse_variable_ids_are_coordinate_compressed() {
     let mut arena = ExprArena::new();
     let low = var(&mut arena, 7);
@@ -177,6 +190,10 @@ fn zero_power_keeps_syntactic_support_but_has_no_hessian() {
     let root = arena.push(ExprNode::Pow(nonlinear_base, zero));
     assert_eq!(variable_support(&arena, root), vec![11]);
     assert_eq!(hessian_pattern(&arena, root), vec![]);
+
+    let negative_zero = arena.constant(-0.0);
+    let negative_zero_root = arena.push(ExprNode::Pow(nonlinear_base, negative_zero));
+    assert_eq!(hessian_pattern(&arena, negative_zero_root), vec![]);
 }
 
 #[test]

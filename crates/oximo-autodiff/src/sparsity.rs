@@ -2,10 +2,16 @@
 //! exact second-order interaction pattern, and the Jacobian/Hessian
 //! patterns derivative-based solvers ask for up front.
 
+use std::ops::Range;
+
 use oximo_expr::{ExprArena, ExprId, ExprNode};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::slot::{FunctionSlot, SlotKind};
+
+// Keeps the dense triangular pair bitmap at or below 64 KiB. Wider expressions
+// use sparse rows and pairs so memory follows actual structural nonzeros.
+const DENSE_SPARSITY_MAX_VARS: usize = 1_024;
 
 /// Sorted, deduplicated indices of the variables appearing under `root`.
 pub fn variable_support(arena: &ExprArena, root: ExprId) -> Vec<u32> {
@@ -79,6 +85,10 @@ pub(crate) struct SparsityWorkspace {
     supports: Vec<u64>,
     clique_covered: Vec<bool>,
     pairs: Vec<u64>,
+    sparse_supports: Vec<usize>,
+    sparse_rows: Vec<Range<usize>>,
+    sparse_scratch: Vec<usize>,
+    sparse_pairs: FxHashSet<(usize, usize)>,
 }
 
 impl SparsityWorkspace {
@@ -96,6 +106,10 @@ impl SparsityWorkspace {
         self.supports.clear();
         self.clique_covered.clear();
         self.pairs.clear();
+        self.sparse_supports.clear();
+        self.sparse_rows.clear();
+        self.sparse_scratch.clear();
+        self.sparse_pairs.clear();
     }
 
     fn mark_syntax(&mut self, arena: &ExprArena, id: ExprId) -> bool {
@@ -110,7 +124,12 @@ impl SparsityWorkspace {
 
     fn alloc_row(&mut self, words: usize) -> usize {
         let row = self.clique_covered.len();
-        self.supports.resize(self.supports.len().saturating_add(words), 0);
+        let new_len = self
+            .supports
+            .len()
+            .checked_add(words)
+            .expect("dense sparsity support storage size overflow");
+        self.supports.resize(new_len, 0);
         self.clique_covered.push(false);
         row
     }
@@ -120,6 +139,39 @@ impl SparsityWorkspace {
             add_clique(&self.supports, row, words, &mut self.pairs);
             self.clique_covered[row] = true;
         }
+    }
+
+    fn add_sparse_clique_once(&mut self, row: usize) {
+        if !self.clique_covered[row] {
+            let range = self.sparse_rows[row].clone();
+            add_sparse_clique(&self.sparse_supports[range], &mut self.sparse_pairs);
+            self.clique_covered[row] = true;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StorageMode {
+    Dense { words: usize },
+    Sparse,
+}
+
+#[derive(Clone, Copy)]
+enum ConstantExponent {
+    Zero,
+    One,
+    Other,
+}
+
+fn constant_exponent(arena: &ExprArena, exp: ExprId) -> Option<ConstantExponent> {
+    let ExprNode::Const(value) = arena.get(exp) else { return None };
+    let bits = value.to_bits();
+    if bits & !(1_u64 << 63) == 0 {
+        Some(ConstantExponent::Zero)
+    } else if bits == 1.0_f64.to_bits() {
+        Some(ConstantExponent::One)
+    } else {
+        Some(ConstantExponent::Other)
     }
 }
 
@@ -195,6 +247,45 @@ fn add_clique(supports: &[u64], row: usize, words: usize, pairs: &mut [u64]) {
             }
         }
     }
+}
+
+fn add_sparse_cross(a: &[usize], b: &[usize], pairs: &mut FxHashSet<(usize, usize)>) {
+    for &i in a {
+        for &j in b {
+            pairs.insert(if i >= j { (i, j) } else { (j, i) });
+        }
+    }
+}
+
+fn add_sparse_clique(vars: &[usize], pairs: &mut FxHashSet<(usize, usize)>) {
+    for (index, &row) in vars.iter().enumerate() {
+        for &col in &vars[..=index] {
+            pairs.insert((row, col));
+        }
+    }
+}
+
+fn append_sparse_row(
+    supports: &mut Vec<usize>,
+    rows: &mut Vec<Range<usize>>,
+    clique_covered: &mut Vec<bool>,
+    values: &[usize],
+) -> usize {
+    let row = rows.len();
+    let start = supports.len();
+    supports.extend_from_slice(values);
+    rows.push(start..supports.len());
+    clique_covered.push(false);
+    row
+}
+
+fn extend_sparse_row(flat: &[usize], range: Range<usize>, scratch: &mut Vec<usize>) {
+    scratch.extend_from_slice(&flat[range]);
+}
+
+fn finish_sparse_union(scratch: &mut Vec<usize>) {
+    scratch.sort_unstable();
+    scratch.dedup();
 }
 
 /// Exact structural lower-triangle Hessian pattern of the expression rooted
@@ -304,22 +395,32 @@ fn build_order_and_variables(arena: &ExprArena, root: ExprId, workspace: &mut Sp
     workspace.active_vars.dedup();
 }
 
-fn prepare_bit_storage(workspace: &mut SparsityWorkspace) -> usize {
+fn prepare_storage(workspace: &mut SparsityWorkspace) -> StorageMode {
+    if workspace.active_vars.len() > DENSE_SPARSITY_MAX_VARS {
+        append_sparse_row(
+            &mut workspace.sparse_supports,
+            &mut workspace.sparse_rows,
+            &mut workspace.clique_covered,
+            &[],
+        );
+        return StorageMode::Sparse;
+    }
+
     let words = words_for(workspace.active_vars.len());
     let pair_count = workspace
         .active_vars
         .len()
-        .checked_mul(workspace.active_vars.len().saturating_add(1))
+        .checked_add(1)
+        .and_then(|next| workspace.active_vars.len().checked_mul(next))
         .expect("Hessian sparsity bitset size overflow")
         / 2;
     workspace.pairs.resize(words_for(pair_count), 0);
     workspace.pairs.fill(0);
     workspace.alloc_row(words); // shared empty support row
-    words
+    StorageMode::Dense { words }
 }
 
-#[expect(clippy::float_cmp)]
-fn build_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace, words: usize) {
+fn build_dense_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace, words: usize) {
     for order_index in 0..workspace.order.len() {
         let id = workspace.order[order_index];
         let row = match arena.get(id) {
@@ -384,15 +485,15 @@ fn build_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace, word
                 row
             }
             ExprNode::Pow(base, exp) => {
-                if let ExprNode::Const(e) = arena.get(*exp) {
-                    if *e == 0.0 {
-                        0
-                    } else {
-                        let row = workspace.meta[base.index()].row;
-                        if *e != 1.0 {
+                if let Some(exponent) = constant_exponent(arena, *exp) {
+                    match exponent {
+                        ConstantExponent::Zero => 0,
+                        ConstantExponent::One => workspace.meta[base.index()].row,
+                        ConstantExponent::Other => {
+                            let row = workspace.meta[base.index()].row;
                             workspace.add_clique_once(row, words);
+                            row
                         }
-                        row
                     }
                 } else {
                     let row = workspace.alloc_row(words);
@@ -417,17 +518,149 @@ fn build_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace, word
     }
 }
 
-fn materialize_pattern(workspace: &SparsityWorkspace) -> Vec<(u32, u32)> {
-    let mut pattern = Vec::new();
-    for row in 0..workspace.active_vars.len() {
-        for col in 0..=row {
-            let bit = row * (row + 1) / 2 + col;
-            if has_bit(&workspace.pairs, bit) {
-                pattern.push((workspace.active_vars[row], workspace.active_vars[col]));
-            }
+fn store_sparse_scratch(workspace: &mut SparsityWorkspace) -> usize {
+    append_sparse_row(
+        &mut workspace.sparse_supports,
+        &mut workspace.sparse_rows,
+        &mut workspace.clique_covered,
+        &workspace.sparse_scratch,
+    )
+}
+
+fn sparse_union_row(
+    workspace: &mut SparsityWorkspace,
+    children: impl IntoIterator<Item = ExprId>,
+) -> usize {
+    workspace.sparse_scratch.clear();
+    for child in children {
+        let range = workspace.sparse_rows[workspace.meta[child.index()].row].clone();
+        extend_sparse_row(&workspace.sparse_supports, range, &mut workspace.sparse_scratch);
+    }
+    finish_sparse_union(&mut workspace.sparse_scratch);
+    store_sparse_scratch(workspace)
+}
+
+fn sparse_product_row(
+    workspace: &mut SparsityWorkspace,
+    children: impl IntoIterator<Item = ExprId>,
+) -> usize {
+    workspace.sparse_scratch.clear();
+    for child in children {
+        let range = workspace.sparse_rows[workspace.meta[child.index()].row].clone();
+        let child = &workspace.sparse_supports[range.clone()];
+        add_sparse_cross(&workspace.sparse_scratch, child, &mut workspace.sparse_pairs);
+        extend_sparse_row(&workspace.sparse_supports, range, &mut workspace.sparse_scratch);
+        finish_sparse_union(&mut workspace.sparse_scratch);
+    }
+    store_sparse_scratch(workspace)
+}
+
+fn sparse_division_row(workspace: &mut SparsityWorkspace, num: ExprId, den: ExprId) -> usize {
+    workspace.sparse_scratch.clear();
+    let num = workspace.sparse_rows[workspace.meta[num.index()].row].clone();
+    let den_row = workspace.meta[den.index()].row;
+    let den = workspace.sparse_rows[den_row].clone();
+    extend_sparse_row(&workspace.sparse_supports, num, &mut workspace.sparse_scratch);
+    workspace.add_sparse_clique_once(den_row);
+    add_sparse_cross(
+        &workspace.sparse_scratch,
+        &workspace.sparse_supports[den.clone()],
+        &mut workspace.sparse_pairs,
+    );
+    extend_sparse_row(&workspace.sparse_supports, den, &mut workspace.sparse_scratch);
+    finish_sparse_union(&mut workspace.sparse_scratch);
+    store_sparse_scratch(workspace)
+}
+
+fn sparse_power_row(
+    arena: &ExprArena,
+    workspace: &mut SparsityWorkspace,
+    base: ExprId,
+    exp: ExprId,
+) -> usize {
+    match constant_exponent(arena, exp) {
+        Some(ConstantExponent::Zero) => 0,
+        Some(ConstantExponent::One) => workspace.meta[base.index()].row,
+        Some(ConstantExponent::Other) => {
+            let row = workspace.meta[base.index()].row;
+            workspace.add_sparse_clique_once(row);
+            row
+        }
+        None => {
+            let row = sparse_union_row(workspace, [base, exp]);
+            workspace.add_sparse_clique_once(row);
+            row
         }
     }
-    pattern
+}
+
+fn build_sparse_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace) {
+    for order_index in 0..workspace.order.len() {
+        let id = workspace.order[order_index];
+        let row = match arena.get(id) {
+            ExprNode::Const(_) | ExprNode::Param(_) => 0,
+            ExprNode::Var(v) => {
+                let bit = workspace.active_vars.binary_search(&v.0).expect("collected variable");
+                append_sparse_row(
+                    &mut workspace.sparse_supports,
+                    &mut workspace.sparse_rows,
+                    &mut workspace.clique_covered,
+                    &[bit],
+                )
+            }
+            ExprNode::Linear { coeffs, .. } => {
+                workspace.sparse_scratch.clear();
+                workspace.sparse_scratch.extend(coeffs.iter().map(|(v, _)| {
+                    workspace.active_vars.binary_search(&v.0).expect("collected variable")
+                }));
+                finish_sparse_union(&mut workspace.sparse_scratch);
+                store_sparse_scratch(workspace)
+            }
+            ExprNode::Neg(inner) | ExprNode::Abs(inner) => workspace.meta[inner.index()].row,
+            ExprNode::Add(children) if children.len() == 1 => {
+                workspace.meta[children[0].index()].row
+            }
+            ExprNode::Add(children) => sparse_union_row(workspace, children.iter().copied()),
+            ExprNode::Mul(children) => sparse_product_row(workspace, children.iter().copied()),
+            ExprNode::Div(num, den) => sparse_division_row(workspace, *num, *den),
+            ExprNode::Sin(inner)
+            | ExprNode::Cos(inner)
+            | ExprNode::Exp(inner)
+            | ExprNode::Log(inner) => {
+                let row = workspace.meta[inner.index()].row;
+                workspace.add_sparse_clique_once(row);
+                row
+            }
+            ExprNode::Pow(base, exp) => sparse_power_row(arena, workspace, *base, *exp),
+        };
+        workspace.meta[id.index()].row = row;
+    }
+}
+
+fn materialize_pattern(workspace: &SparsityWorkspace, storage: StorageMode) -> Vec<(u32, u32)> {
+    match storage {
+        StorageMode::Dense { .. } => {
+            let mut pattern = Vec::new();
+            for row in 0..workspace.active_vars.len() {
+                for col in 0..=row {
+                    let bit = row * (row + 1) / 2 + col;
+                    if has_bit(&workspace.pairs, bit) {
+                        pattern.push((workspace.active_vars[row], workspace.active_vars[col]));
+                    }
+                }
+            }
+            pattern
+        }
+        StorageMode::Sparse => {
+            let mut pattern: Vec<(u32, u32)> = workspace
+                .sparse_pairs
+                .iter()
+                .map(|&(row, col)| (workspace.active_vars[row], workspace.active_vars[col]))
+                .collect();
+            pattern.sort_unstable();
+            pattern
+        }
+    }
 }
 
 pub(crate) fn structural_sparsity_with_workspace(
@@ -437,11 +670,14 @@ pub(crate) fn structural_sparsity_with_workspace(
 ) -> StructuralSparsity {
     workspace.begin(arena.len());
     build_order_and_variables(arena, root, workspace);
-    let words = prepare_bit_storage(workspace);
-    build_support_rows(arena, workspace, words);
+    let storage = prepare_storage(workspace);
+    match storage {
+        StorageMode::Dense { words } => build_dense_support_rows(arena, workspace, words),
+        StorageMode::Sparse => build_sparse_support_rows(arena, workspace),
+    }
     StructuralSparsity {
         support: workspace.syntax_vars.clone(),
-        hess_pairs: materialize_pattern(workspace),
+        hess_pairs: materialize_pattern(workspace, storage),
     }
 }
 
