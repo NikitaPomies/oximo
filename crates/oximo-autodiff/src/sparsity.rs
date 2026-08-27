@@ -12,6 +12,8 @@ use crate::slot::{FunctionSlot, SlotKind};
 // Keeps the dense triangular pair bitmap at or below 64 KiB. Wider expressions
 // use sparse rows and pairs so memory follows actual structural nonzeros.
 const DENSE_SPARSITY_MAX_VARS: usize = 1_024;
+type HessianPattern = Vec<(usize, usize)>;
+type HessianPatterns = (HessianPattern, Option<HessianPattern>);
 
 /// Sorted, deduplicated indices of the variables appearing under `root`.
 pub fn variable_support(arena: &ExprArena, root: ExprId) -> Vec<u32> {
@@ -702,8 +704,24 @@ where
     I: IntoIterator<Item = &'a FunctionSlot>,
 {
     let slots: Vec<_> = slots.into_iter().collect();
+    hessian_patterns_impl(&slots, false).0
+}
+
+/// Build the merged Hessian pattern and the nonlinear-only subset in one pass
+/// over the slots.
+#[cfg(feature = "enzyme")]
+pub(crate) fn hessian_lagrangian_patterns<'a, I>(slots: I) -> (HessianPattern, HessianPattern)
+where
+    I: IntoIterator<Item = &'a FunctionSlot>,
+{
+    let slots: Vec<_> = slots.into_iter().collect();
+    let (full, nonlinear) = hessian_patterns_impl(&slots, true);
+    (full, nonlinear.expect("nonlinear pattern requested"))
+}
+
+fn hessian_patterns_impl(slots: &[&FunctionSlot], include_nonlinear: bool) -> HessianPatterns {
     let mut max_variable = None;
-    for slot in &slots {
+    for slot in slots {
         match &slot.kind {
             SlotKind::Linear(_) => {}
             SlotKind::Quadratic(q) => {
@@ -723,7 +741,8 @@ where
         let variables = max_variable.map_or(0, |index| index + 1);
         let pair_count = variables * (variables + 1) / 2;
         let mut pairs = vec![0; words_for(pair_count)];
-        for slot in &slots {
+        let mut nonlinear_pairs = include_nonlinear.then(|| vec![0; words_for(pair_count)]);
+        for slot in slots {
             match &slot.kind {
                 SlotKind::Linear(_) => {}
                 SlotKind::Quadratic(q) => {
@@ -734,6 +753,9 @@ where
                 SlotKind::Nonlinear(_) => {
                     for &(r, c) in &slot.hess_pairs {
                         set_pair(&mut pairs, r as usize, c as usize);
+                        if let Some(ref mut nonlinear_pairs) = nonlinear_pairs {
+                            set_pair(nonlinear_pairs, r as usize, c as usize);
+                        }
                     }
                 }
             }
@@ -746,10 +768,22 @@ where
                 }
             }
         }
-        return entries;
+        let nonlinear_entries = nonlinear_pairs.map(|pairs| {
+            let mut entries = Vec::new();
+            for row in 0..variables {
+                for col in 0..=row {
+                    if has_bit(&pairs, row * (row + 1) / 2 + col) {
+                        entries.push((row, col));
+                    }
+                }
+            }
+            entries
+        });
+        return (entries, nonlinear_entries);
     }
 
     let mut entries = FxHashSet::default();
+    let mut nonlinear_entries = include_nonlinear.then(FxHashSet::default);
     for slot in slots {
         match &slot.kind {
             SlotKind::Linear(_) => {}
@@ -759,13 +793,22 @@ where
                 }
             }
             SlotKind::Nonlinear(_) => {
-                entries.extend(slot.hess_pairs.iter().map(|&(r, c)| (r as usize, c as usize)));
+                let pairs = slot.hess_pairs.iter().map(|&(r, c)| (r as usize, c as usize));
+                entries.extend(pairs.clone());
+                if let Some(ref mut nonlinear_entries) = nonlinear_entries {
+                    nonlinear_entries.extend(pairs);
+                }
             }
         }
     }
     let mut entries: Vec<_> = entries.into_iter().collect();
     entries.sort_unstable();
-    entries
+    let nonlinear_entries = nonlinear_entries.map(|entries| {
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_unstable();
+        entries
+    });
+    (entries, nonlinear_entries)
 }
 
 /// Direct-recovery coloring of a symmetric Hessian pattern.

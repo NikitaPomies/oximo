@@ -19,7 +19,8 @@ use crate::slot::{
     quadratic_value,
 };
 use crate::sparsity::{
-    SparsityWorkspace, hessian_lagrangian_structure, jacobian_structure, star_hessian_coloring,
+    SparsityWorkspace, hessian_lagrangian_patterns, hessian_lagrangian_structure,
+    jacobian_structure, star_hessian_coloring,
 };
 use crate::tape::Tape;
 
@@ -187,14 +188,14 @@ impl NlpEvaluator {
         drop(arena);
 
         let jac_structure = jacobian_structure(&constraints);
-        let hess_structure =
-            hessian_lagrangian_structure(std::iter::once(&objective).chain(&constraints));
+        let (hess_structure, nl_pattern) =
+            hessian_lagrangian_patterns(std::iter::once(&objective).chain(&constraints));
 
         let obj_hess_pos = quad_scatter_positions(&objective, &hess_structure);
         let con_hess_pos =
             constraints.iter().map(|s| quad_scatter_positions(s, &hess_structure)).collect();
 
-        let seeds = build_seeds(&objective, &constraints, &hess_structure);
+        let seeds = build_seeds(&nl_pattern, &hess_structure);
 
         let max_regs = std::iter::once(&objective)
             .chain(&constraints)
@@ -696,28 +697,22 @@ fn quad_scatter_positions(slot: &FunctionSlot, hess: &[(usize, usize)]) -> Vec<u
 /// The quadratic entries in `hess_structure` are filled in
 /// closed form and must neither constrain the grouping nor
 /// receive `hv` values.
-fn build_seeds(
-    objective: &FunctionSlot,
-    constraints: &[FunctionSlot],
-    hess_structure: &[(usize, usize)],
-) -> Vec<Seed> {
-    let mut nl_pattern: Vec<(usize, usize)> = std::iter::once(objective)
-        .chain(constraints)
-        .filter(|s| s.is_nonlinear())
-        .flat_map(|s| s.hess_pairs.iter().map(|&(r, c)| (r as usize, c as usize)))
-        .collect();
-    nl_pattern.sort_unstable();
-    nl_pattern.dedup();
-
+fn build_seeds(nl_pattern: &[(usize, usize)], hess_structure: &[(usize, usize)]) -> Vec<Seed> {
     // Star-color the nonlinear pattern.
-    let coloring = star_hessian_coloring(&nl_pattern);
+    let coloring = star_hessian_coloring(nl_pattern);
     let mut seeds: Vec<Seed> =
         coloring.groups.into_iter().map(|cols| Seed { cols, fills: Vec::new() }).collect();
+    let mut hess_pos = 0;
     for (&(row, col), &(group, hv_row)) in nl_pattern.iter().zip(&coloring.recover) {
-        let pos = hess_structure
-            .binary_search(&(row, col))
-            .expect("nonlinear entry is in the merged pattern by construction");
-        seeds[group].fills.push((pos, hv_row));
+        while hess_structure[hess_pos] < (row, col) {
+            hess_pos += 1;
+        }
+        assert_eq!(
+            hess_structure[hess_pos],
+            (row, col),
+            "nonlinear entry is in the merged pattern by construction"
+        );
+        seeds[group].fills.push((hess_pos, hv_row));
     }
     seeds
 }
