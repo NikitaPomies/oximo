@@ -13,7 +13,7 @@ fn model_display_matches_grammar() {
     objective!(m, Min, 3.0 * x + 4.0 * y);
 
     let expected = "Model 'diet' (LP)\n\
-                    min 3 x + 4 y\n\
+                    minimize 3 x + 4 y\n\
                     s.t.\n\
                     \x20 c1: x + 2 y <= 14\n\
                     \x20 c2: 3 x - y >= 0\n\
@@ -34,7 +34,7 @@ fn display_covers_range_soc_and_domains() {
     objective!(m, Max, x + y);
 
     let out = m.to_string();
-    assert!(out.contains("max x + y\n"), "{out}");
+    assert!(out.contains("maximize x + y\n"), "{out}");
     assert!(out.contains("  band: 1 <= x + t <= 4\n"), "{out}");
     assert!(out.contains("  disk: ||x, t|| <= x + 1\n"), "{out}");
     assert!(out.contains("  0 <= y <= 1, binary\n"), "{out}");
@@ -59,11 +59,11 @@ fn params_render_current_binding() {
     objective!(m, Min, price * x);
 
     let out = m.to_string();
-    assert!(out.contains("min 4 x\n"), "{out}");
+    assert!(out.contains("minimize 4 x\n"), "{out}");
     assert!(out.contains("params\n  price = 4\n"), "{out}");
 
     m.set_param(price, 7.5);
     let out = m.to_string();
-    assert!(out.contains("min 7.5 x\n"), "{out}");
+    assert!(out.contains("minimize 7.5 x\n"), "{out}");
     assert!(out.contains("params\n  price = 7.5\n"), "{out}");
 }

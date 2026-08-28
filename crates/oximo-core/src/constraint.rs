@@ -1,3 +1,5 @@
+use std::fmt;
+
 use oximo_expr::{Expr, ExprId};
 use smol_str::SmolStr;
 
@@ -7,6 +9,16 @@ pub enum Sense {
     Le,
     Ge,
     Eq,
+}
+
+impl fmt::Display for Sense {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Le => "<=",
+            Self::Ge => ">=",
+            Self::Eq => "=",
+        })
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -137,5 +149,17 @@ impl<'a> Relate<'a> for Expr<'a> {
     fn eq<R: IntoRhs<'a>>(self, rhs: R) -> ConstraintExpr<'a> {
         let (lhs, rhs) = rhs.fold_rhs(self);
         ConstraintExpr { lhs, sense: Sense::Eq, rhs }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Sense;
+
+    #[test]
+    fn display_uses_ascii_relations() {
+        let labels = [Sense::Le.to_string(), Sense::Ge.to_string(), Sense::Eq.to_string()];
+        assert_eq!(labels, ["<=", ">=", "="]);
+        assert!(labels.iter().all(|label| label.is_ascii()));
     }
 }

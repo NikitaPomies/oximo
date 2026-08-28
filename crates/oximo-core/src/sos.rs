@@ -26,6 +26,12 @@ impl SosType {
     }
 }
 
+impl std::fmt::Display for SosType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SosMember {
     pub variable: VarId,

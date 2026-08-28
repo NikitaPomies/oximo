@@ -1,3 +1,5 @@
+use std::fmt;
+
 /// The domain of a variable, which determines the type of values it can take.
 ///
 /// Real: any real number.
@@ -17,6 +19,18 @@ pub enum Domain {
     SemiInteger {
         threshold: f64,
     },
+}
+
+impl fmt::Display for Domain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Real => f.write_str("real"),
+            Self::Integer => f.write_str("integer"),
+            Self::Binary => f.write_str("binary"),
+            Self::SemiContinuous { threshold } => write!(f, "semi-continuous({threshold})"),
+            Self::SemiInteger { threshold } => write!(f, "semi-integer({threshold})"),
+        }
+    }
 }
 
 impl Domain {
@@ -47,5 +61,21 @@ mod tests {
         assert_eq!(Domain::Binary.semi_threshold(), None);
         assert_eq!(Domain::SemiContinuous { threshold: 2.0 }.semi_threshold(), Some(2.0));
         assert_eq!(Domain::SemiInteger { threshold: 1.0 }.semi_threshold(), Some(1.0));
+    }
+
+    #[test]
+    fn display_uses_user_facing_ascii_labels() {
+        let labels = [
+            Domain::Real.to_string(),
+            Domain::Integer.to_string(),
+            Domain::Binary.to_string(),
+            Domain::SemiContinuous { threshold: 3.0 }.to_string(),
+            Domain::SemiInteger { threshold: 2.5 }.to_string(),
+        ];
+        assert_eq!(
+            labels,
+            ["real", "integer", "binary", "semi-continuous(3)", "semi-integer(2.5)"]
+        );
+        assert!(labels.iter().all(|label| label.is_ascii()));
     }
 }

@@ -2,8 +2,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use oximo_core::{
-    ConstraintId, ConstraintRef, Expr, IndexKey, IndexedVar, Model, ObjectiveSense,
-    SocConstraintId, VarId,
+    ConstraintId, ConstraintRef, Expr, IndexKey, IndexedVar, Model, SocConstraintId, VarId,
 };
 use oximo_expr::{EvalContext, ExprArena, ExprId, ParamId, evaluate};
 use rustc_hash::FxHashMap;
@@ -344,15 +343,6 @@ impl std::fmt::Display for ModelReport<'_> {
         let r = self.result;
         let m = self.model;
 
-        let sense = {
-            let obj = m.objective();
-            match obj.as_ref().map(|o| o.sense) {
-                Some(ObjectiveSense::Minimize) => "minimize",
-                Some(ObjectiveSense::Maximize) => "maximize",
-                None => "no objective",
-            }
-        };
-
         writeln!(f, "solution summary")?;
         let solver = match (r.solver_name.as_deref(), r.solver_version.as_deref()) {
             (Some(name), Some(version)) => format!("{name} {version}"),
@@ -360,7 +350,12 @@ impl std::fmt::Display for ModelReport<'_> {
             (None, _) => "(unknown)".to_owned(),
         };
         writeln!(f, "  solver     : {solver}")?;
-        writeln!(f, "  model      : {}  ({:?}, {sense})", m.name, m.kind())?;
+        let objective = m.objective();
+        if let Some(objective) = objective.as_ref() {
+            writeln!(f, "  model      : {}  ({}, {})", m.name, m.kind(), objective.sense)?;
+        } else {
+            writeln!(f, "  model      : {}  ({}, no objective)", m.name, m.kind())?;
+        }
         writeln!(f, "  termination: {:?}", r.termination)?;
         writeln!(f, "  primal     : {:?}", r.primal_status)?;
         writeln!(f, "  dual       : {:?}", r.dual_status)?;

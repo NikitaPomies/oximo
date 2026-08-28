@@ -76,6 +76,9 @@ fn sos_registry_and_display_are_complete() {
     assert_eq!(id.index(), 0);
     assert_eq!(SosType::Sos1.label(), "SOS1");
     assert_eq!(SosType::Sos2.label(), "SOS2");
+    let labels = [SosType::Sos1.to_string(), SosType::Sos2.to_string()];
+    assert_eq!(labels, ["SOS1", "SOS2"]);
+    assert!(labels.iter().all(|label| label.is_ascii()));
     assert!(m.has_sos_constraints());
     assert_eq!(m.sos_constraint_id("choice"), Some(id));
     assert_eq!(m.sos_constraint_id("missing"), None);

@@ -11,7 +11,6 @@ use oximo_expr::{Expr, ExprId, render_expr};
 use crate::constraint::{ConstraintId, Sense};
 use crate::domain::Domain;
 use crate::model::Model;
-use crate::objective::ObjectiveSense;
 use crate::soc::SocConstraintId;
 use crate::sos::SosConstraintId;
 use crate::var::{Variable, var_name};
@@ -55,11 +54,16 @@ impl fmt::Display for ConstraintDisplay<'_> {
         let expr = render_expr(&arena, c.lhs, &resolve);
         write!(f, "{}: ", c.name)?;
         match c.as_single() {
-            Some((Sense::Le, rhs)) => write!(f, "{expr} <= {}", fmt_num(rhs))?,
-            Some((Sense::Ge, rhs)) => write!(f, "{expr} >= {}", fmt_num(rhs))?,
-            Some((Sense::Eq, rhs)) => write!(f, "{expr} = {}", fmt_num(rhs))?,
+            Some((sense, rhs)) => write!(f, "{expr} {sense} {}", fmt_num(rhs))?,
             None if c.is_range() => {
-                write!(f, "{} <= {expr} <= {}", fmt_num(c.lower), fmt_num(c.upper))?;
+                write!(
+                    f,
+                    "{} {} {expr} {} {}",
+                    fmt_num(c.lower),
+                    Sense::Le,
+                    Sense::Le,
+                    fmt_num(c.upper)
+                )?;
             }
             None => write!(f, "{expr} free")?,
         }
@@ -70,7 +74,7 @@ impl fmt::Display for ConstraintDisplay<'_> {
     }
 }
 
-/// Displays the objective as `min <expr>`/`max <expr>`/`feasibility`.
+/// Displays the objective as `minimize <expr>`/`maximize <expr>`/`feasibility`.
 /// Built by [`Model::display_objective`].
 #[derive(Debug)]
 pub struct ObjectiveDisplay<'a> {
@@ -88,11 +92,7 @@ impl fmt::Display for ObjectiveDisplay<'_> {
         let Some((sense, expr)) = obj else {
             return f.write_str("(no objective)");
         };
-        let word = match sense {
-            ObjectiveSense::Minimize => "min",
-            ObjectiveSense::Maximize => "max",
-        };
-        write!(f, "{word} {}", ExprDisplay { model: self.model, id: expr })
+        write!(f, "{sense} {}", ExprDisplay { model: self.model, id: expr })
     }
 }
 
@@ -115,7 +115,7 @@ impl fmt::Display for SosDisplay<'_> {
         let vars = self.model.variables.borrow();
         let sos = self.model.sos_constraints.borrow();
         let c = &sos[self.id.index()];
-        write!(f, "{}: {} [", c.name, c.sos_type.label())?;
+        write!(f, "{}: {} [", c.name, c.sos_type)?;
         for (i, member) in c.members.iter().enumerate() {
             if i > 0 {
                 f.write_str(", ")?;
@@ -144,7 +144,7 @@ impl fmt::Display for SocDisplay<'_> {
             }
             f.write_str(&render_expr(&arena, *t, &resolve))?;
         }
-        write!(f, "|| <= {}", render_expr(&arena, c.bound, &resolve))?;
+        write!(f, "|| {} {}", Sense::Le, render_expr(&arena, c.bound, &resolve))?;
         if !c.active {
             f.write_str(" (inactive)")?;
         }
@@ -164,17 +164,7 @@ fn write_var_line(f: &mut fmt::Formatter<'_>, v: &Variable) -> fmt::Result {
         (false, true) => write!(f, "{} <= {}", v.name, fmt_num(v.ub))?,
         (false, false) => write!(f, "{} free", v.name)?,
     }
-    match v.domain {
-        Domain::Real => Ok(()),
-        Domain::Integer => f.write_str(", integer"),
-        Domain::Binary => f.write_str(", binary"),
-        Domain::SemiContinuous { threshold } => {
-            write!(f, ", semicontinuous(threshold={})", fmt_num(threshold))
-        }
-        Domain::SemiInteger { threshold } => {
-            write!(f, ", semiinteger(threshold={})", fmt_num(threshold))
-        }
-    }
+    if v.domain == Domain::Real { Ok(()) } else { write!(f, ", {}", v.domain) }
 }
 
 impl Model {
@@ -198,7 +188,7 @@ impl Model {
         ConstraintDisplay { model: self, id }
     }
 
-    /// Display adapter for the objective (`min <expr>`/`max <expr>`/
+    /// Display adapter for the objective (`minimize <expr>`/`maximize <expr>`/
     /// `feasibility`/`(no objective)`).
     #[must_use]
     pub fn display_objective(&self) -> ObjectiveDisplay<'_> {
@@ -221,7 +211,7 @@ impl Model {
 ///
 /// ```text
 /// Model 'diet' (LP)
-/// min 3 x + 4 y
+/// minimize 3 x + 4 y
 /// s.t.
 ///   c1: x + 2 y <= 14
 ///   c2: 3 x - y >= 0
@@ -234,7 +224,7 @@ impl Model {
 /// line is omitted when no objective was declared.
 impl fmt::Display for Model {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Model '{}' ({:?})", self.name, self.kind())?;
+        writeln!(f, "Model '{}' ({})", self.name, self.kind())?;
         if self.is_feasibility() || self.objective.borrow().is_some() {
             writeln!(f, "{}", self.display_objective())?;
         }
@@ -295,7 +285,7 @@ mod tests {
         m.__minimize(3.0 * x + 4.0 * y);
 
         let expected = "Model 'diet' (LP)\n\
-                        min 3 x + 4 y\n\
+                        minimize 3 x + 4 y\n\
                         s.t.\n\
                         \x20 c1: x + 2 y <= 14\n\
                         \x20 c2: 3 x - y >= 0\n\
@@ -327,7 +317,7 @@ mod tests {
         let x = m.__var("x").build();
         assert_eq!(m.display_objective().to_string(), "(no objective)");
         m.__maximize(x);
-        assert_eq!(m.display_objective().to_string(), "max x");
+        assert_eq!(m.display_objective().to_string(), "maximize x");
 
         let f = Model::new("f");
         f.__feasibility();
@@ -345,6 +335,7 @@ mod tests {
         m.__var("e").ub(3.0).build();
         m.__var("g").fix(2.0).build();
         m.__var("h").lb(0.0).domain(crate::Domain::SemiContinuous { threshold: 2.0 }).build();
+        m.__var("i").domain(crate::Domain::SemiInteger { threshold: 3.0 }).build();
 
         let out = format!("{m}");
         assert!(out.contains("  0 <= a <= 5\n"), "{out}");
@@ -353,7 +344,8 @@ mod tests {
         assert!(out.contains("  d free\n"), "{out}");
         assert!(out.contains("  e <= 3\n"), "{out}");
         assert!(out.contains("  g = 2\n"), "{out}");
-        assert!(out.contains("  h >= 0, semicontinuous(threshold=2)\n"), "{out}");
+        assert!(out.contains("  h >= 0, semi-continuous(2)\n"), "{out}");
+        assert!(out.contains("  i free, semi-integer(3)\n"), "{out}");
     }
 
     #[test]
@@ -363,12 +355,12 @@ mod tests {
         let price = m.__param("price", 4.0);
         m.__minimize(price * x);
         let out = format!("{m}");
-        assert!(out.contains("min 4 x\n"), "{out}");
+        assert!(out.contains("minimize 4 x\n"), "{out}");
         assert!(out.contains("params\n  price = 4\n"), "{out}");
 
         price.set_param_value(7.5);
         let out = format!("{m}");
-        assert!(out.contains("min 7.5 x\n"), "{out}");
+        assert!(out.contains("minimize 7.5 x\n"), "{out}");
         assert!(out.contains("params\n  price = 7.5\n"), "{out}");
     }
 

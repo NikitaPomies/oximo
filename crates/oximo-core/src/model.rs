@@ -1,4 +1,5 @@
 use std::cell::{Cell, Ref, RefCell};
+use std::fmt;
 use std::marker::PhantomData;
 
 use oximo_expr::{EvalError, Expr, ExprArena, ExprClass, ExprId, ParamId, VarId, classify};
@@ -50,6 +51,23 @@ pub enum ModelKind {
     MISOCP,
     NLP,
     MINLP,
+}
+
+impl fmt::Display for ModelKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::LP => "LP",
+            Self::MILP => "MILP",
+            Self::QP => "QP",
+            Self::MIQP => "MIQP",
+            Self::QCP => "QCP",
+            Self::MIQCP => "MIQCP",
+            Self::SOCP => "SOCP",
+            Self::MISOCP => "MISOCP",
+            Self::NLP => "NLP",
+            Self::MINLP => "MINLP",
+        })
+    }
 }
 
 /// A borrowed constraint from a [`Model`].
@@ -1443,6 +1461,28 @@ mod tests {
     use super::*;
     use crate::Set;
     use crate::constraint::Relate;
+
+    #[test]
+    fn model_kind_display_uses_standard_ascii_acronyms() {
+        let kinds = [
+            ModelKind::LP,
+            ModelKind::MILP,
+            ModelKind::QP,
+            ModelKind::MIQP,
+            ModelKind::QCP,
+            ModelKind::MIQCP,
+            ModelKind::SOCP,
+            ModelKind::MISOCP,
+            ModelKind::NLP,
+            ModelKind::MINLP,
+        ];
+        let labels: Vec<_> = kinds.into_iter().map(|kind| kind.to_string()).collect();
+        assert_eq!(
+            labels,
+            ["LP", "MILP", "QP", "MIQP", "QCP", "MIQCP", "SOCP", "MISOCP", "NLP", "MINLP"]
+        );
+        assert!(labels.iter().all(|label| label.is_ascii()));
+    }
 
     #[test]
     fn param_times_var_keeps_model_linear() {
