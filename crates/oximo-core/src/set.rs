@@ -217,15 +217,12 @@ impl<K> Set<K> {
             SetRepr::Range(v) => {
                 SetRepr::Range(v.iter().copied().filter(|i| f(IndexKeyRef::Int(*i))).collect())
             }
-            SetRepr::Strings(v) => SetRepr::Strings(
-                v.iter().filter(|s| f(IndexKeyRef::Str(*s))).cloned().collect(),
-            ),
-            SetRepr::Tuples(v) => SetRepr::Tuples(
-                v.iter()
-                    .filter(|t| f(IndexKeyRef::Tuple(&**t)))
-                    .cloned()
-                    .collect(),
-            ),
+            SetRepr::Strings(v) => {
+                SetRepr::Strings(v.iter().filter(|s| f(IndexKeyRef::Str(s))).cloned().collect())
+            }
+            SetRepr::Tuples(v) => {
+                SetRepr::Tuples(v.iter().filter(|t| f(IndexKeyRef::Tuple(t))).cloned().collect())
+            }
         };
         Self::from_repr(repr)
     }
@@ -240,13 +237,11 @@ impl<K> Set<K> {
             SetRepr::Range(v) => {
                 SetRepr::Range(v.into_iter().filter(|i| f(IndexKeyRef::Int(*i))).collect())
             }
-            SetRepr::Strings(v) => SetRepr::Strings(
-                v.into_iter().filter(|s| f(IndexKeyRef::Str(s))).collect(),
-            ),
+            SetRepr::Strings(v) => {
+                SetRepr::Strings(v.into_iter().filter(|s| f(IndexKeyRef::Str(s))).collect())
+            }
             SetRepr::Tuples(v) => SetRepr::Tuples(
-                v.into_iter()
-                    .filter(|t| f(IndexKeyRef::Tuple(t.as_ref())))
-                    .collect(),
+                v.into_iter().filter(|t| f(IndexKeyRef::Tuple(t.as_ref()))).collect(),
             ),
         };
         Self::from_repr(repr)

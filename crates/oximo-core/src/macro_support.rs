@@ -42,8 +42,6 @@ where
     set.into_filter_typed(pred)
 }
 
-
-
 /// Typed key iterator over a sum/constraint domain. Backs the filtered form of
 /// the `sum!` macro (`sum!(.. for i in dom if cond)`), which iterates and skips
 /// non-matching keys rather than summing zero terms.
