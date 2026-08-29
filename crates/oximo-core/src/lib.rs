@@ -35,7 +35,10 @@ pub use param::Parameter;
 pub use reformulation::{
     ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };
-pub use set::{Axis, FromIndexKey, IndexKey, IndexTuple, KeyCat, ScalarKey, Set, SetIter};
+pub use set::{
+    Axis, FromIndexKey, FromIndexKeyRef, IndexKey, IndexKeyRef, IndexTuple, KeyCat, ScalarKey, Set,
+    SetIter,
+};
 pub use soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;

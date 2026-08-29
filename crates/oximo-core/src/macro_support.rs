@@ -8,7 +8,7 @@
 
 pub use crate::constraint::Relate;
 pub use crate::domain::Domain;
-pub use crate::set::{FromIndexKey, KeyCat, Set};
+pub use crate::set::{FromIndexKey, FromIndexKeyRef, IndexKeyRef, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;
 
@@ -28,6 +28,21 @@ where
 {
     set.filter_typed(pred)
 }
+
+/// Owned variant of [`filter_keys`].
+///
+/// Moves the set so tuple/string payloads are not cloned
+/// per element. Used by the `variable!`/`constraint!`/`set!`
+/// macros when the domain is a temporary (e.g. a `product`).
+pub fn filter_keys_owned<K, F>(set: Set<K>, pred: F) -> Set<K>
+where
+    K: FromIndexKey,
+    F: FnMut(K) -> bool,
+{
+    set.into_filter_typed(pred)
+}
+
+
 
 /// Typed key iterator over a sum/constraint domain. Backs the filtered form of
 /// the `sum!` macro (`sum!(.. for i in dom if cond)`), which iterates and skips

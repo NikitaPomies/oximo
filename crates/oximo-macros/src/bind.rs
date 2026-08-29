@@ -108,7 +108,7 @@ pub(crate) fn filtered_set(
         None => set,
         Some(cond) => {
             let param = family_closure_param(binds);
-            quote!( #root::__macro_support::filter_keys(&(#set), |#param| #cond) )
+            quote!( #root::__macro_support::filter_keys_owned((#set), |#param| #cond) )
         }
     }
 }

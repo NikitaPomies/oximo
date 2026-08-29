@@ -118,7 +118,14 @@ impl<K> Set<K> {
                 v.iter()
                     .filter_map(|s| {
                         let key = IndexKey::Str(s.clone());
-                        f(&key).then(|| s.clone())
+                        if f(&key) {
+                            match key {
+                                IndexKey::Str(owned) => Some(owned),
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            None
+                        }
                     })
                     .collect(),
             ),
@@ -130,6 +137,44 @@ impl<K> Set<K> {
                             IndexKey::Tuple(owned) => owned,
                             _ => unreachable!(),
                         })
+                    })
+                    .collect(),
+            ),
+        };
+        Self::from_repr(repr)
+    }
+
+    /// Filter keys with a predicate, consuming the set.
+    #[must_use]
+    pub fn into_filter<F>(self, mut f: F) -> Self
+    where
+        F: FnMut(&IndexKey) -> bool,
+    {
+        let repr = match self.repr {
+            SetRepr::Range(v) => {
+                SetRepr::Range(v.into_iter().filter(|i| f(&IndexKey::Int(*i))).collect())
+            }
+            SetRepr::Strings(v) => SetRepr::Strings(
+                v.into_iter()
+                    .filter_map(|s| {
+                        let key = IndexKey::Str(s);
+                        let keep = f(&key);
+                        match key {
+                            IndexKey::Str(owned) => keep.then_some(owned),
+                            _ => unreachable!(),
+                        }
+                    })
+                    .collect(),
+            ),
+            SetRepr::Tuples(v) => SetRepr::Tuples(
+                v.into_iter()
+                    .filter_map(|t| {
+                        let key = IndexKey::Tuple(t);
+                        let keep = f(&key);
+                        match key {
+                            IndexKey::Tuple(owned) => keep.then_some(owned),
+                            _ => unreachable!(),
+                        }
                     })
                     .collect(),
             ),
@@ -158,6 +203,63 @@ impl<K> Set<K> {
         F: FnMut(K) -> bool,
     {
         self.filter(|k| pred(K::from_index_key(k)))
+    }
+
+    /// Borrowed-key filter that passes [`IndexKeyRef`] to the predicate.
+    /// Use when the set is borrowed and the filtered fraction is small or tuple
+    /// arity is large.
+    #[must_use]
+    pub fn filter_ref<F>(&self, mut f: F) -> Self
+    where
+        F: FnMut(IndexKeyRef<'_>) -> bool,
+    {
+        let repr = match &self.repr {
+            SetRepr::Range(v) => {
+                SetRepr::Range(v.iter().copied().filter(|i| f(IndexKeyRef::Int(*i))).collect())
+            }
+            SetRepr::Strings(v) => SetRepr::Strings(
+                v.iter().filter(|s| f(IndexKeyRef::Str(*s))).cloned().collect(),
+            ),
+            SetRepr::Tuples(v) => SetRepr::Tuples(
+                v.iter()
+                    .filter(|t| f(IndexKeyRef::Tuple(&**t)))
+                    .cloned()
+                    .collect(),
+            ),
+        };
+        Self::from_repr(repr)
+    }
+
+    /// Consuming variant of [`Self::filter_ref`].
+    #[must_use]
+    pub fn into_filter_ref<F>(self, mut f: F) -> Self
+    where
+        F: FnMut(IndexKeyRef<'_>) -> bool,
+    {
+        let repr = match self.repr {
+            SetRepr::Range(v) => {
+                SetRepr::Range(v.into_iter().filter(|i| f(IndexKeyRef::Int(*i))).collect())
+            }
+            SetRepr::Strings(v) => SetRepr::Strings(
+                v.into_iter().filter(|s| f(IndexKeyRef::Str(s))).collect(),
+            ),
+            SetRepr::Tuples(v) => SetRepr::Tuples(
+                v.into_iter()
+                    .filter(|t| f(IndexKeyRef::Tuple(t.as_ref())))
+                    .collect(),
+            ),
+        };
+        Self::from_repr(repr)
+    }
+
+    /// Consuming typed filter that moves the set (see [`Self::into_filter`]).
+    #[must_use]
+    pub fn into_filter_typed<F>(self, mut pred: F) -> Self
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> bool,
+    {
+        self.into_filter(|k| pred(K::from_index_key(k)))
     }
 
     pub fn len(&self) -> usize {
@@ -397,6 +499,147 @@ impl IndexKey {
 
     pub fn as_tuple(&self) -> Option<&[IndexKey]> {
         if let Self::Tuple(t) = self { Some(&t[..]) } else { None }
+    }
+}
+
+/// Borrowed view of an [`IndexKey`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexKeyRef<'a> {
+    Int(i64),
+    Str(&'a SmolStr),
+    Tuple(&'a [IndexKey]),
+}
+
+impl<'a> IndexKeyRef<'a> {
+    pub fn as_i64(self) -> Option<i64> {
+        if let Self::Int(v) = self { Some(v) } else { None }
+    }
+    pub fn as_str(self) -> Option<&'a str> {
+        if let Self::Str(s) = self { Some(s.as_str()) } else { None }
+    }
+    pub fn as_tuple(self) -> Option<&'a [IndexKey]> {
+        if let Self::Tuple(t) = self { Some(t) } else { None }
+    }
+}
+
+/// Typed projection of a borrowed [`IndexKeyRef`].
+/// Like [`FromIndexKey`] but decodes from a borrow.
+pub trait FromIndexKeyRef<'a>: Sized {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self;
+}
+
+impl<'a> FromIndexKeyRef<'a> for IndexKey {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        match k {
+            IndexKeyRef::Int(v) => IndexKey::Int(v),
+            IndexKeyRef::Str(s) => IndexKey::Str(s.clone()),
+            IndexKeyRef::Tuple(t) => IndexKey::Tuple(t.to_vec().into_boxed_slice()),
+        }
+    }
+}
+
+impl<'a> FromIndexKeyRef<'a> for i64 {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        k.as_i64().unwrap_or_else(|| panic!("expected Int key, got {k:?}"))
+    }
+}
+
+impl<'a> FromIndexKeyRef<'a> for i32 {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        let v = i64::from_index_key_ref(k);
+        i32::try_from(v).unwrap_or_else(|_| panic!("key {v} out of i32 range"))
+    }
+}
+
+impl<'a> FromIndexKeyRef<'a> for usize {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        let v = i64::from_index_key_ref(k);
+        usize::try_from(v).unwrap_or_else(|_| panic!("key {v} out of usize range"))
+    }
+}
+
+impl<'a> FromIndexKeyRef<'a> for String {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        k.as_str().unwrap_or_else(|| panic!("expected Str key, got {k:?}")).to_owned()
+    }
+}
+
+impl<'a> FromIndexKeyRef<'a> for &'a str {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        k.as_str().unwrap_or_else(|| panic!("expected Str key, got {k:?}"))
+    }
+}
+
+impl<'a> FromIndexKeyRef<'a> for &'a SmolStr {
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        match k {
+            IndexKeyRef::Str(s) => s,
+            _ => panic!("expected Str key, got {k:?}"),
+        }
+    }
+}
+
+fn tuple_parts_ref<'a>(k: IndexKeyRef<'a>, expected: usize) -> &'a [IndexKey] {
+    let p = k.as_tuple().unwrap_or_else(|| panic!("expected Tuple key, got {k:?}"));
+    assert_eq!(p.len(), expected, "expected tuple of arity {expected}, got arity {}", p.len());
+    p
+}
+
+impl<'a, A, B> FromIndexKeyRef<'a> for (A, B)
+where
+    A: FromIndexKeyRef<'a>,
+    B: FromIndexKeyRef<'a>,
+{
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        let p = tuple_parts_ref(k, 2);
+        (
+            A::from_index_key_ref(IndexKeyRef::from(&p[0])),
+            B::from_index_key_ref(IndexKeyRef::from(&p[1])),
+        )
+    }
+}
+
+impl<'a, A, B, C> FromIndexKeyRef<'a> for (A, B, C)
+where
+    A: FromIndexKeyRef<'a>,
+    B: FromIndexKeyRef<'a>,
+    C: FromIndexKeyRef<'a>,
+{
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        let p = tuple_parts_ref(k, 3);
+        (
+            A::from_index_key_ref(IndexKeyRef::from(&p[0])),
+            B::from_index_key_ref(IndexKeyRef::from(&p[1])),
+            C::from_index_key_ref(IndexKeyRef::from(&p[2])),
+        )
+    }
+}
+
+impl<'a, A, B, C, D> FromIndexKeyRef<'a> for (A, B, C, D)
+where
+    A: FromIndexKeyRef<'a>,
+    B: FromIndexKeyRef<'a>,
+    C: FromIndexKeyRef<'a>,
+    D: FromIndexKeyRef<'a>,
+{
+    fn from_index_key_ref(k: IndexKeyRef<'a>) -> Self {
+        let p = tuple_parts_ref(k, 4);
+        (
+            A::from_index_key_ref(IndexKeyRef::from(&p[0])),
+            B::from_index_key_ref(IndexKeyRef::from(&p[1])),
+            C::from_index_key_ref(IndexKeyRef::from(&p[2])),
+            D::from_index_key_ref(IndexKeyRef::from(&p[3])),
+        )
+    }
+}
+
+impl<'a> From<&'a IndexKey> for IndexKeyRef<'a> {
+    fn from(k: &'a IndexKey) -> Self {
+        match k {
+            IndexKey::Int(v) => IndexKeyRef::Int(*v),
+            IndexKey::Str(s) => IndexKeyRef::Str(s),
+            IndexKey::Tuple(t) => IndexKeyRef::Tuple(t),
+        }
     }
 }
 
