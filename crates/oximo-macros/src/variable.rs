@@ -20,13 +20,13 @@ use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, spli
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut parts = split_top_commas(input).into_iter();
-    let model = parts.next().ok_or_else(|| {
+    let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(proc_macro2::Span::call_site(), "variable! needs a model expression")
     })?;
-    let model: syn::Expr = syn::parse2(model)?;
+    let model: syn::Expr = syn::parse2(model_ts)?;
 
     let spec = parts.next().ok_or_else(|| {
-        syn::Error::new(proc_macro2::Span::call_site(), "variable! needs a `name`/bounds spec")
+        syn::Error::new_spanned(&model, "variable! needs a `name`/bounds spec")
     })?;
 
     let root = oximo_root();
@@ -39,7 +39,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     };
 
     // Split the bound spec on relational operators and identify the core name.
-    let (segs, ops) = split_relops(spec);
+    let (segs, ops) = split_relops(&spec);
     let (core, rel_lb, rel_ub) = match (segs.len(), ops.as_slice()) {
         (1, []) => (segs[0].clone(), None, None),
         (2, [RelOp::Le]) => (segs[0].clone(), None, Some(segs[1].clone())),
@@ -48,8 +48,8 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             (segs[1].clone(), Some(segs[0].clone()), Some(segs[2].clone()))
         }
         _ => {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
+            return Err(syn::Error::new_spanned(
+                spec,
                 "variable! bounds must be `name`, `name >= lb`, `name <= ub`, or `lb <= name <= ub`",
             ));
         }
@@ -60,10 +60,10 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let ub = merge_bound(rel_ub, kw_ub, "ub")?;
 
     // `fix` pins both bounds, so explicit lb/ub alongside it is contradictory.
-    if kw_fix.is_some() {
-        if let Some(b) = lb.as_ref().or(ub.as_ref()) {
-            return Err(syn::Error::new_spanned(
-                b,
+    if let Some(fix_kw) = kw_fix.as_ref() {
+        if lb.is_some() || ub.is_some() {
+            return Err(syn::Error::new(
+                fix_kw.ident.span(),
                 "`fix` sets both bounds. Do not combine it with `lb`/`ub`",
             ));
         }
@@ -80,8 +80,8 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     // lacks, so reject them on a family with a clear message.
     if binds.is_some() {
         if let Some(kw) = kw_initial.as_ref().or(kw_fix.as_ref()) {
-            return Err(syn::Error::new_spanned(
-                kw,
+            return Err(syn::Error::new(
+                kw.ident.span(),
                 "`initial`/`fix` is not supported on an indexed family. Use `m.set_initial` / \
                  `m.fix` per element",
             ));
@@ -142,15 +142,24 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
 /// Build the scalar-only `.initial(..)`/`.fix(..)` chain from the keyword args.
 /// Both are empty for an indexed family (rejected in `expand`).
-fn scalar_extras(initial: Option<TokenStream2>, fix: Option<TokenStream2>) -> TokenStream2 {
+fn scalar_extras(initial: Option<Kw>, fix: Option<Kw>) -> TokenStream2 {
     let mut extras = TokenStream2::new();
-    if let Some(init) = initial.map(crate::index::rewrite_index_subscripts) {
+    if let Some(kw) = initial {
+        let init = crate::index::rewrite_index_subscripts(kw.value);
         extras.extend(quote!(.initial(f64::from(#init))));
     }
-    if let Some(fix) = fix.map(crate::index::rewrite_index_subscripts) {
-        extras.extend(quote!(.fix(f64::from(#fix))));
+    if let Some(kw) = fix {
+        let fix_val = crate::index::rewrite_index_subscripts(kw.value);
+        extras.extend(quote!(.fix(f64::from(#fix_val))));
     }
     extras
+}
+
+/// Keyword attribute `kw = value` with the keyword's span preserved for
+/// diagnostics. Stored for `lb`/`ub`/`domain`/`initial`/`fix`.
+struct Kw {
+    ident: proc_macro2::Ident,
+    value: TokenStream2,
 }
 
 /// The trailing modifiers of a `variable!` declaration: an optional domain
@@ -158,10 +167,10 @@ fn scalar_extras(initial: Option<TokenStream2>, fix: Option<TokenStream2>) -> To
 /// fix expressions.
 struct Trailing {
     domain: Option<TokenStream2>,
-    lb: Option<TokenStream2>,
-    ub: Option<TokenStream2>,
-    initial: Option<TokenStream2>,
-    fix: Option<TokenStream2>,
+    lb: Option<Kw>,
+    ub: Option<Kw>,
+    initial: Option<Kw>,
+    fix: Option<Kw>,
 }
 
 /// Parse the segments after the spec into [`Trailing`], collecting one positional
@@ -170,7 +179,13 @@ struct Trailing {
 /// given both ways.
 fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trailing> {
     let mut positional_domain: Option<TokenStream2> = None;
-    let (mut kw_domain, mut lb, mut ub, mut initial, mut fix) = (None, None, None, None, None);
+    let (mut kw_domain, mut lb, mut ub, mut initial, mut fix): (
+        Option<Kw>,
+        Option<Kw>,
+        Option<Kw>,
+        Option<Kw>,
+        Option<Kw>,
+    ) = (None, None, None, None, None);
 
     for seg in parts {
         if seg.is_empty() {
@@ -193,7 +208,7 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
             if slot.is_some() {
                 return Err(syn::Error::new_spanned(&kw, format!("`{kw}` specified twice")));
             }
-            *slot = Some(val);
+            *slot = Some(Kw { ident: kw, value: val });
         } else if positional_domain.is_some() {
             return Err(syn::Error::new_spanned(
                 &seg,
@@ -206,8 +221,14 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
     }
 
     let domain = match (positional_domain, kw_domain) {
-        (Some(_), Some(d)) => return Err(syn::Error::new_spanned(d, "domain specified twice")),
-        (Some(d), None) | (None, Some(d)) => Some(d),
+        (Some(_), Some(d)) => {
+            return Err(syn::Error::new(
+                d.ident.span(),
+                "domain specified twice",
+            ))
+        }
+        (Some(d), None) => Some(d),
+        (None, Some(d)) => Some(d.value),
         (None, None) => None,
     };
     Ok(Trailing { domain, lb, ub, initial, fix })
@@ -235,14 +256,15 @@ fn parse_keyword(seg: &TokenStream2) -> Option<(proc_macro2::Ident, TokenStream2
 /// Specifying the same bound twice is an error.
 fn merge_bound(
     rel: Option<TokenStream2>,
-    kw: Option<TokenStream2>,
+    kw: Option<Kw>,
     which: &str,
 ) -> syn::Result<Option<TokenStream2>> {
     match (rel, kw) {
         (Some(_), Some(kw)) => {
-            Err(syn::Error::new_spanned(kw, format!("`{which}` specified twice")))
+            Err(syn::Error::new(kw.ident.span(), format!("`{which}` specified twice")))
         }
-        (Some(b), None) | (None, Some(b)) => Ok(Some(b)),
+        (Some(b), None) => Ok(Some(b)),
+        (None, Some(kw)) => Ok(Some(kw.value)),
         (None, None) => Ok(None),
     }
 }

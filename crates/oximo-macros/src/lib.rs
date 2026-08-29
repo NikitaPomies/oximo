@@ -149,8 +149,8 @@ fn split_top_commas(ts: TokenStream2) -> Vec<TokenStream2> {
 
 /// Split a token stream on top-level relational operators (`==`, `<=`, `>=`),
 /// returning the intervening segments and the operators between them.
-fn split_relops(ts: TokenStream2) -> (Vec<TokenStream2>, Vec<RelOp>) {
-    let tts: Vec<TokenTree> = ts.into_iter().collect();
+fn split_relops(ts: &TokenStream2) -> (Vec<TokenStream2>, Vec<RelOp>) {
+    let tts: Vec<TokenTree> = ts.clone().into_iter().collect();
     let mut segs: Vec<TokenStream2> = Vec::new();
     let mut ops: Vec<RelOp> = Vec::new();
     let mut cur: Vec<TokenTree> = Vec::new();

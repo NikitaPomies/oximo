@@ -16,13 +16,13 @@ use crate::{
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let parts = split_top_commas(input);
     let mut parts = parts.into_iter();
-    let model = parts.next().ok_or_else(|| {
+    let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "soc_constraint! needs a model expression")
     })?;
-    let model: Expr = syn::parse2(model)?;
+    let model: Expr = syn::parse2(model_ts)?;
 
     let first = parts.next().ok_or_else(|| {
-        syn::Error::new(Span::call_site(), "soc_constraint! needs `[terms] <= bound`")
+        syn::Error::new_spanned(&model, "soc_constraint! needs `[terms] <= bound`")
     })?;
     let second = parts.next();
     if let Some(extra) = parts.next() {
@@ -76,20 +76,20 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 /// and the bound expression.
 fn parse_relation(tokens: TokenStream2) -> syn::Result<(Vec<Expr>, Expr)> {
     const SHAPE: &str = "a SOC constraint must be written `[term, term, ...] <= bound`";
-    let (segs, ops) = split_relops(tokens);
+    let (segs, ops) = split_relops(&tokens);
     let (lhs, rhs) = match (segs.len(), ops.as_slice()) {
         (2, [RelOp::Le]) => {
             let mut segs = segs.into_iter();
             (next_seg(&mut segs)?, next_seg(&mut segs)?)
         }
-        _ => return Err(syn::Error::new(Span::call_site(), SHAPE)),
+        _ => return Err(syn::Error::new_spanned(tokens, SHAPE)),
     };
 
     let mut lhs_tts = lhs.into_iter();
     let group = match (lhs_tts.next(), lhs_tts.next()) {
         (Some(TokenTree::Group(g)), None) if g.delimiter() == Delimiter::Bracket => g,
         (Some(other), _) => return Err(syn::Error::new(other.span(), SHAPE)),
-        (None, _) => return Err(syn::Error::new(Span::call_site(), SHAPE)),
+        (None, _) => return Err(syn::Error::new_spanned(tokens, SHAPE)),
     };
 
     let terms = split_top_commas(group.stream())

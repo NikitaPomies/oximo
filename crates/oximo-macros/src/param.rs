@@ -10,18 +10,18 @@ use crate::{Named, build_set, oximo_root, parse_named, split_top_commas};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut parts = split_top_commas(input).into_iter();
-    let model = parts.next().ok_or_else(|| {
+    let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "param! needs a model and `name = value`")
     })?;
-    let model: Expr = syn::parse2(model)?;
+    let model: Expr = syn::parse2(model_ts)?;
 
     let spec = parts
         .next()
-        .ok_or_else(|| syn::Error::new(Span::call_site(), "param! needs `name = value`"))?;
+        .ok_or_else(|| syn::Error::new_spanned(&model, "param! needs `name = value`"))?;
     // Tolerate a single trailing empty segment (trailing comma); reject real extra args.
     for seg in parts {
         if !seg.is_empty() {
-            return Err(syn::Error::new(Span::call_site(), "unexpected trailing tokens in param!"));
+            return Err(syn::Error::new_spanned(seg, "unexpected trailing tokens in param!"));
         }
     }
 
@@ -53,15 +53,20 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 /// Split a `param!` spec on its top-level assignment `=`, returning the
 /// `name`/`name[...]` core and the value tokens.
 fn split_assignment(spec: TokenStream2) -> syn::Result<(TokenStream2, TokenStream2)> {
-    let tts: Vec<TokenTree> = spec.into_iter().collect();
+    let tts: Vec<TokenTree> = spec.clone().into_iter().collect();
     let pos = tts
         .iter()
         .position(|tt| matches!(tt, TokenTree::Punct(p) if p.as_char() == '='))
-        .ok_or_else(|| syn::Error::new(Span::call_site(), "param! needs `name = value`"))?;
+        .ok_or_else(|| syn::Error::new_spanned(spec, "param! needs `name = value`"))?;
     let core: TokenStream2 = tts[..pos].iter().cloned().collect();
     let value: TokenStream2 = tts[pos + 1..].iter().cloned().collect();
     if value.is_empty() {
-        return Err(syn::Error::new(Span::call_site(), "param! value is missing after `=`"));
+        // point at the `=` token if possible
+        let eq_span = tts
+            .get(pos)
+            .map(|tt| tt.span())
+            .unwrap_or_else(Span::call_site);
+        return Err(syn::Error::new(eq_span, "param! value is missing after `=`"));
     }
     Ok((core, value))
 }

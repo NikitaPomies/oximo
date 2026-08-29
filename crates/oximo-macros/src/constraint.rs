@@ -16,13 +16,13 @@ use crate::{
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let parts = split_top_commas(input);
     let mut parts = parts.into_iter();
-    let model = parts.next().ok_or_else(|| {
+    let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "constraint! needs a model expression")
     })?;
-    let model: Expr = syn::parse2(model)?;
+    let model: Expr = syn::parse2(model_ts)?;
 
     let first = parts.next().ok_or_else(|| {
-        syn::Error::new(Span::call_site(), "constraint! needs a relational expression")
+        syn::Error::new_spanned(&model, "constraint! needs a relational expression")
     })?;
     let second = parts.next();
     if let Some(extra) = parts.next() {
@@ -89,7 +89,7 @@ fn parse_seg(ts: TokenStream2) -> syn::Result<Expr> {
 /// [`Relations::Single`]. Two like operators (`<= <=` or `>= >=`) a
 /// [`Relations::Range`].
 fn build_relations(tokens: TokenStream2, root: &TokenStream2) -> syn::Result<Relations> {
-    let (segs, ops) = split_relops(tokens);
+    let (segs, ops) = split_relops(&tokens);
     match (segs.len(), ops.as_slice()) {
         (2, [op]) => {
             let method = op.method();
@@ -108,14 +108,14 @@ fn build_relations(tokens: TokenStream2, root: &TokenStream2) -> syn::Result<Rel
                 (RelOp::Le, RelOp::Le) => Ok(Relations::Range { mid, lo: s0, hi: s2 }),
                 // hi >= mid >= lo
                 (RelOp::Ge, RelOp::Ge) => Ok(Relations::Range { mid, lo: s2, hi: s0 }),
-                _ => Err(syn::Error::new(
-                    Span::call_site(),
+                _ => Err(syn::Error::new_spanned(
+                    tokens,
                     "a two-sided range must use `<=` twice (`lo <= e <= hi`) or `>=` twice (`hi >= e >= lo`)",
                 )),
             }
         }
-        _ => Err(syn::Error::new(
-            Span::call_site(),
+        _ => Err(syn::Error::new_spanned(
+            tokens,
             "constraint must contain exactly one `==`/`<=`/`>=`, or be a two-sided range `lo <= e <= hi`",
         )),
     }
