@@ -11,9 +11,9 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut parts = parts.into_iter();
     let model_ts = parts.next().ok_or_else(|| err("needs a model expression"))?;
     let model: Expr = syn::parse2(model_ts)?;
-    let first = parts
-        .next()
-        .ok_or_else(|| syn::Error::new_spanned(&model, "sos_constraint! needs a name or SOS type"))?;
+    let first = parts.next().ok_or_else(|| {
+        syn::Error::new_spanned(&model, "sos_constraint! needs a name or SOS type")
+    })?;
     let second = parts.next().ok_or_else(|| {
         syn::Error::new_spanned(&first, "sos_constraint! needs SOS1/SOS2 and a member list")
     })?;
@@ -89,10 +89,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 fn parse_type(tokens: &TokenStream2, root: &TokenStream2) -> syn::Result<TokenStream2> {
     let mut it = tokens.clone().into_iter();
     let Some(TokenTree::Ident(id)) = it.next() else {
-        return Err(syn::Error::new_spanned(
-            tokens,
-            "sos_constraint! expected SOS1 or SOS2",
-        ))
+        return Err(syn::Error::new_spanned(tokens, "sos_constraint! expected SOS1 or SOS2"));
     };
     if let Some(extra) = it.next() {
         return Err(syn::Error::new_spanned(extra, "sos_constraint! expected SOS1 or SOS2"));
@@ -126,7 +123,10 @@ fn parse_members(tokens: &TokenStream2) -> syn::Result<Members> {
     let parts: Vec<_> =
         split_top_commas(group.stream()).into_iter().filter(|part| !part.is_empty()).collect();
     if parts.is_empty() {
-        return Err(syn::Error::new(group.span(), "sos_constraint! the member list cannot be empty"));
+        return Err(syn::Error::new(
+            group.span(),
+            "sos_constraint! the member list cannot be empty",
+        ));
     }
     let explicit = parts.iter().all(is_pair);
     let auto = parts.iter().all(|part| !is_pair(part));
@@ -164,10 +164,16 @@ fn parse_members(tokens: &TokenStream2) -> syn::Result<Members> {
             }
             let mut p = split_top_commas(pair.stream()).into_iter();
             let expr = p.next().ok_or_else(|| {
-                syn::Error::new_spanned(&part, "sos_constraint! SOS member needs a variable and weight")
+                syn::Error::new_spanned(
+                    &part,
+                    "sos_constraint! SOS member needs a variable and weight",
+                )
             })?;
             let weight = p.next().ok_or_else(|| {
-                syn::Error::new_spanned(&part, "sos_constraint! SOS member needs a variable and weight")
+                syn::Error::new_spanned(
+                    &part,
+                    "sos_constraint! SOS member needs a variable and weight",
+                )
             })?;
             if p.next().is_some() {
                 return Err(syn::Error::new_spanned(

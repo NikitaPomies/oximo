@@ -25,9 +25,9 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     })?;
     let model: syn::Expr = syn::parse2(model_ts)?;
 
-    let spec = parts.next().ok_or_else(|| {
-        syn::Error::new_spanned(&model, "variable! needs a `name`/bounds spec")
-    })?;
+    let spec = parts
+        .next()
+        .ok_or_else(|| syn::Error::new_spanned(&model, "variable! needs a `name`/bounds spec"))?;
 
     let root = oximo_root();
 
@@ -179,13 +179,11 @@ struct Trailing {
 /// given both ways.
 fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trailing> {
     let mut positional_domain: Option<TokenStream2> = None;
-    let (mut kw_domain, mut lb, mut ub, mut initial, mut fix): (
-        Option<Kw>,
-        Option<Kw>,
-        Option<Kw>,
-        Option<Kw>,
-        Option<Kw>,
-    ) = (None, None, None, None, None);
+    let mut kw_domain: Option<Kw> = None;
+    let mut lb: Option<Kw> = None;
+    let mut ub: Option<Kw> = None;
+    let mut initial: Option<Kw> = None;
+    let mut fix: Option<Kw> = None;
 
     for seg in parts {
         if seg.is_empty() {
@@ -222,10 +220,7 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
 
     let domain = match (positional_domain, kw_domain) {
         (Some(_), Some(d)) => {
-            return Err(syn::Error::new(
-                d.ident.span(),
-                "domain specified twice",
-            ))
+            return Err(syn::Error::new(d.ident.span(), "domain specified twice"));
         }
         (Some(d), None) => Some(d),
         (None, Some(d)) => Some(d.value),

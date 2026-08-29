@@ -62,10 +62,7 @@ fn split_assignment(spec: TokenStream2) -> syn::Result<(TokenStream2, TokenStrea
     let value: TokenStream2 = tts[pos + 1..].iter().cloned().collect();
     if value.is_empty() {
         // point at the `=` token if possible
-        let eq_span = tts
-            .get(pos)
-            .map(|tt| tt.span())
-            .unwrap_or_else(Span::call_site);
+        let eq_span = tts.get(pos).map_or_else(Span::call_site, proc_macro2::TokenTree::span);
         return Err(syn::Error::new(eq_span, "param! value is missing after `=`"));
     }
     Ok((core, value))
