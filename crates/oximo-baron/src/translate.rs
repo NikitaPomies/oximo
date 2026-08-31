@@ -541,7 +541,7 @@ fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(),
         ExprNode::Var(v) => write!(bar, "x{}", v.index()).unwrap(),
         ExprNode::Param(p) => write!(bar, "{}", fmt(arena.param_value(*p))).unwrap(),
         ExprNode::Linear { coeffs, constant } => {
-            let t = LinearTerms { coeffs: coeffs.clone().into(), constant: *constant };
+            let t = LinearTerms::borrowed(coeffs, *constant);
             write!(bar, "(").unwrap();
             write_linear(bar, &t, true);
             write!(bar, ")").unwrap();
