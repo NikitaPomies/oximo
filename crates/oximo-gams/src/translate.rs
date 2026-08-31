@@ -118,9 +118,11 @@ pub fn solve(
     // The affine bound side of each explicit SOC constraint, kept to rescale
     // the squared-form `eq_soc{i}` marginal back to the norm form after the
     // solve (see `parseoximo_solution`).
-    let soc_bounds: Vec<LinearTerms> = socs
+    let soc_bounds: Vec<LinearTerms<'static>> = socs
         .iter()
-        .map(|s| extract_linear(&arena, s.bound).expect("SOC bound is validated affine"))
+        .map(|s| {
+            extract_linear(&arena, s.bound).expect("SOC bound is validated affine").into_owned()
+        })
         .collect();
 
     drop(arena);
@@ -300,7 +302,7 @@ fn write_soc_marginal_puts(gms: &mut String, n: usize) {
 #[expect(clippy::too_many_lines)]
 fn parseoximo_solution(
     content: &str,
-    soc_bounds: &[LinearTerms],
+    soc_bounds: &[LinearTerms<'_>],
     mixed_integer: bool,
     elapsed: std::time::Duration,
     raw_log: Option<String>,
@@ -1024,13 +1026,13 @@ fn write_model_and_solve(gms: &mut String, solve_type: &str, sense_kw: &str, has
 }
 
 /// Captured form of an expression for GAMS emission.
-enum ExprForm {
-    Linear(LinearTerms),
+enum ExprForm<'a> {
+    Linear(LinearTerms<'a>),
     Nonlinear(ExprId),
 }
 
-impl ExprForm {
-    fn from(arena: &ExprArena, id: ExprId) -> Self {
+impl<'a> ExprForm<'a> {
+    fn from(arena: &'a ExprArena, id: ExprId) -> Self {
         match extract_linear(arena, id) {
             Some(t) => ExprForm::Linear(t),
             None => ExprForm::Nonlinear(id),
@@ -1039,7 +1041,7 @@ impl ExprForm {
 }
 
 /// Append a captured expression form to `gms`.
-fn write_form(gms: &mut String, arena: &ExprArena, form: &ExprForm, include_constant: bool) {
+fn write_form(gms: &mut String, arena: &ExprArena, form: &ExprForm<'_>, include_constant: bool) {
     match form {
         ExprForm::Linear(t) => write_linear(gms, t, include_constant),
         ExprForm::Nonlinear(id) => write_gams_expr(gms, arena, *id, true),
@@ -1050,20 +1052,20 @@ fn write_form(gms: &mut String, arena: &ExprArena, form: &ExprForm, include_cons
 /// When `include_constant` is true, the constant term is included; otherwise
 /// only variable terms are emitted (used for constraints where the constant is
 /// folded into the RHS).
-fn write_linear(gms: &mut String, t: &LinearTerms, include_constant: bool) {
+fn write_linear(gms: &mut String, t: &LinearTerms<'_>, include_constant: bool) {
     let mut first = true;
-    for (v, coef) in &t.coeffs {
-        if *coef == 0.0 {
+    for &(v, coef) in t.coeffs.iter() {
+        if coef == 0.0 {
             continue;
         }
         let idx = v.index();
         if first {
-            write!(gms, " {}*v{idx}", fmt(*coef)).unwrap();
+            write!(gms, " {}*v{idx}", fmt(coef)).unwrap();
             first = false;
-        } else if *coef < 0.0 {
+        } else if coef < 0.0 {
             write!(gms, " - {}*v{idx}", fmt(-coef)).unwrap();
         } else {
-            write!(gms, " + {}*v{idx}", fmt(*coef)).unwrap();
+            write!(gms, " + {}*v{idx}", fmt(coef)).unwrap();
         }
     }
     if include_constant && t.constant != 0.0 {
@@ -1091,7 +1093,7 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
         ExprNode::Var(v) => write!(gms, "v{}", v.index()).unwrap(),
         ExprNode::Param(p) => write!(gms, "{}", fmt(arena.param_value(*p))).unwrap(),
         ExprNode::Linear { coeffs, constant } => {
-            let t = LinearTerms { coeffs: coeffs.clone(), constant: *constant };
+            let t = LinearTerms::borrowed(coeffs, *constant);
             write!(gms, "(").unwrap();
             write_linear(gms, &t, true);
             write!(gms, " )").unwrap();
@@ -1433,7 +1435,7 @@ mod tests {
     #[test]
     fn soc_marginal_is_rescaled_to_norm_form() {
         let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\n0=-1.0\n1=1.5\nZ0=-0.75\n";
-        let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)], constant: 0.5 }];
+        let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)].into(), constant: 0.5 }];
         let r = parseoximo_solution(content, &bounds, false, std::time::Duration::ZERO, None);
         let z0 = r.soc_dual_of(SocConstraintId(0)).expect("SOC dual missing");
         assert!((z0 - 3.0).abs() < 1e-9, "z0 = {z0}");

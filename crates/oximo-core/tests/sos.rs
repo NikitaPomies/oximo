@@ -232,7 +232,8 @@ fn sos2_reformulation_uses_weight_order_and_adjacent_intervals() {
         extract_linear(&arena, rows[row].lhs)
             .unwrap()
             .coeffs
-            .into_iter()
+            .iter()
+            .copied()
             .collect::<std::collections::HashMap<_, _>>()
     };
 

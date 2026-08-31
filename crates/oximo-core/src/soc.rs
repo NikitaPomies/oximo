@@ -38,8 +38,8 @@ pub struct SocConstraint {
 /// through a single shape.
 #[derive(Clone, Debug)]
 pub struct SocForm {
-    pub terms: Vec<LinearTerms>,
-    pub bound: LinearTerms,
+    pub terms: Vec<LinearTerms<'static>>,
+    pub bound: LinearTerms<'static>,
 }
 
 /// Extract and validate the diagonal quadratic form shared by SOC recognition
@@ -112,11 +112,13 @@ pub fn detect_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> Optio
         .into_iter()
         .filter_map(|(row, _, h)| {
             let coef = h / 2.0;
-            (coef > 0.0)
-                .then(|| LinearTerms { coeffs: vec![(row, (coef / n).sqrt())], constant: 0.0 })
+            (coef > 0.0).then(|| LinearTerms {
+                coeffs: vec![(row, (coef / n).sqrt())].into(),
+                constant: 0.0,
+            })
         })
         .collect();
-    let bound = LinearTerms { coeffs: vec![(t, 1.0)], constant: 0.0 };
+    let bound = LinearTerms { coeffs: vec![(t, 1.0)].into(), constant: 0.0 };
     Some(SocForm { terms, bound })
 }
 
@@ -124,7 +126,11 @@ pub fn detect_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> Optio
 /// are validated affine at registration, so this only returns `None` on a
 /// corrupted model (e.g. an `ExprId` from a different arena).
 pub fn explicit_soc_form(arena: &ExprArena, s: &SocConstraint) -> Option<SocForm> {
-    let terms = s.terms.iter().map(|&e| extract_linear(arena, e)).collect::<Option<Vec<_>>>()?;
-    let bound = extract_linear(arena, s.bound)?;
+    let terms = s
+        .terms
+        .iter()
+        .map(|&e| extract_linear(arena, e).map(LinearTerms::into_owned))
+        .collect::<Option<Vec<_>>>()?;
+    let bound = extract_linear(arena, s.bound).map(LinearTerms::into_owned)?;
     Some(SocForm { terms, bound })
 }

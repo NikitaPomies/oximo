@@ -1,13 +1,39 @@
+use std::borrow::Cow;
+
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::smallvec;
 
 use crate::arena::{ExprArena, ExprId, ExprNode, VarId};
 
 /// Coefficients of a linear expression: `sum(coeff * var) + constant`.
+///
+/// The coefficient storage borrows directly from an [`ExprNode::Linear`] when
+/// possible and owns coefficients that must be synthesized while walking an
+/// expression tree. Call [`LinearTerms::into_owned`] before storing extracted
+/// terms beyond the lifetime of their [`ExprArena`].
 #[derive(Clone, Debug, Default)]
-pub struct LinearTerms {
-    pub coeffs: Vec<(VarId, f64)>,
+pub struct LinearTerms<'a> {
+    pub coeffs: Cow<'a, [(VarId, f64)]>,
     pub constant: f64,
+}
+
+impl<'a> LinearTerms<'a> {
+    /// Construct linear terms with owned coefficient storage.
+    pub fn owned(coeffs: Vec<(VarId, f64)>, constant: f64) -> Self {
+        Self { coeffs: Cow::Owned(coeffs), constant }
+    }
+
+    /// Construct linear terms borrowing coefficient storage.
+    pub fn borrowed(coeffs: &'a [(VarId, f64)], constant: f64) -> Self {
+        Self { coeffs: Cow::Borrowed(coeffs), constant }
+    }
+
+    /// Detach these terms from their borrowed source.
+    ///
+    /// This does not allocate when the coefficient storage is already owned.
+    pub fn into_owned(self) -> LinearTerms<'static> {
+        LinearTerms { coeffs: Cow::Owned(self.coeffs.into_owned()), constant: self.constant }
+    }
 }
 
 /// Accumulator that merges duplicate `(VarId, coeff)` terms while
@@ -36,8 +62,8 @@ impl CoeffAccum {
         }
     }
 
-    fn extend(&mut self, terms: impl IntoIterator<Item = (VarId, f64)>) {
-        for (v, c) in terms {
+    fn extend_from_slice(&mut self, terms: &[(VarId, f64)]) {
+        for &(v, c) in terms {
             self.add(v, c);
         }
     }
@@ -50,24 +76,30 @@ impl CoeffAccum {
 /// Try to interpret `id` as a linear expression. Returns `None` for any
 /// nonlinear node (Mul of two non-constants, Pow, transcendentals, ...).
 ///
-/// When `resolve_params` is set, a [`ExprNode::Param`] folds to its current
+/// When `resolve_params` is set, an [`ExprNode::Param`] folds to its current
 /// arena value and counts as a constant.
-fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<LinearTerms> {
+fn as_linear<'a>(
+    arena: &'a ExprArena,
+    id: ExprId,
+    resolve_params: bool,
+) -> Option<LinearTerms<'a>> {
     match arena.get(id) {
-        ExprNode::Const(c) => Some(LinearTerms { coeffs: Vec::new(), constant: *c }),
+        ExprNode::Const(c) => Some(LinearTerms::borrowed(&[], *c)),
         ExprNode::Param(p) if resolve_params => {
-            Some(LinearTerms { coeffs: Vec::new(), constant: arena.param_value(*p) })
+            Some(LinearTerms::borrowed(&[], arena.param_value(*p)))
         }
-        ExprNode::Var(v) => Some(LinearTerms { coeffs: vec![(*v, 1.0)], constant: 0.0 }),
-        ExprNode::Linear { coeffs, constant } => {
-            Some(LinearTerms { coeffs: coeffs.clone(), constant: *constant })
+        ExprNode::Var(v) => {
+            Some(LinearTerms { coeffs: Cow::Owned(vec![(*v, 1.0)]), constant: 0.0 })
         }
+        ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
         ExprNode::Neg(inner) => {
             let inner = *inner;
-            as_linear(arena, inner, resolve_params).map(|mut t| {
-                t.coeffs.iter_mut().for_each(|(_, c)| *c = -*c);
-                t.constant = -t.constant;
-                t
+            as_linear(arena, inner, resolve_params).map(|t| {
+                let mut coeffs = t.coeffs.into_owned();
+                for (_, c) in &mut coeffs {
+                    *c = -*c;
+                }
+                LinearTerms { coeffs: Cow::Owned(coeffs), constant: -t.constant }
             })
         }
         ExprNode::Add(children) => {
@@ -75,15 +107,16 @@ fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<Line
             let mut constant = 0.0;
             for &child in children {
                 let t = as_linear(arena, child, resolve_params)?;
-                acc.extend(t.coeffs);
+                acc.extend_from_slice(&t.coeffs);
                 constant += t.constant;
             }
-            Some(LinearTerms { coeffs: acc.into_coeffs(), constant })
+            Some(LinearTerms::owned(acc.into_coeffs(), constant))
         }
         ExprNode::Mul(children) => {
-            // Linear if and only if exactly one non-const child is linear and the rest are constants.
+            // Linear if and only if exactly one non-const child is linear and
+            // the rest are constants.
             let mut scalar = 1.0;
-            let mut linear: Option<LinearTerms> = None;
+            let mut linear: Option<LinearTerms<'a>> = None;
             for &child in children {
                 match arena.get(child) {
                     ExprNode::Const(c) => scalar *= c,
@@ -95,11 +128,13 @@ fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<Line
                 }
             }
             Some(match linear {
-                None => LinearTerms { coeffs: Vec::new(), constant: scalar },
-                Some(mut t) => {
-                    t.coeffs.iter_mut().for_each(|(_, c)| *c *= scalar);
-                    t.constant *= scalar;
-                    t
+                None => LinearTerms::owned(Vec::new(), scalar),
+                Some(t) => {
+                    let mut coeffs = t.coeffs.into_owned();
+                    for (_, c) in &mut coeffs {
+                        *c *= scalar;
+                    }
+                    LinearTerms { coeffs: Cow::Owned(coeffs), constant: t.constant * scalar }
                 }
             })
         }
@@ -107,23 +142,25 @@ fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<Line
     }
 }
 
-/// Materialize a linear-terms struct into a fresh `Linear` node in the arena.
-fn push_linear(arena: &mut ExprArena, mut t: LinearTerms) -> ExprId {
-    t.coeffs.retain(|(_, c)| *c != 0.0);
-    arena.push(ExprNode::Linear { coeffs: t.coeffs, constant: t.constant })
+/// Materialize linear terms into a fresh `Linear` node in the arena.
+fn push_linear(arena: &mut ExprArena, t: LinearTerms<'_>) -> ExprId {
+    let mut coeffs = t.coeffs.into_owned();
+    coeffs.retain(|(_, c)| *c != 0.0);
+    arena.push(ExprNode::Linear { coeffs, constant: t.constant })
 }
 
 /// Build `lhs + rhs`, preserving the linear fast-path when both sides are
 /// linear. Falls back to an n-ary `Add` node otherwise.
 pub(crate) fn add_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
     if let (Some(lt), Some(rt)) = (as_linear(arena, lhs, false), as_linear(arena, rhs, false)) {
+        let constant = lt.constant + rt.constant;
         let mut acc = CoeffAccum::with_capacity(lt.coeffs.len() + rt.coeffs.len());
-        acc.extend(lt.coeffs);
-        acc.extend(rt.coeffs);
-        return push_linear(
-            arena,
-            LinearTerms { coeffs: acc.into_coeffs(), constant: lt.constant + rt.constant },
-        );
+        acc.extend_from_slice(&lt.coeffs);
+        acc.extend_from_slice(&rt.coeffs);
+        let coeffs = acc.into_coeffs();
+        drop(lt);
+        drop(rt);
+        return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
     arena.push(ExprNode::Add(smallvec![lhs, rhs]))
 }
@@ -152,17 +189,23 @@ pub(crate) fn sub_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
 /// stay on the linear fast-path. Otherwise produce a generic n-ary `Mul`.
 pub(crate) fn mul_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
     if let ExprNode::Const(c) = *arena.get(lhs) {
-        if let Some(mut t) = as_linear(arena, rhs, false) {
-            t.coeffs.iter_mut().for_each(|(_, co)| *co *= c);
-            t.constant *= c;
-            return push_linear(arena, t);
+        if let Some(t) = as_linear(arena, rhs, false) {
+            let constant = t.constant * c;
+            let mut coeffs = t.coeffs.into_owned();
+            for (_, co) in &mut coeffs {
+                *co *= c;
+            }
+            return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
         }
     }
     if let ExprNode::Const(c) = *arena.get(rhs) {
-        if let Some(mut t) = as_linear(arena, lhs, false) {
-            t.coeffs.iter_mut().for_each(|(_, co)| *co *= c);
-            t.constant *= c;
-            return push_linear(arena, t);
+        if let Some(t) = as_linear(arena, lhs, false) {
+            let constant = t.constant * c;
+            let mut coeffs = t.coeffs.into_owned();
+            for (_, co) in &mut coeffs {
+                *co *= c;
+            }
+            return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
         }
     }
     arena.push(ExprNode::Mul(smallvec![lhs, rhs]))
@@ -174,11 +217,14 @@ pub(crate) fn mul_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
 pub(crate) fn div_into(arena: &mut ExprArena, num: ExprId, den: ExprId) -> ExprId {
     if let ExprNode::Const(c) = *arena.get(den) {
         if c != 0.0 {
-            if let Some(mut t) = as_linear(arena, num, false) {
+            if let Some(t) = as_linear(arena, num, false) {
                 let inv = 1.0 / c;
-                t.coeffs.iter_mut().for_each(|(_, co)| *co *= inv);
-                t.constant *= inv;
-                return push_linear(arena, t);
+                let constant = t.constant * inv;
+                let mut coeffs = t.coeffs.into_owned();
+                for (_, co) in &mut coeffs {
+                    *co *= inv;
+                }
+                return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
             }
             let inv = arena.push(ExprNode::Const(1.0 / c));
             return mul_into(arena, num, inv);
@@ -189,28 +235,36 @@ pub(crate) fn div_into(arena: &mut ExprArena, num: ExprId, den: ExprId) -> ExprI
 
 /// Build `-rhs`, preserving linearity.
 pub(crate) fn neg_into(arena: &mut ExprArena, rhs: ExprId) -> ExprId {
-    if let Some(mut t) = as_linear(arena, rhs, false) {
-        t.coeffs.iter_mut().for_each(|(_, c)| *c = -*c);
-        t.constant = -t.constant;
-        return push_linear(arena, t);
+    if let Some(t) = as_linear(arena, rhs, false) {
+        let constant = -t.constant;
+        let mut coeffs = t.coeffs.into_owned();
+        for (_, c) in &mut coeffs {
+            *c = -*c;
+        }
+        return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
     arena.push(ExprNode::Neg(rhs))
 }
 
-/// Snapshot the linear terms of `id`, if any. Used by solver backends to
-/// extract LP coefficients without walking the tree themselves.
+/// Extract the linear terms of `id`, if any. Used by solver backends to extract
+/// LP coefficients without walking the tree themselves.
 ///
-/// Parameters are folded to their current arena values, so the returned
-/// coefficients reflect the latest [`ExprArena::set_param_value`] binding.
+/// The result borrows coefficients for a direct [`ExprNode::Linear`] and owns
+/// coefficients synthesized from a larger expression tree. Its lifetime is
+/// tied to `arena` in either case; call [`LinearTerms::into_owned`] to retain a
+/// snapshot independently of the arena.
+///
+/// Parameters are folded to their current arena values, so the returned terms
+/// reflect the latest [`ExprArena::set_param_value`] binding.
 ///
 /// [`ExprArena::set_param_value`]: crate::ExprArena::set_param_value
-pub fn extract_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
+pub fn extract_linear<'a>(arena: &'a ExprArena, id: ExprId) -> Option<LinearTerms<'a>> {
     as_linear(arena, id, true)
 }
 
 /// A nonlinear residual summand: the existing arena node `id`, taken with a
-/// leading negation when `neg` is set. Carrying the sign as a flag.
-/// Lets [`split_linear`] run without a mutable arena.
+/// leading negation when `neg` is set. Carrying the sign as a flag lets
+/// [`split_linear`] run without a mutable arena.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SignedExpr {
     pub id: ExprId,
@@ -224,11 +278,14 @@ pub struct SignedExpr {
 /// value(id) == sum_i coef_i * var_i + constant + sum_j (-1)^neg_j value(id_j)
 /// ```
 ///
-/// where the residual is empty when the whole expression is linear and
-/// otherwise lists the remaining nonlinear summands (each a pre-existing arena
-/// node, optionally negated). `LinearTerms` may have empty `coeffs` and
+/// The residual is empty when the whole expression is linear and otherwise
+/// lists the remaining nonlinear summands (each a pre-existing arena node,
+/// optionally negated). `LinearTerms` may have empty `coeffs` and
 /// `constant == 0.0` when the whole expression is purely nonlinear.
-pub fn split_linear(arena: &ExprArena, id: ExprId) -> (LinearTerms, Vec<SignedExpr>) {
+///
+/// As with [`extract_linear`], call [`LinearTerms::into_owned`] before retaining
+/// the linear terms independently of `arena`.
+pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, Vec<SignedExpr>) {
     if let Some(lt) = as_linear(arena, id, true) {
         return (lt, Vec::new());
     }
@@ -245,13 +302,11 @@ pub fn split_linear(arena: &ExprArena, id: ExprId) -> (LinearTerms, Vec<SignedEx
             }
             ExprNode::Neg(inner) => sign_stack.push((*inner, -sign)),
             _ => {
-                if let Some(mut t) = as_linear(arena, cur, true) {
-                    if (sign - 1.0).abs() > 0.0 {
-                        t.coeffs.iter_mut().for_each(|(_, c)| *c *= sign);
-                        t.constant *= sign;
+                if let Some(t) = as_linear(arena, cur, true) {
+                    for &(v, c) in t.coeffs.iter() {
+                        lin.add(v, c * sign);
                     }
-                    lin.extend(t.coeffs);
-                    constant += t.constant;
+                    constant += t.constant * sign;
                 } else {
                     residual.push(SignedExpr { id: cur, neg: sign < 0.0 });
                 }
@@ -260,7 +315,7 @@ pub fn split_linear(arena: &ExprArena, id: ExprId) -> (LinearTerms, Vec<SignedEx
     }
     let mut coeffs = lin.into_coeffs();
     coeffs.retain(|(_, c)| *c != 0.0);
-    (LinearTerms { coeffs, constant }, residual)
+    (LinearTerms { coeffs: Cow::Owned(coeffs), constant }, residual)
 }
 
 /// Render the first nonlinear summand of `id` as a short infix string, resolving
@@ -288,6 +343,71 @@ mod tests {
     use crate::arena::{ExprArena, ExprNode, VarId};
 
     #[test]
+    fn direct_linear_extraction_borrows_arena_coefficients() {
+        let mut arena = ExprArena::new();
+        let id = arena.push(ExprNode::Linear {
+            coeffs: vec![(VarId(0), 2.0), (VarId(1), -3.0)],
+            constant: 4.0,
+        });
+        let expected = match arena.get(id) {
+            ExprNode::Linear { coeffs, .. } => coeffs.as_slice(),
+            _ => unreachable!(),
+        };
+
+        let terms = extract_linear(&arena, id).expect("linear");
+        let Cow::Borrowed(actual) = terms.coeffs else {
+            panic!("direct Linear extraction allocated coefficient storage");
+        };
+        assert!(std::ptr::eq(actual, expected));
+        assert!((terms.constant - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn merged_tree_extraction_owns_coefficients() {
+        let mut arena = ExprArena::new();
+        let x = arena.push(ExprNode::Var(VarId(0)));
+        let y = arena.push(ExprNode::Var(VarId(1)));
+        let sum = arena.push(ExprNode::Add(smallvec::smallvec![x, y, x]));
+
+        let terms = extract_linear(&arena, sum).expect("linear");
+        let Cow::Owned(coeffs) = terms.coeffs else {
+            panic!("merged expression did not own synthesized coefficients");
+        };
+        assert_eq!(coeffs, vec![(VarId(0), 2.0), (VarId(1), 1.0)]);
+    }
+
+    #[test]
+    fn into_owned_detaches_borrowed_terms_from_arena() {
+        let mut arena = ExprArena::new();
+        let id = arena.push(ExprNode::Linear { coeffs: vec![(VarId(0), 2.0)], constant: 1.0 });
+
+        let terms: LinearTerms<'static> = extract_linear(&arena, id).unwrap().into_owned();
+        arena.push(ExprNode::Const(5.0));
+
+        assert!(matches!(terms.coeffs, Cow::Owned(_)));
+        assert_eq!(terms.coeffs.as_ref(), &[(VarId(0), 2.0)]);
+        assert!((terms.constant - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn split_linear_preserves_borrowing_only_for_direct_linear_nodes() {
+        let mut arena = ExprArena::new();
+        let linear = arena.push(ExprNode::Linear { coeffs: vec![(VarId(0), 2.0)], constant: 1.0 });
+        let (direct, residual) = split_linear(&arena, linear);
+        assert!(matches!(direct.coeffs, Cow::Borrowed(_)));
+        assert!(residual.is_empty());
+
+        let y = arena.push(ExprNode::Var(VarId(1)));
+        let nonlinear = arena.push(ExprNode::Sin(y));
+        let mixed = arena.push(ExprNode::Add(smallvec::smallvec![linear, nonlinear]));
+        let (split, residual) = split_linear(&arena, mixed);
+        assert!(matches!(split.coeffs, Cow::Owned(_)));
+        assert_eq!(split.coeffs.as_ref(), &[(VarId(0), 2.0)]);
+        assert!((split.constant - 1.0).abs() < f64::EPSILON);
+        assert_eq!(residual, vec![SignedExpr { id: nonlinear, neg: false }]);
+    }
+
+    #[test]
     fn param_times_var_stays_symbolic_until_extracted() {
         // Build `price * x` through the operator helper. The parameter must NOT
         // be folded into a Linear node at build time (so it stays re-bindable)
@@ -299,7 +419,7 @@ mod tests {
         assert!(matches!(arena.get(prod), ExprNode::Mul(_)));
 
         let terms = extract_linear(&arena, prod).expect("linear");
-        assert_eq!(terms.coeffs, vec![(VarId(0), 3.0)]);
+        assert_eq!(&*terms.coeffs, &[(VarId(0), 3.0)][..]);
         assert!(terms.constant.abs() < f64::EPSILON);
     }
 
@@ -313,7 +433,7 @@ mod tests {
 
         arena.set_param_value(pid, 10.0);
         let terms = extract_linear(&arena, prod).expect("linear");
-        assert_eq!(terms.coeffs, vec![(VarId(0), 10.0)]);
+        assert_eq!(&*terms.coeffs, &[(VarId(0), 10.0)][..]);
     }
 
     #[test]
@@ -324,7 +444,7 @@ mod tests {
         let xnode = arena.push(ExprNode::Var(VarId(0)));
         let sum = add_into(&mut arena, price, xnode);
         let terms = extract_linear(&arena, sum).expect("linear");
-        assert_eq!(terms.coeffs, vec![(VarId(0), 1.0)]);
+        assert_eq!(&*terms.coeffs, &[(VarId(0), 1.0)][..]);
         assert!((terms.constant - 5.0).abs() < f64::EPSILON);
     }
 
@@ -339,9 +459,9 @@ mod tests {
         let sum = arena.push(ExprNode::Add(smallvec::smallvec![z, x, y, x]));
 
         let terms = extract_linear(&arena, sum).expect("linear");
-        assert_eq!(terms.coeffs, vec![(VarId(2), 1.0), (VarId(0), 2.0), (VarId(1), 1.0)]);
+        assert_eq!(&*terms.coeffs, &[(VarId(2), 1.0), (VarId(0), 2.0), (VarId(1), 1.0)][..]);
         assert!(terms.constant.abs() < f64::EPSILON);
-        assert_eq!(extract_linear(&arena, sum).unwrap().coeffs, terms.coeffs);
+        assert_eq!(&*extract_linear(&arena, sum).unwrap().coeffs, &*terms.coeffs);
     }
 
     #[test]
@@ -357,7 +477,7 @@ mod tests {
         let sum = arena.push(ExprNode::Add(ids.into_iter().collect()));
         let terms = extract_linear(&arena, sum).expect("linear");
         let expected: Vec<(VarId, f64)> = (0..n).map(|v| (VarId(v), 3.0)).collect();
-        assert_eq!(terms.coeffs, expected);
+        assert_eq!(&*terms.coeffs, expected.as_slice());
     }
 
     fn names(v: VarId) -> String {

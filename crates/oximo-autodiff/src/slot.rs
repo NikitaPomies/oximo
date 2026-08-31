@@ -21,7 +21,7 @@ pub struct FunctionSlot {
 #[derive(Clone, Debug)]
 pub enum SlotKind {
     /// Affine: constant gradient, zero Hessian.
-    Linear(LinearTerms),
+    Linear(LinearTerms<'static>),
     /// Degree-2 polynomial: affine gradient `Qx + c`, constant Hessian.
     /// `QuadraticTerms.hessian` follows the `0.5 x'Qx` convention
     Quadratic(QuadraticTerms),
@@ -37,7 +37,7 @@ impl FunctionSlot {
     /// Used for a feasibility problem's absent objective.
     pub fn zero() -> Self {
         Self {
-            kind: SlotKind::Linear(LinearTerms { coeffs: Vec::new(), constant: 0.0 }),
+            kind: SlotKind::Linear(LinearTerms { coeffs: Vec::new().into(), constant: 0.0 }),
             support: Vec::new(),
             hess_pairs: Vec::new(),
         }
@@ -75,7 +75,11 @@ impl FunctionSlot {
     fn closed_form(arena: &ExprArena, root: ExprId) -> Option<Self> {
         if let Some(linear) = extract_linear(arena, root) {
             let support = sorted_dedup(linear.coeffs.iter().map(|(v, _)| v.0));
-            return Some(Self { kind: SlotKind::Linear(linear), support, hess_pairs: Vec::new() });
+            return Some(Self {
+                kind: SlotKind::Linear(linear.into_owned()),
+                support,
+                hess_pairs: Vec::new(),
+            });
         }
         if let Some(quadratic) = extract_quadratic(arena, root) {
             let support = sorted_dedup(
@@ -128,13 +132,13 @@ fn sorted_dedup(vars: impl Iterator<Item = u32>) -> Vec<u32> {
 }
 
 /// `t.constant + t.coeffs * x`
-pub fn linear_value(t: &LinearTerms, x: &[f64]) -> f64 {
+pub fn linear_value(t: &LinearTerms<'_>, x: &[f64]) -> f64 {
     t.coeffs.iter().fold(t.constant, |acc, &(v, c)| acc + c * x[v.index()])
 }
 
 /// Add the (constant) gradient of `t` into `grad`, scaled by `scale`.
-pub fn linear_gradient_add(t: &LinearTerms, scale: f64, grad: &mut [f64]) {
-    for &(v, c) in &t.coeffs {
+pub fn linear_gradient_add(t: &LinearTerms<'_>, scale: f64, grad: &mut [f64]) {
+    for &(v, c) in t.coeffs.iter() {
         grad[v.index()] += scale * c;
     }
 }

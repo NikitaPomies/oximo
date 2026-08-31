@@ -215,7 +215,7 @@ fn run_baron(bar: &str, opts: &BaronOptions, exec: Option<&str>) -> Result<Baron
 /// [`write_equations`]) used to fold range duals back onto their
 /// `ConstraintId`, and the affine bound side of each explicit SOC constraint
 /// used to rescale its squared-row price to the norm form.
-type BarParts = (String, Vec<VarId>, Vec<ConstraintId>, Vec<LinearTerms>);
+type BarParts = (String, Vec<VarId>, Vec<ConstraintId>, Vec<LinearTerms<'static>>);
 
 fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError> {
     if model.has_active_sos_constraints() {
@@ -238,7 +238,9 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
     write_starting_point(&mut bar, &vars);
     let soc_bounds = socs
         .iter()
-        .map(|s| extract_linear(&arena, s.bound).expect("SOC bound is validated affine"))
+        .map(|s| {
+            extract_linear(&arena, s.bound).expect("SOC bound is validated affine").into_owned()
+        })
         .collect();
     Ok((bar, var_order, con_order, soc_bounds))
 }
@@ -501,20 +503,20 @@ fn write_starting_point(bar: &mut String, vars: &[Variable]) {
 }
 
 /// Append the linear expression `t` to `bar` as a standalone BARON expression.
-fn write_linear(bar: &mut String, t: &LinearTerms, include_constant: bool) {
+fn write_linear(bar: &mut String, t: &LinearTerms<'_>, include_constant: bool) {
     let mut first = true;
-    for (v, coef) in &t.coeffs {
-        if *coef == 0.0 {
+    for &(v, coef) in t.coeffs.iter() {
+        if coef == 0.0 {
             continue;
         }
         let idx = v.index();
         if first {
-            write!(bar, "{}*x{idx}", fmt(*coef)).unwrap();
+            write!(bar, "{}*x{idx}", fmt(coef)).unwrap();
             first = false;
-        } else if *coef < 0.0 {
+        } else if coef < 0.0 {
             write!(bar, " - {}*x{idx}", fmt(-coef)).unwrap();
         } else {
-            write!(bar, " + {}*x{idx}", fmt(*coef)).unwrap();
+            write!(bar, " + {}*x{idx}", fmt(coef)).unwrap();
         }
     }
     if include_constant && t.constant != 0.0 {
@@ -539,7 +541,7 @@ fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(),
         ExprNode::Var(v) => write!(bar, "x{}", v.index()).unwrap(),
         ExprNode::Param(p) => write!(bar, "{}", fmt(arena.param_value(*p))).unwrap(),
         ExprNode::Linear { coeffs, constant } => {
-            let t = LinearTerms { coeffs: coeffs.clone(), constant: *constant };
+            let t = LinearTerms::borrowed(coeffs, *constant);
             write!(bar, "(").unwrap();
             write_linear(bar, &t, true);
             write!(bar, ")").unwrap();
@@ -690,7 +692,7 @@ fn parse_solution(
     raw_log: Option<String>,
     var_order: &[VarId],
     con_order: &[ConstraintId],
-    soc_bounds: &[LinearTerms],
+    soc_bounds: &[LinearTerms<'_>],
 ) -> SolverResult {
     let tokens: Vec<&str> = tim.split_whitespace().collect();
     let int_at = |i: usize| tokens.get(i).and_then(|s| s.parse::<i64>().ok());
