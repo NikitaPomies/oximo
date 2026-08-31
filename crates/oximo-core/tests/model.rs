@@ -272,6 +272,78 @@ fn fix_var_mutates_bounds_post_build() {
 }
 
 #[test]
+#[should_panic(expected = "cannot fix integer variable \"y\" to the fractional value 0.3")]
+fn fix_rejects_a_fractional_value_on_an_integer_variable() {
+    let m = Model::new("fix_fractional");
+    variable!(m, 0.0 <= y <= 1, Int);
+    m.fix(y, 0.3);
+}
+
+#[test]
+#[should_panic(expected = "cannot fix binary variable \"z\" to the fractional value 0.3")]
+fn fix_rejects_a_fractional_value_on_a_binary_variable() {
+    let m = Model::new("fix_fractional_binary");
+    variable!(m, z, Bin);
+    m.fix(z, 0.3);
+}
+
+#[test]
+fn fix_accepts_an_int_value_on_an_int_variable() {
+    let m = Model::new("fix_integral");
+    variable!(m, 0.0 <= y <= 20.0, Int);
+    m.fix(y, 1.0);
+    let vars = m.variables();
+    assert_eq!(vars[0].lb, 1.0);
+    assert_eq!(vars[0].ub, 1.0);
+}
+
+#[test]
+#[should_panic(expected = "cannot fix variable \"x\" to 7, outside its bounds [0, 5]")]
+fn fix_rejects_a_value_outside_the_declared_bounds() {
+    let m = Model::new("fix_outside_bounds");
+    variable!(m, 0.0 <= x <= 5.0);
+    m.fix(x, 7.0);
+}
+
+#[test]
+#[should_panic(expected = "cannot fix variable \"x\" to the non-finite value NaN")]
+fn fix_rejects_a_non_finite_value() {
+    let m = Model::new("fix_non_finite");
+    variable!(m, x);
+    m.fix(x, f64::NAN);
+}
+
+#[test]
+fn fix_accepts_zero_on_a_semicontinuous_variable() {
+    let m = Model::new("fix_semi_zero");
+    variable!(m, 2.0 <= s <= 8.0, SemiCont(2.0));
+    m.fix(s, 0.0);
+    let vars = m.variables();
+    assert_eq!(vars[0].lb, 0.0);
+    assert_eq!(vars[0].ub, 0.0);
+}
+
+#[test]
+#[should_panic(
+    expected = "cannot fix semi-continuous(2) variable \"s\" to 1: it must be 0 or at least 2"
+)]
+fn fix_rejects_a_value_inside_the_semicontinuity_gap() {
+    let m = Model::new("fix_semi_gap");
+    variable!(m, s, SemiCont(2.0));
+    m.fix(s, 1.0);
+}
+
+#[test]
+#[should_panic(
+    expected = "cannot fix semi-integer(2) variable \"s\" to 1: it must be 0 or at least 2"
+)]
+fn fix_rejects_a_value_inside_the_semiinteger_gap() {
+    let m = Model::new("fix_semi_gap");
+    variable!(m, s, SemiInt(2.0));
+    m.fix(s, 1.0);
+}
+
+#[test]
 fn fix_pins_var_expr_and_indexed_entry() {
     let m = Model::new("fix_expr");
     variable!(m, 0.0 <= x <= 10.0);

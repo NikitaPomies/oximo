@@ -383,8 +383,8 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `e` is not a bare variable handle or if the variable belongs
-    /// to an SOS constraint that has already been reformulated.
+    /// Panics if `e` is not a bare variable handle, or on anything
+    /// [`Self::fix_var`] rejects.
     pub fn fix(&self, e: Expr<'_>, value: f64) {
         let id = e.var_id().expect("Model::fix expects a single-variable expression");
         self.fix_var(id, value);
@@ -394,12 +394,16 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if the variable belongs to an SOS constraint that has already
-    /// been reformulated, because its bounds are embedded in generated rows.
+    /// Panics if `value` is not a feasible fixing for the variable (non-finite,
+    /// fractional on an integer domain, outside its bounds, or inside a
+    /// semicontinuity gap), or if the variable belongs to an SOS constraint that
+    /// has already been reformulated, because its bounds are embedded in
+    /// generated rows.
     pub fn fix_var(&self, id: VarId, value: f64) {
         self.assert_sos_member_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
+        crate::var::assert_fixable(&v.name, v.domain, v.lb, v.ub, value);
         v.lb = value;
         v.ub = value;
         drop(vars);
