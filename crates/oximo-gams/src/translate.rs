@@ -1026,22 +1026,22 @@ fn write_model_and_solve(gms: &mut String, solve_type: &str, sense_kw: &str, has
 }
 
 /// Captured form of an expression for GAMS emission.
-enum ExprForm {
-    Linear(LinearTerms<'static>),
+enum ExprForm<'a> {
+    Linear(LinearTerms<'a>),
     Nonlinear(ExprId),
 }
 
-impl ExprForm {
-    fn from(arena: &ExprArena, id: ExprId) -> Self {
+impl<'a> ExprForm<'a> {
+    fn from(arena: &'a ExprArena, id: ExprId) -> Self {
         match extract_linear(arena, id) {
-            Some(t) => ExprForm::Linear(t.into_owned()),
+            Some(t) => ExprForm::Linear(t),
             None => ExprForm::Nonlinear(id),
         }
     }
 }
 
 /// Append a captured expression form to `gms`.
-fn write_form(gms: &mut String, arena: &ExprArena, form: &ExprForm, include_constant: bool) {
+fn write_form(gms: &mut String, arena: &ExprArena, form: &ExprForm<'_>, include_constant: bool) {
     match form {
         ExprForm::Linear(t) => write_linear(gms, t, include_constant),
         ExprForm::Nonlinear(id) => write_gams_expr(gms, arena, *id, true),
@@ -1093,7 +1093,7 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
         ExprNode::Var(v) => write!(gms, "v{}", v.index()).unwrap(),
         ExprNode::Param(p) => write!(gms, "{}", fmt(arena.param_value(*p))).unwrap(),
         ExprNode::Linear { coeffs, constant } => {
-            let t = LinearTerms { coeffs: coeffs.clone().into(), constant: *constant };
+            let t = LinearTerms::borrowed(coeffs, *constant);
             write!(gms, "(").unwrap();
             write_linear(gms, &t, true);
             write!(gms, " )").unwrap();
