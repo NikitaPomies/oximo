@@ -25,6 +25,28 @@ pub fn var_name(vars: &[Variable], v: VarId) -> String {
     vars.get(v.index()).map_or_else(|| format!("variable #{}", v.index()), |x| x.name.to_string())
 }
 
+/// To be fixable,  the value is finite, integral when the domain is integer-valued,
+/// and within `[lb, ub]`. A semicontinuous/semiinteger variable is 0 or at least its
+/// threshold
+pub(crate) fn assert_fixable(name: &str, domain: Domain, lb: f64, ub: f64, value: f64) {
+    assert!(value.is_finite(), "cannot fix variable {name:?} to the non-finite value {value}");
+    assert!(
+        !domain.is_integer() || value.fract() == 0.0,
+        "cannot fix {domain} variable {name:?} to the fractional value {value}"
+    );
+    let semi_zero = domain.semi_threshold().is_some() && value == 0.0;
+    assert!(
+        semi_zero || (lb <= value && value <= ub),
+        "cannot fix variable {name:?} to {value}, outside its bounds [{lb}, {ub}]"
+    );
+    if let Some(threshold) = domain.semi_threshold() {
+        assert!(
+            value == 0.0 || value >= threshold,
+            "cannot fix {domain} variable {name:?} to {value}: it must be 0 or at least {threshold}"
+        );
+    }
+}
+
 /// Builder backing the `variable!` macro. Configure bounds / domain, then call
 /// [`Self::build`] to register the variable and obtain an `Expr` handle.
 #[must_use = "VarBuilder does nothing until you call .build()"]
@@ -65,7 +87,16 @@ impl<'a> VarBuilder<'a> {
         self
     }
 
+    /// Fix the variable to `value`, i.e. `bounds(value, value)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value` is not a feasible fixing for the domain and bounds set
+    /// so far: non-finite, fractional on an integer domain, outside the bounds,
+    /// or inside a semicontinuity gap. A `.domain(..)` or bound call placed after
+    /// this one is not re-checked; the `variable!` macro always emits them first.
     pub fn fix(self, value: f64) -> Self {
+        assert_fixable(&self.name, self.domain, self.lb, self.ub, value);
         self.bounds(value, value)
     }
 
