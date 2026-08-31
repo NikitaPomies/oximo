@@ -252,7 +252,7 @@ impl Problem {
     }
 }
 
-fn push_row(out: &mut Vec<Triplet>, row: usize, terms: &LinearTerms, scale: f64) {
+fn push_row(out: &mut Vec<Triplet>, row: usize, terms: &LinearTerms<'_>, scale: f64) {
     out.extend(
         terms.coeffs.iter().map(|&(var, value)| Triplet::new(row, var.index(), scale * value)),
     );

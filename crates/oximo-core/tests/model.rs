@@ -417,7 +417,7 @@ fn rhs_expr_folded_into_lhs() {
     let arena = m.arena();
     let terms = extract_linear(&arena, algebraic[0].lhs).expect("linear");
     assert_eq!(terms.constant, -3.0);
-    let mut sorted = terms.coeffs.clone();
+    let mut sorted = terms.coeffs.into_owned();
     sorted.sort_by_key(|(v, _)| v.0);
     assert_eq!(sorted[0].1, 1.0);
     assert_eq!(sorted[1].1, -1.0);

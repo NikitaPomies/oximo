@@ -37,14 +37,22 @@ pub fn render_expr(arena: &ExprArena, id: ExprId, resolve: &impl Fn(VarId) -> St
 /// - the constant last.
 ///
 /// An empty expression renders as `0`.
-pub fn render_linear_terms(t: &LinearTerms, resolve: &impl Fn(VarId) -> String) -> String {
+pub fn render_linear_terms(t: &LinearTerms<'_>, resolve: &impl Fn(VarId) -> String) -> String {
     join_parts(&linear_parts(t, resolve))
 }
 
 /// Split a linear expression into signed summands, ready for [`join_parts`].
-fn linear_parts(t: &LinearTerms, resolve: &impl Fn(VarId) -> String) -> Vec<Part> {
-    let mut parts = Vec::with_capacity(t.coeffs.len() + 1);
-    for (v, c) in &t.coeffs {
+fn linear_parts(t: &LinearTerms<'_>, resolve: &impl Fn(VarId) -> String) -> Vec<Part> {
+    linear_parts_from_slice(&t.coeffs, t.constant, resolve)
+}
+
+fn linear_parts_from_slice(
+    coeffs: &[(VarId, f64)],
+    constant: f64,
+    resolve: &impl Fn(VarId) -> String,
+) -> Vec<Part> {
+    let mut parts = Vec::with_capacity(coeffs.len() + 1);
+    for (v, c) in coeffs {
         if *c == 0.0 {
             continue;
         }
@@ -56,8 +64,8 @@ fn linear_parts(t: &LinearTerms, resolve: &impl Fn(VarId) -> String) -> Vec<Part
         };
         parts.push((*c < 0.0, text));
     }
-    if t.constant != 0.0 {
-        parts.push((t.constant < 0.0, fmt_num(t.constant.abs())));
+    if constant != 0.0 {
+        parts.push((constant < 0.0, fmt_num(constant.abs())));
     }
     parts
 }
@@ -105,10 +113,9 @@ pub(crate) fn render_node(
                     ExprNode::Param(p) if arena.param_value(*p) < 0.0 => {
                         parts.push((true, fmt_num(-arena.param_value(*p))));
                     }
-                    ExprNode::Linear { coeffs, constant } => parts.extend(linear_parts(
-                        &LinearTerms { coeffs: coeffs.clone(), constant: *constant },
-                        resolve,
-                    )),
+                    ExprNode::Linear { coeffs, constant } => {
+                        parts.extend(linear_parts_from_slice(coeffs, *constant, resolve));
+                    }
                     _ => parts.push((false, render_node(arena, c, resolve, PREC_ADD))),
                 }
             }
@@ -135,8 +142,7 @@ pub(crate) fn render_node(
         ExprNode::Log(x) => (fmt_call("log", arena, *x, resolve), PREC_UNARY),
         ExprNode::Abs(x) => (fmt_call("abs", arena, *x, resolve), PREC_UNARY),
         ExprNode::Linear { coeffs, constant } => {
-            let parts =
-                linear_parts(&LinearTerms { coeffs: coeffs.clone(), constant: *constant }, resolve);
+            let parts = linear_parts_from_slice(coeffs, *constant, resolve);
             // A multi-term or negative-leading sum needs parens inside a product.
             let prec = match parts.as_slice() {
                 [(false, _)] => PREC_MUL,
@@ -178,8 +184,13 @@ mod tests {
         }
     }
 
-    fn lt(coeffs: Vec<(u32, f64)>, constant: f64) -> LinearTerms {
-        LinearTerms { coeffs: coeffs.into_iter().map(|(v, c)| (VarId(v), c)).collect(), constant }
+    fn lt(coeffs: Vec<(u32, f64)>, constant: f64) -> LinearTerms<'static> {
+        LinearTerms {
+            coeffs: std::borrow::Cow::Owned(
+                coeffs.into_iter().map(|(v, c)| (VarId(v), c)).collect(),
+            ),
+            constant,
+        }
     }
 
     #[test]

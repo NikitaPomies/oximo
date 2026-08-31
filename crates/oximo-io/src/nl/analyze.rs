@@ -22,7 +22,7 @@ use crate::error::IoError;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Row {
-    pub(crate) linear: LinearTerms,
+    pub(crate) linear: LinearTerms<'static>,
     /// Nonlinear summands of the body, empty when the row is purely linear.
     pub(crate) residual: Vec<SignedExpr>,
 }
@@ -88,7 +88,7 @@ impl Analysis {
         for c in constraints {
             let (linear, residual) = split_linear(arena, c.lhs);
             let mut all = FxHashSet::default();
-            for (v, _) in &linear.coeffs {
+            for (v, _) in linear.coeffs.iter() {
                 all.insert(*v);
             }
             if !residual.is_empty() {
@@ -102,7 +102,7 @@ impl Analysis {
                     all.insert(*v);
                 }
             }
-            cons.push(Row { linear, residual });
+            cons.push(Row { linear: linear.into_owned(), residual });
             let start = cons_vars.len();
             cons_vars.extend(all);
             cons_vars[start..].sort_by_key(|v| v.0);
@@ -111,7 +111,7 @@ impl Analysis {
 
         let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
         let mut obj_all = FxHashSet::default();
-        for (v, _) in &obj_linear.coeffs {
+        for (v, _) in obj_linear.coeffs.iter() {
             obj_all.insert(*v);
         }
         if !obj_residual.is_empty() {
@@ -125,7 +125,7 @@ impl Analysis {
                 obj_all.insert(*v);
             }
         }
-        let obj = Row { linear: obj_linear, residual: obj_residual };
+        let obj = Row { linear: obj_linear.into_owned(), residual: obj_residual };
 
         Ok(Self {
             cons,
@@ -294,7 +294,7 @@ pub mod benchmark_support {
             collect_vars(arena, r.id, &mut nonlinear)?;
         }
         all.extend(nonlinear.iter().copied());
-        Ok((Row { linear, residual }, sorted(all), nonlinear))
+        Ok((Row { linear: linear.into_owned(), residual }, sorted(all), nonlinear))
     }
 
     fn build(
@@ -336,7 +336,7 @@ pub mod benchmark_support {
             collect_vars(arena, residual.id, &mut nl_vars_o)?;
         }
         obj_all.extend(nl_vars_o.iter().copied());
-        let obj = Row { linear: obj_linear, residual: obj_residual };
+        let obj = Row { linear: obj_linear.into_owned(), residual: obj_residual };
         let obj_vars = sorted(obj_all);
         Ok(Analysis { cons, obj, cons_vars, cons_var_offsets, obj_vars, nl_vars_c, nl_vars_o })
     }

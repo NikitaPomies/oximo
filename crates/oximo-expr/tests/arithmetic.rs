@@ -38,9 +38,10 @@ fn linear_fast_path_handles_subtraction() {
     let y = make_var(&arena, 1);
 
     let combo = 4.0 * x - y - 1.0;
-    let terms = extract_linear(&arena.borrow(), combo.id).expect("must be linear");
+    let arena_ref = arena.borrow();
+    let terms = extract_linear(&arena_ref, combo.id).expect("must be linear");
     assert_eq!(terms.constant, -1.0);
-    let mut sorted = terms.coeffs;
+    let mut sorted = terms.coeffs.into_owned();
     sorted.sort_by_key(|(v, _)| v.0);
     assert_eq!(sorted, vec![(VarId(0), 4.0), (VarId(1), -1.0)]);
 }
@@ -71,9 +72,10 @@ fn negation_flips_coefficients() {
     let x = make_var(&arena, 0);
     let y = make_var(&arena, 1);
     let combo = -(2.0 * x + 3.0 * y + 5.0);
-    let terms = extract_linear(&arena.borrow(), combo.id).expect("linear");
+    let arena_ref = arena.borrow();
+    let terms = extract_linear(&arena_ref, combo.id).expect("linear");
     assert_eq!(terms.constant, -5.0);
-    let mut sorted = terms.coeffs;
+    let mut sorted = terms.coeffs.into_owned();
     sorted.sort_by_key(|(v, _)| v.0);
     assert_eq!(sorted, vec![(VarId(0), -2.0), (VarId(1), -3.0)]);
 }
@@ -84,8 +86,9 @@ fn dot_computes_weighted_sum() {
     let xs: Vec<_> = (0..3).map(|i| make_var(&arena, i)).collect();
     let weights = [2.0, 3.0, 5.0];
     let result = dot(&xs, &weights);
-    let terms = extract_linear(&arena.borrow(), result.id).expect("linear");
-    let mut sorted = terms.coeffs;
+    let arena_ref = arena.borrow();
+    let terms = extract_linear(&arena_ref, result.id).expect("linear");
+    let mut sorted = terms.coeffs.into_owned();
     sorted.sort_by_key(|(v, _)| v.0);
     assert_eq!(sorted, vec![(VarId(0), 2.0), (VarId(1), 3.0), (VarId(2), 5.0)]);
 }
@@ -194,10 +197,11 @@ fn large_sum_extracts_correctly() {
     let arena = RefCell::new(ExprArena::new());
     let vars: Vec<_> = (0..100).map(|i| make_var(&arena, i)).collect();
     let total: Expr = vars.iter().copied().sum();
-    let terms = extract_linear(&arena.borrow(), total.id).expect("linear");
+    let arena_ref = arena.borrow();
+    let terms = extract_linear(&arena_ref, total.id).expect("linear");
     assert_eq!(terms.constant, 0.0);
     assert_eq!(terms.coeffs.len(), 100);
-    for (_, c) in &terms.coeffs {
+    for (_, c) in terms.coeffs.iter() {
         assert!((*c - 1.0).abs() < f64::EPSILON);
     }
 }

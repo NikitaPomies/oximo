@@ -41,7 +41,7 @@ const PAR_ROW_THRESHOLD: usize = 256;
 /// The linear-or-conic view of one algebraic constraint.
 #[derive(Debug)]
 enum Row {
-    Lin(LinearTerms),
+    Lin(LinearTerms<'static>),
     Soc(SocForm),
 }
 
@@ -69,9 +69,9 @@ impl Rows {
     /// Append one `A` row `scale * t.coeffs` with right-hand side `rhs`, carrying
     /// no dual. The caller attaches one with `set_last_dual` when the row maps
     /// back to a constraint.
-    fn push(&mut self, t: &LinearTerms, scale: f64, rhs: f64) {
+    fn push(&mut self, t: &LinearTerms<'_>, scale: f64, rhs: f64) {
         let row = self.b.len();
-        for &(var, coef) in &t.coeffs {
+        for &(var, coef) in t.coeffs.iter() {
             self.a_trip.push((row, var.index(), scale * coef));
         }
         self.b.push(rhs);
@@ -279,7 +279,7 @@ fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<Vec<Row>,
     let mut rows: Vec<Option<Row>> = (0..constraints.len()).map(|_| None).collect();
     let mut pending = Vec::new();
     for (index, constraint) in constraints.iter().enumerate() {
-        match extract_linear(arena_ref, constraint.lhs) {
+        match extract_linear(arena_ref, constraint.lhs).map(LinearTerms::into_owned) {
             Some(terms) => rows[index] = Some(Row::Lin(terms)),
             None => pending.push((index, constraint)),
         }

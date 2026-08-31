@@ -346,7 +346,8 @@ impl DerivativeOracle for HybridOracle {
                 SlotKind::Linear(terms) => {
                     let positions =
                         &self.jac_linear_scatter[linear_k..linear_k + terms.coeffs.len()];
-                    for (&position, &(_, coefficient)) in positions.iter().zip(&terms.coeffs) {
+                    for (&position, &(_, coefficient)) in positions.iter().zip(terms.coeffs.iter())
+                    {
                         row[position] += coefficient;
                     }
                     linear_k += terms.coeffs.len();

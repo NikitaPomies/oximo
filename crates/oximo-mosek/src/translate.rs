@@ -254,10 +254,10 @@ fn append_soc(
 fn put_afe(
     task: &mut TaskCB,
     afe: i64,
-    terms: &LinearTerms,
+    terms: &LinearTerms<'_>,
     scratch: &mut TaskScratch,
 ) -> Result<(), SolverError> {
-    fill_linear_buffers(&terms.coeffs, scratch)?;
+    fill_linear_buffers(terms.coeffs.as_ref(), scratch)?;
     task.put_afe_f_row(afe, &scratch.indices, &scratch.values).map_err(backend)?;
     task.put_afe_g(afe, terms.constant).map_err(backend)
 }

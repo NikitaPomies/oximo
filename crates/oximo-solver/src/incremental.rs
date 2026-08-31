@@ -67,8 +67,8 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
                     .unwrap_or_else(|| "<nonlinear>".into()),
             })?;
             let mut by_id = vec![0.0; vars.len()];
-            for (v, c) in &lin.coeffs {
-                by_id[v.index()] = *c;
+            for &(v, c) in lin.coeffs.iter() {
+                by_id[v.index()] = c;
             }
             (by_id, lin.constant)
         }

@@ -320,8 +320,8 @@ fn objective_terms(
         Ok((coeffs, quad.constant, cols))
     } else {
         let lin = extract_linear(arena, obj_expr).ok_or_else(nonlinear)?;
-        for (v, c) in &lin.coeffs {
-            coeffs[v.index()] = *c;
+        for &(v, c) in lin.coeffs.iter() {
+            coeffs[v.index()] = c;
         }
         Ok((coeffs, lin.constant, Vec::new()))
     }
@@ -512,11 +512,11 @@ pub mod benchmark_support {
         primal.len() + reduced_costs.len() + dual.len()
     }
 
-    fn extract(
-        arena: &ExprArena,
+    fn extract<'a>(
+        arena: &'a ExprArena,
         vars: &[Variable],
         c: &oximo_core::Constraint,
-    ) -> Result<LinearTerms, SolverError> {
+    ) -> Result<LinearTerms<'a>, SolverError> {
         extract_linear(arena, c.lhs).ok_or_else(|| SolverError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(arena, c.lhs, &|v| var_name(vars, v))

@@ -475,7 +475,7 @@ pub(crate) struct ConstraintHandle {
 pub(crate) struct SocHandle {
     pub quadratic: gurobi_rs::QConstr,
     pub bound_sign: gurobi_rs::Constr,
-    pub bound: LinearTerms,
+    pub bound: LinearTerms<'static>,
 }
 
 /// Add every model constraint, returning the per-constraint row handle.
@@ -513,7 +513,7 @@ fn add_constraints(
         if let Some((sense, rhs)) = c.as_single() {
             if let Some(t) = extract_linear(arena, c.lhs) {
                 let mut expr = LinExpr::new();
-                for (v, coeff) in t.coeffs {
+                for &(v, coeff) in t.coeffs.iter() {
                     expr.add_term(coeff, gurobi_vars[v.index()]);
                 }
                 singles.push(PendingSingle {
@@ -529,7 +529,7 @@ fn add_constraints(
         } else if c.is_range() {
             if let Some(t) = extract_linear(arena, c.lhs) {
                 let mut expr = LinExpr::new();
-                for (v, coeff) in t.coeffs {
+                for &(v, coeff) in t.coeffs.iter() {
                     expr.add_term(coeff, gurobi_vars[v.index()]);
                 }
                 ranges.push(PendingRange {
@@ -651,13 +651,13 @@ fn add_soc_rows(
             gurobi_model.add_qconstr(s.name.as_str(), c!(q <= 0.0)).map_err(map_gurobi_err)?;
 
         let mut e = LinExpr::new();
-        for &(v, co) in &b.coeffs {
+        for &(v, co) in b.coeffs.iter() {
             e.add_term(co, gurobi_vars[v.index()]);
         }
         let sign_name = format!("{}_sign", s.name);
         let sign_row =
             gurobi_model.add_constr(&sign_name, c!(e >= -b.constant)).map_err(map_gurobi_err)?;
-        rows.push(SocHandle { quadratic: qrow, bound_sign: sign_row, bound: b });
+        rows.push(SocHandle { quadratic: qrow, bound_sign: sign_row, bound: b.into_owned() });
     }
     Ok(rows)
 }
@@ -671,7 +671,7 @@ fn add_squared_affine(
 ) {
     for (i, &(vi, ci)) in t.coeffs.iter().enumerate() {
         q.add_qterm(sign * ci * ci, gurobi_vars[vi.index()], gurobi_vars[vi.index()]);
-        for &(vj, cj) in &t.coeffs[i + 1..] {
+        for &(vj, cj) in &t.coeffs.as_ref()[i + 1..] {
             q.add_qterm(sign * 2.0 * ci * cj, gurobi_vars[vi.index()], gurobi_vars[vj.index()]);
         }
         if t.constant != 0.0 {
@@ -769,7 +769,7 @@ fn set_objective(
     };
     if let Some(t) = extract_linear(arena, obj_expr) {
         let mut e = LinExpr::new();
-        for (v, c) in t.coeffs {
+        for &(v, c) in t.coeffs.iter() {
             e.add_term(c, gurobi_vars[v.index()]);
         }
         // Gurobi's set_objective absorbs LinExpr offsets into ObjCon, so we do
