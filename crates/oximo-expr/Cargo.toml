@@ -13,6 +13,7 @@ readme = "README.md"
 smallvec = { workspace = true, features = ["union"] }
 rustc-hash.workspace = true
 thiserror.workspace = true
+parking_lot.workspace = true
 
 [lints]
 workspace = true

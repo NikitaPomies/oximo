@@ -10,7 +10,8 @@ use crate::linear::{add_into, add_n, div_into, mul_into, neg_into, sub_into};
 impl<'a> Add for Expr<'a> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        let id = add_into(&mut self.arena.borrow_mut(), self.id, rhs.id);
+        self.assert_same_arena(rhs);
+        let id = self.arena.with_mut(|arena| add_into(arena, self.id, rhs.id));
         Self::new(id, self.arena)
     }
 }
@@ -18,7 +19,8 @@ impl<'a> Add for Expr<'a> {
 impl<'a> Sub for Expr<'a> {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        let id = sub_into(&mut self.arena.borrow_mut(), self.id, rhs.id);
+        self.assert_same_arena(rhs);
+        let id = self.arena.with_mut(|arena| sub_into(arena, self.id, rhs.id));
         Self::new(id, self.arena)
     }
 }
@@ -26,7 +28,8 @@ impl<'a> Sub for Expr<'a> {
 impl<'a> Mul for Expr<'a> {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
-        let id = mul_into(&mut self.arena.borrow_mut(), self.id, rhs.id);
+        self.assert_same_arena(rhs);
+        let id = self.arena.with_mut(|arena| mul_into(arena, self.id, rhs.id));
         Self::new(id, self.arena)
     }
 }
@@ -34,7 +37,8 @@ impl<'a> Mul for Expr<'a> {
 impl<'a> Div for Expr<'a> {
     type Output = Self;
     fn div(self, rhs: Self) -> Self {
-        let id = div_into(&mut self.arena.borrow_mut(), self.id, rhs.id);
+        self.assert_same_arena(rhs);
+        let id = self.arena.with_mut(|arena| div_into(arena, self.id, rhs.id));
         Self::new(id, self.arena)
     }
 }
@@ -42,7 +46,7 @@ impl<'a> Div for Expr<'a> {
 impl<'a> Neg for Expr<'a> {
     type Output = Self;
     fn neg(self) -> Self {
-        let id = neg_into(&mut self.arena.borrow_mut(), self.id);
+        let id = self.arena.with_mut(|arena| neg_into(arena, self.id));
         Self::new(id, self.arena)
     }
 }
@@ -57,11 +61,10 @@ macro_rules! impl_scalar_ops {
         impl<'a> Add<$scalar> for Expr<'a> {
             type Output = Self;
             fn add(self, rhs: $scalar) -> Self {
-                let id = {
-                    let mut a = self.arena.borrow_mut();
-                    let rhs_id = a.constant($to_f64(rhs));
-                    add_into(&mut a, self.id, rhs_id)
-                };
+                let id = self.arena.with_mut(|arena| {
+                    let rhs_id = arena.constant($to_f64(rhs));
+                    add_into(arena, self.id, rhs_id)
+                });
                 Self::new(id, self.arena)
             }
         }
@@ -76,11 +79,10 @@ macro_rules! impl_scalar_ops {
         impl<'a> Sub<$scalar> for Expr<'a> {
             type Output = Self;
             fn sub(self, rhs: $scalar) -> Self {
-                let id = {
-                    let mut a = self.arena.borrow_mut();
-                    let rhs_id = a.constant($to_f64(rhs));
-                    sub_into(&mut a, self.id, rhs_id)
-                };
+                let id = self.arena.with_mut(|arena| {
+                    let rhs_id = arena.constant($to_f64(rhs));
+                    sub_into(arena, self.id, rhs_id)
+                });
                 Self::new(id, self.arena)
             }
         }
@@ -88,11 +90,10 @@ macro_rules! impl_scalar_ops {
         impl<'a> Sub<Expr<'a>> for $scalar {
             type Output = Expr<'a>;
             fn sub(self, rhs: Expr<'a>) -> Expr<'a> {
-                let id = {
-                    let mut a = rhs.arena.borrow_mut();
-                    let lhs_id = a.constant($to_f64(self));
-                    sub_into(&mut a, lhs_id, rhs.id)
-                };
+                let id = rhs.arena.with_mut(|arena| {
+                    let lhs_id = arena.constant($to_f64(self));
+                    sub_into(arena, lhs_id, rhs.id)
+                });
                 Expr::new(id, rhs.arena)
             }
         }
@@ -100,11 +101,10 @@ macro_rules! impl_scalar_ops {
         impl<'a> Mul<$scalar> for Expr<'a> {
             type Output = Self;
             fn mul(self, rhs: $scalar) -> Self {
-                let id = {
-                    let mut a = self.arena.borrow_mut();
-                    let rhs_id = a.constant($to_f64(rhs));
-                    mul_into(&mut a, self.id, rhs_id)
-                };
+                let id = self.arena.with_mut(|arena| {
+                    let rhs_id = arena.constant($to_f64(rhs));
+                    mul_into(arena, self.id, rhs_id)
+                });
                 Self::new(id, self.arena)
             }
         }
@@ -119,11 +119,10 @@ macro_rules! impl_scalar_ops {
         impl<'a> Div<$scalar> for Expr<'a> {
             type Output = Self;
             fn div(self, rhs: $scalar) -> Self {
-                let id = {
-                    let mut a = self.arena.borrow_mut();
-                    let rhs_id = a.constant($to_f64(rhs));
-                    div_into(&mut a, self.id, rhs_id)
-                };
+                let id = self.arena.with_mut(|arena| {
+                    let rhs_id = arena.constant($to_f64(rhs));
+                    div_into(arena, self.id, rhs_id)
+                });
                 Self::new(id, self.arena)
             }
         }
@@ -131,11 +130,10 @@ macro_rules! impl_scalar_ops {
         impl<'a> Div<Expr<'a>> for $scalar {
             type Output = Expr<'a>;
             fn div(self, rhs: Expr<'a>) -> Expr<'a> {
-                let id = {
-                    let mut a = rhs.arena.borrow_mut();
-                    let lhs_id = a.constant($to_f64(self));
-                    div_into(&mut a, lhs_id, rhs.id)
-                };
+                let id = rhs.arena.with_mut(|arena| {
+                    let lhs_id = arena.constant($to_f64(self));
+                    div_into(arena, lhs_id, rhs.id)
+                });
                 Expr::new(id, rhs.arena)
             }
         }
@@ -155,8 +153,11 @@ impl<'a> std::iter::Sum for Expr<'a> {
         let first = iter.next().expect("Expr::sum on empty iterator");
         let mut ids = Vec::with_capacity(iter.size_hint().0.saturating_add(1));
         ids.push(first.id);
-        ids.extend(iter.map(|expr| expr.id));
-        let id = add_n(&mut first.arena.borrow_mut(), &ids);
+        ids.extend(iter.map(|expr| {
+            first.assert_same_arena(expr);
+            expr.id
+        }));
+        let id = first.arena.with_mut(|arena| add_n(arena, &ids));
         Self::new(id, first.arena)
     }
 }

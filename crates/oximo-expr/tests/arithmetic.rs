@@ -1,18 +1,17 @@
 #![expect(clippy::float_cmp)]
 
-use std::cell::RefCell;
-
 use oximo_expr::{
-    Expr, ExprArena, ExprClass, ExprNode, VarId, classify, dot, evaluate, extract_linear,
+    Expr, ExprArena, ExprArenaCell, ExprClass, ExprNode, VarId, classify, dot, evaluate,
+    extract_linear,
 };
 
-fn make_var(arena: &RefCell<ExprArena>, idx: u32) -> Expr<'_> {
+fn make_var(arena: &ExprArenaCell, idx: u32) -> Expr<'_> {
     Expr::from_var(arena, VarId(idx))
 }
 
 #[test]
 fn linear_fast_path_collapses_add() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let y = make_var(&arena, 1);
 
@@ -33,7 +32,7 @@ fn linear_fast_path_collapses_add() {
 
 #[test]
 fn linear_fast_path_handles_subtraction() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let y = make_var(&arena, 1);
 
@@ -48,7 +47,7 @@ fn linear_fast_path_handles_subtraction() {
 
 #[test]
 fn nonlinear_pow_is_not_linear() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let combo = x.powi(2) + x;
     assert!(extract_linear(&arena.borrow(), combo.id).is_none());
@@ -56,7 +55,7 @@ fn nonlinear_pow_is_not_linear() {
 
 #[test]
 fn evaluate_recovers_value() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let y = make_var(&arena, 1);
     let combo = 2.0 * x + 3.0 * y + 5.0;
@@ -68,7 +67,7 @@ fn evaluate_recovers_value() {
 
 #[test]
 fn negation_flips_coefficients() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let y = make_var(&arena, 1);
     let combo = -(2.0 * x + 3.0 * y + 5.0);
@@ -82,7 +81,7 @@ fn negation_flips_coefficients() {
 
 #[test]
 fn dot_computes_weighted_sum() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let xs: Vec<_> = (0..3).map(|i| make_var(&arena, i)).collect();
     let weights = [2.0, 3.0, 5.0];
     let result = dot(&xs, &weights);
@@ -96,7 +95,7 @@ fn dot_computes_weighted_sum() {
 #[test]
 #[should_panic(expected = "dot: length mismatch")]
 fn dot_panics_on_length_mismatch() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let xs: Vec<_> = (0..3).map(|i| make_var(&arena, i)).collect();
     let weights = [2.0, 3.0];
     let _ = dot(&xs, &weights);
@@ -112,7 +111,7 @@ fn dot_panics_on_empty() {
 
 #[test]
 fn div_by_constant_stays_linear() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let combo = x / 2.0;
 
@@ -129,7 +128,7 @@ fn div_by_constant_stays_linear() {
 
 #[test]
 fn div_two_vars_is_nonlinear() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let a = make_var(&arena, 0);
     let b = make_var(&arena, 1);
     let q = a / b;
@@ -141,7 +140,7 @@ fn div_two_vars_is_nonlinear() {
 
 #[test]
 fn scalar_over_var_is_nonlinear() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let recip = 1.0 / x;
     assert!(matches!(arena.borrow().get(recip.id), ExprNode::Div(_, _)));
@@ -150,7 +149,7 @@ fn scalar_over_var_is_nonlinear() {
 
 #[test]
 fn evaluate_division() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let a = make_var(&arena, 0);
     let b = make_var(&arena, 1);
     let q = a / b;
@@ -161,7 +160,7 @@ fn evaluate_division() {
 
 #[test]
 fn evaluate_division_by_zero_is_infinite() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let a = make_var(&arena, 0);
     let b = make_var(&arena, 1);
     let q = a / b;
@@ -172,7 +171,7 @@ fn evaluate_division_by_zero_is_infinite() {
 
 #[test]
 fn evaluate_abs() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let e = x.abs();
     let arena_ref = arena.borrow();
@@ -184,7 +183,7 @@ fn evaluate_abs() {
 
 #[test]
 fn abs_is_nonlinear() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let e = x.abs();
     assert!(matches!(arena.borrow().get(e.id), ExprNode::Abs(_)));
@@ -194,7 +193,7 @@ fn abs_is_nonlinear() {
 
 #[test]
 fn large_sum_extracts_correctly() {
-    let arena = RefCell::new(ExprArena::new());
+    let arena = ExprArenaCell::new(ExprArena::new());
     let vars: Vec<_> = (0..100).map(|i| make_var(&arena, i)).collect();
     let total: Expr = vars.iter().copied().sum();
     let arena_ref = arena.borrow();

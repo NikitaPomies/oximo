@@ -1,4 +1,4 @@
-use crate::arena::{ExprArena, ExprId, ExprNode};
+use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode};
 
 /// Highest-degree polynomial class an expression belongs to, ignoring constant
 /// folding. Used by backends to pick between linear, quadratic, and general
@@ -52,7 +52,7 @@ impl Degree {
     }
 }
 
-fn degree(arena: &ExprArena, id: ExprId) -> Degree {
+fn degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
     match arena.get(id) {
         ExprNode::Const(_) | ExprNode::Param(_) => Degree::Zero,
         ExprNode::Var(_) | ExprNode::Linear { .. } => Degree::One,
@@ -109,6 +109,10 @@ fn degree(arena: &ExprArena, id: ExprId) -> Degree {
 /// least one degree-2 term), or Nonlinear (transcendentals, non-integer powers,
 /// or polynomial degree > 2).
 pub fn classify(arena: &ExprArena, id: ExprId) -> ExprClass {
+    classify_access(arena, id)
+}
+
+pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> ExprClass {
     match degree(arena, id) {
         Degree::Zero | Degree::One => ExprClass::Linear,
         Degree::Two => ExprClass::Quadratic,

@@ -1,16 +1,15 @@
-use std::cell::RefCell;
-
-use crate::arena::{ExprArena, ExprId, ExprNode, ParamId, VarId};
+use crate::arena::{ExprArenaCell, ExprId, ExprNode, ParamId, VarId};
+use crate::classify::{ExprClass, classify_access};
 
 /// Lightweight handle to a node in an [`ExprArena`].
 ///
-/// Carries a borrow of the arena (wrapped in `RefCell` so operator overloads
-/// can push new nodes during arithmetic). `Expr` is `Copy`, so users freely
-/// reuse a variable handle in many constraints.
+/// Carries a borrow of the arena cell so operator overloads can push new nodes
+/// during arithmetic. `Expr` is `Copy`, so users freely reuse a variable
+/// handle in many constraints.
 #[derive(Copy, Clone)]
 pub struct Expr<'a> {
     pub id: ExprId,
-    pub arena: &'a RefCell<ExprArena>,
+    pub arena: &'a ExprArenaCell,
 }
 
 impl std::fmt::Debug for Expr<'_> {
@@ -21,36 +20,41 @@ impl std::fmt::Debug for Expr<'_> {
 
 impl<'a> Expr<'a> {
     #[inline]
-    pub fn new(id: ExprId, arena: &'a RefCell<ExprArena>) -> Self {
+    pub fn new(id: ExprId, arena: &'a ExprArenaCell) -> Self {
         Self { id, arena }
     }
 
-    pub fn constant(arena: &'a RefCell<ExprArena>, v: f64) -> Self {
-        let id = arena.borrow_mut().constant(v);
+    pub fn constant(arena: &'a ExprArenaCell, v: f64) -> Self {
+        let id = arena.with_mut(|arena| arena.constant(v));
         Self::new(id, arena)
     }
 
-    pub fn from_var(arena: &'a RefCell<ExprArena>, v: VarId) -> Self {
-        let id = arena.borrow_mut().var(v);
+    pub fn from_var(arena: &'a ExprArenaCell, v: VarId) -> Self {
+        let id = arena.with_mut(|arena| arena.var(v));
         Self::new(id, arena)
+    }
+
+    #[inline]
+    pub(crate) fn assert_same_arena(self, other: Self) {
+        assert!(std::ptr::eq(self.arena, other.arena), "expressions belong to different arenas");
     }
 
     /// If this handle is a bare variable, return its [`VarId`].
     /// `None` for compound expressions (sums, products, constants, ...).
     pub fn var_id(self) -> Option<VarId> {
-        match self.arena.borrow().get(self.id) {
+        self.arena.with_ref(|arena| match arena.get(self.id) {
             ExprNode::Var(id) => Some(*id),
             _ => None,
-        }
+        })
     }
 
     /// If this handle is a bare parameter, return its [`ParamId`].
     /// `None` for compound expressions.
     pub fn param_id(self) -> Option<ParamId> {
-        match self.arena.borrow().get(self.id) {
+        self.arena.with_ref(|arena| match arena.get(self.id) {
             ExprNode::Param(id) => Some(*id),
             _ => None,
-        }
+        })
     }
 
     /// Re-bind the parameter this handle references to `value`. Takes effect on
@@ -65,64 +69,66 @@ impl<'a> Expr<'a> {
     }
 
     pub fn pow(self, exponent: Self) -> Self {
-        let id = self.arena.borrow_mut().push(ExprNode::Pow(self.id, exponent.id));
+        self.assert_same_arena(exponent);
+        let id = self.arena.with_mut(|arena| arena.push(ExprNode::Pow(self.id, exponent.id)));
         Self::new(id, self.arena)
     }
 
     pub fn powi(self, n: i32) -> Self {
-        let id = {
-            let mut a = self.arena.borrow_mut();
-            let exp_id = a.constant(f64::from(n));
-            a.push(ExprNode::Pow(self.id, exp_id))
-        };
+        let id = self.arena.with_mut(|arena| {
+            let exp_id = arena.constant(f64::from(n));
+            arena.push(ExprNode::Pow(self.id, exp_id))
+        });
         Self::new(id, self.arena)
     }
 
     pub fn powf(self, n: f64) -> Self {
-        let id = {
-            let mut a = self.arena.borrow_mut();
-            let exp_id = a.constant(n);
-            a.push(ExprNode::Pow(self.id, exp_id))
-        };
+        let id = self.arena.with_mut(|arena| {
+            let exp_id = arena.constant(n);
+            arena.push(ExprNode::Pow(self.id, exp_id))
+        });
         Self::new(id, self.arena)
     }
 
     pub fn sin(self) -> Self {
-        let id = self.arena.borrow_mut().push(ExprNode::Sin(self.id));
+        let id = self.arena.with_mut(|arena| arena.push(ExprNode::Sin(self.id)));
         Self::new(id, self.arena)
     }
 
     pub fn cos(self) -> Self {
-        let id = self.arena.borrow_mut().push(ExprNode::Cos(self.id));
+        let id = self.arena.with_mut(|arena| arena.push(ExprNode::Cos(self.id)));
         Self::new(id, self.arena)
     }
 
     pub fn exp(self) -> Self {
-        let id = self.arena.borrow_mut().push(ExprNode::Exp(self.id));
+        let id = self.arena.with_mut(|arena| arena.push(ExprNode::Exp(self.id)));
         Self::new(id, self.arena)
     }
 
     pub fn log(self) -> Self {
-        let id = self.arena.borrow_mut().push(ExprNode::Log(self.id));
+        let id = self.arena.with_mut(|arena| arena.push(ExprNode::Log(self.id)));
         Self::new(id, self.arena)
     }
 
     pub fn abs(self) -> Self {
-        let id = self.arena.borrow_mut().push(ExprNode::Abs(self.id));
+        let id = self.arena.with_mut(|arena| arena.push(ExprNode::Abs(self.id)));
         Self::new(id, self.arena)
+    }
+
+    #[doc(hidden)]
+    pub fn __class(self) -> ExprClass {
+        self.arena.with_ref(|arena| classify_access(arena, self.id))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use super::Expr;
-    use crate::arena::ExprArena;
+    use crate::arena::{ExprArena, ExprArenaCell};
 
     #[test]
     fn set_param_value_rebinds_through_handle() {
-        let arena = RefCell::new(ExprArena::new());
+        let arena = ExprArenaCell::new(ExprArena::new());
         let pid = arena.borrow_mut().new_param(0.05);
         let node = arena.borrow_mut().param(pid);
         let p = Expr::new(node, &arena);
@@ -134,8 +140,18 @@ mod tests {
     #[test]
     #[should_panic(expected = "bare parameter handle")]
     fn set_param_value_panics_on_non_param() {
-        let arena = RefCell::new(ExprArena::new());
+        let arena = ExprArenaCell::new(ExprArena::new());
         let c = Expr::constant(&arena, 1.0);
         c.set_param_value(3.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "different arenas")]
+    fn combining_different_arenas_is_rejected() {
+        let left_arena = ExprArenaCell::new(ExprArena::new());
+        let right_arena = ExprArenaCell::new(ExprArena::new());
+        let left = Expr::constant(&left_arena, 1.0);
+        let right = Expr::constant(&right_arena, 2.0);
+        let _ = left + right;
     }
 }

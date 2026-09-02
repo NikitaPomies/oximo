@@ -2,7 +2,10 @@ use std::cell::{Cell, Ref, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
 
-use oximo_expr::{EvalError, Expr, ExprArena, ExprClass, ExprId, ParamId, VarId, classify};
+use oximo_expr::{
+    EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot, ExprClass, ExprId, ParamId, VarId,
+    classify,
+};
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smol_str::SmolStr;
@@ -22,6 +25,14 @@ use crate::sos::{
 use crate::var::{VarBuilder, Variable};
 
 const PAR_KIND_THRESHOLD: usize = 256;
+
+fn arena_key(arena: &ExprArenaCell) -> usize {
+    std::ptr::from_ref(arena) as usize
+}
+
+fn assert_expr_arena(expr: Expr<'_>, expected: usize) {
+    assert_eq!(arena_key(expr.arena), expected, "expression belongs to a different model");
+}
 
 /// The kind of mathematical program a `Model` represents.
 ///
@@ -148,11 +159,12 @@ impl ModelConstraints<'_> {
 /// `Model` uses interior mutability so the builder API can take `&self`
 /// references.
 ///
-/// Variables, constraints, and the objective are added through
-/// `RefCell`s under the hood.
+/// Registries use `RefCell`s. The expression arena uses synchronized interior
+/// mutability and isolated worker forks while large indexed families are
+/// prepared in parallel.
 pub struct Model {
     pub name: SmolStr,
-    pub(crate) arena: RefCell<ExprArena>,
+    pub(crate) arena: ExprArenaCell,
     pub(crate) variables: RefCell<Vec<Variable>>,
     pub(crate) var_names: RefCell<FxHashMap<SmolStr, VarId>>,
     pub(crate) parameters: RefCell<Vec<Parameter>>,
@@ -173,6 +185,10 @@ pub struct Model {
 }
 
 impl Model {
+    fn assert_expr_belongs(&self, expr: Expr<'_>) {
+        assert_expr_arena(expr, arena_key(&self.arena));
+    }
+
     /// Deep-copy every registry while preserving stable IDs.
     pub(crate) fn clone_preserving_ids_with_capacity(
         &self,
@@ -207,7 +223,7 @@ impl Model {
 
         Self {
             name: self.name.clone(),
-            arena: RefCell::new(
+            arena: ExprArenaCell::new(
                 self.arena.borrow().__clone_with_additional_capacity(additional_expr_nodes),
             ),
             variables: RefCell::new(cloned_variables),
@@ -252,7 +268,7 @@ impl Model {
     pub fn new(name: impl Into<SmolStr>) -> Self {
         Self {
             name: name.into(),
-            arena: RefCell::new(ExprArena::new()),
+            arena: ExprArenaCell::new(ExprArena::new()),
             variables: RefCell::new(Vec::new()),
             var_names: RefCell::new(FxHashMap::default()),
             parameters: RefCell::new(Vec::new()),
@@ -349,7 +365,12 @@ impl Model {
         self.variables.borrow()
     }
 
-    pub fn arena(&self) -> Ref<'_, ExprArena> {
+    /// Return an immutable copy-on-write snapshot of the expression arena.
+    ///
+    /// The snapshot is cheap to create, but it is not live.
+    /// Subsequent model mutations (including parameter rebinding) are
+    /// not visible through a snapshot that is already held.
+    pub fn arena(&self) -> ExprArenaSnapshot<'_> {
         self.arena.borrow()
     }
 
@@ -623,6 +644,7 @@ impl Model {
         name: impl Into<SmolStr>,
         c: ConstraintExpr<'_>,
     ) -> ConstraintId {
+        self.assert_expr_belongs(c.lhs);
         let (lower, upper) = match c.sense {
             Sense::Le => (f64::NEG_INFINITY, c.rhs),
             Sense::Ge => (c.rhs, f64::INFINITY),
@@ -731,6 +753,7 @@ impl Model {
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
     {
+        self.assert_expr_belongs(mid);
         if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
             self.register_constraint(name.into(), mid.id, lower, upper);
         } else {
@@ -836,6 +859,7 @@ impl Model {
         let terms: Vec<ExprId> = terms
             .into_iter()
             .map(|e| {
+                self.assert_expr_belongs(e);
                 assert!(
                     classify(&arena, e.id) == ExprClass::Linear,
                     "SOC constraint {name:?} has a non-affine term"
@@ -844,6 +868,7 @@ impl Model {
             })
             .collect();
         assert!(!terms.is_empty(), "SOC constraint {name:?} has no terms");
+        self.assert_expr_belongs(bound);
         assert!(
             classify(&arena, bound.id) == ExprClass::Linear,
             "SOC constraint {name:?} has a non-affine bound"
@@ -1114,6 +1139,7 @@ impl Model {
     }
 
     fn set_objective(&self, expr: Expr<'_>, sense: ObjectiveSense) {
+        self.assert_expr_belongs(expr);
         *self.objective.borrow_mut() = Some(Objective { expr: expr.id, sense });
         self.objective_declared.set(true);
         self.cached_kind.set(None);
@@ -1531,6 +1557,17 @@ mod tests {
     }
 
     #[test]
+    fn arena_snapshot_is_not_live_after_parameter_rebind() {
+        let m = Model::new("snapshot");
+        let param = m.__param("p", 1.0);
+        let id = param.param_id().unwrap();
+        let snapshot = m.arena();
+        m.set_param(param, 2.0);
+        assert!((snapshot.param_value(id) - 1.0).abs() < f64::EPSILON);
+        assert!((m.param_value(id) - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn set_param_invalidates_kind_cache() {
         let m = Model::new("p");
         let p = m.__param("p", 1.0);
@@ -1673,5 +1710,16 @@ mod tests {
         }
         assert_eq!(nlp.infer_kind(false), ModelKind::NLP);
         assert_eq!(nlp.infer_kind(false), nlp.infer_kind(true));
+    }
+
+    #[test]
+    fn arena_snapshot_allows_nested_model_reads() {
+        let model = Model::new("nested_reads");
+        let x = model.__var("x").build();
+        model.__minimize(x);
+
+        let arena = model.arena();
+        assert_eq!(model.kind(), ModelKind::LP);
+        assert!(matches!(arena.get(x.id), oximo_expr::ExprNode::Var(_)));
     }
 }
