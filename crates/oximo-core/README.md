@@ -46,7 +46,7 @@ The modeling surface is a set of macros: `variable!`, `constraint!`, `objective!
 `sum!`, `set!`, and `param!`. Each expands to the underlying typed model operations,
 so there is no runtime cost and full compile-time type/borrow checking is preserved.
 
-`Model` uses interior mutability (`RefCell`), so a macro can take `&m`, register
+`Model` uses interior mutability, so a macro can take `&m`, register
 variables/constraints, and the `variable!`-introduced bindings (`x`, `y`, ...) are
 locals you can use immediately.
 
@@ -68,7 +68,7 @@ m.constraints()     // ModelConstraints<'_>
 m.constraints().algebraic()          // typed algebraic registry
 m.constraints().second_order_cones() // typed explicit-SOC registry
 m.constraints().special_ordered_sets() // typed SOS registry
-m.arena()          // Ref<'_, ExprArena>
+m.arena()          // ExprArenaSnapshot<'_>
 m.kind()           // ModelKind, cached, invalidated on change
 m.try_objective()  // Result<Objective, Error>
 m.variable_id("x") // Option<VarId>
@@ -133,6 +133,10 @@ variable!(m, lower[k] <= w[k in i] <= upper[k]);
 // Filtered family: keep only matching keys (no trivial elements built).
 variable!(m, d[(i, j) in rc if i == j] >= 0.0);
 ```
+
+Large indexed variable, parameter, algebraic, range, SOC, and SOS families are
+prepared in parallel when the family is large enough, then registered serially
+in set iteration order.
 
 ## Domain
 
