@@ -221,7 +221,7 @@ impl ArenaAccess for ExprArena {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[doc(hidden)]
 pub struct FrozenExprArena {
     nodes: Arc<Vec<ExprNode>>,
@@ -654,6 +654,13 @@ impl ExprArenaBatchGuard<'_> {
             }
         }
 
+        // The remaps retain the fork base lengths needed by remap_node and
+        // ExprIdRemap::apply. Release the base snapshots before reserving so
+        // Arc::make_mut can extend the canonical node vector in place.
+        for fork in forks.iter_mut() {
+            drop(std::mem::take(&mut fork.base));
+        }
+
         let mut staged = Vec::with_capacity(additional);
         for (fork, remap) in forks.iter_mut().zip(&remaps) {
             for node in &mut fork.nodes {
@@ -767,6 +774,22 @@ mod tests {
         let value = evaluate(&arena, root, &values).unwrap();
         let expected = ((0.5_f64.sin() * 0.25_f64.cos()).exp() / 2.5).powi(2);
         assert!((value - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn merge_releases_fork_base_before_reserving() {
+        let cell = ExprArenaCell::new(ExprArena::new());
+        let mut batch = cell.__begin_batch();
+        let snapshot = batch.snapshot();
+        let mut forks = vec![cell.__with_fork(snapshot.clone(), || Expr::constant(&cell, 1.0))];
+        drop(snapshot);
+        let nodes = Arc::as_ptr(&batch.arena.nodes);
+
+        let remaps = batch.merge(&mut forks);
+
+        assert_eq!(Arc::as_ptr(&batch.arena.nodes), nodes);
+        assert_eq!(remaps[0].local_base, 0);
+        assert_eq!(remaps[0].local_len, 1);
     }
 
     #[test]
