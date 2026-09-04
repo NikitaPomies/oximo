@@ -1,7 +1,7 @@
 use crate::arena::{ExprArenaCell, ExprId, ExprNode, ParamId, VarId};
 use crate::classify::{ExprClass, classify_access};
 
-/// Lightweight handle to a node in an [`ExprArena`].
+/// Lightweight handle to a node in an [`ExprArenaCell`].
 ///
 /// Carries a borrow of the arena cell so operator overloads can push new nodes
 /// during arithmetic. `Expr` is `Copy`, so users freely reuse a variable
