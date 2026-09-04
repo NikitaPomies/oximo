@@ -954,6 +954,7 @@ impl Model {
         lower: f64,
         upper: f64,
     ) -> ConstraintId {
+        self.assert_expr_belongs(lhs);
         self.register_constraint(name.into(), lhs.id, lower, upper)
     }
 
@@ -1071,6 +1072,7 @@ impl Model {
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
     {
+        self.assert_expr_belongs(mid);
         if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
             self.register_constraint(self.next_auto_name(), mid.id, lower, upper);
         } else {
