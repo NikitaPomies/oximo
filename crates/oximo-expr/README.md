@@ -2,21 +2,27 @@
 
 Arena-allocated expression tree for [oximo](https://github.com/oximo-rs/oximo).
 
-All expressions in oximo are nodes in a single `ExprArena` owned by the `Model`. User code holds lightweight `Expr` handles, a `(ExprId, &RefCell<ExprArena>)` pair. Copying an `Expr` copies an ID, not a subtree. Operator overloads collapse linear combinations into a single `Linear` node so LP/MILP construction never traverses an `Add(Mul(Const, Var), ...)` tree.
+All expressions in oximo are nodes in a single `ExprArena` owned by the `Model` through an `ExprArenaCell`. User code holds lightweight `Expr` handles, an `(ExprId, &ExprArenaCell)` pair. Copying an `Expr` copies an ID, not a subtree. Operator overloads collapse linear combinations into a single `Linear` node so LP/MILP construction never traverses an `Add(Mul(Const, Var), ...)` tree.
+
+`ExprArenaCell` provides synchronized interior mutability, so expression handles can be shared by indexed-family callbacks. Large indexed builds use isolated worker-local arena forks and merge their nodes in set order before serial model registration. Ordinary scalar expression construction keeps the same arena-backed API.
+
+`ExprArenaCell::borrow()` returns an `ExprArenaSnapshot`, a cheap immutable
+copy-on-write snapshot.
 
 This crate is the fundamental layer. End users depend on `oximo-core`, which re-exports all types from here so a separate `oximo-expr` import is not needed.
 
 ## Key types
 
-| Type          | Description                                             |
-|---------------|---------------------------------------------------------|
-| `ExprArena`   | Backing store, a typed `Vec<ExprNode>`                  |
-| `ExprId`      | Newtype `u32` index into an arena                       |
-| `ExprNode`    | Enum of all node kinds (see below)                      |
-| `Expr<'a>`    | Lightweight handle: `id` + borrow of the arena. `Copy`. |
-| `VarId`       | Opaque variable index                                   |
-| `ParamId`     | Opaque parameter index                                  |
-| `LinearTerms` | Extracted `Vec<(VarId, f64)>` + constant                |
+| Type            | Description                                             |
+|-----------------|---------------------------------------------------------|
+| `ExprArena`     | Contiguous backing store of `ExprNode` values           |
+| `ExprArenaCell` | Synchronized owner used by expression handles           |
+| `ExprId`        | Newtype `u32` index into an arena                       |
+| `ExprNode`      | Enum of all node kinds (see below)                      |
+| `Expr<'a>`      | Lightweight handle: `id` + borrow of the arena. `Copy`. |
+| `VarId`         | Opaque variable index                                   |
+| `ParamId`       | Opaque parameter index                                  |
+| `LinearTerms`   | Extracted `Vec<(VarId, f64)>` + constant                |
 
 ### `ExprNode` variants
 
