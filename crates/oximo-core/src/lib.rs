@@ -47,8 +47,8 @@ pub use var::{VarBuilder, Variable, var_name};
 // Re-export the expression handle so downstream code does not need a separate
 // `oximo-expr` import.
 pub use oximo_expr::{
-    EvalError, Expr, ExprArena, ExprId, ExprNode, ParamId, VarId, describe_nonlinear_term, dot,
-    render_expr, render_linear_terms,
+    EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot, ExprArenaWriteGuard, ExprId,
+    ExprNode, ParamId, VarId, describe_nonlinear_term, dot, render_expr, render_linear_terms,
 };
 
 pub use oximo_macros::{

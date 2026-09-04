@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::smallvec;
 
-use crate::arena::{ExprArena, ExprId, ExprNode, VarId};
+use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode, VarId};
 
 /// Coefficients of a linear expression: `sum(coeff * var) + constant`.
 ///
@@ -78,8 +78,8 @@ impl CoeffAccum {
 ///
 /// When `resolve_params` is set, an [`ExprNode::Param`] folds to its current
 /// arena value and counts as a constant.
-fn as_linear<'a>(
-    arena: &'a ExprArena,
+fn as_linear<'a, A: ArenaAccess + ?Sized>(
+    arena: &'a A,
     id: ExprId,
     resolve_params: bool,
 ) -> Option<LinearTerms<'a>> {
@@ -143,7 +143,7 @@ fn as_linear<'a>(
 }
 
 /// Materialize linear terms into a fresh `Linear` node in the arena.
-fn push_linear(arena: &mut ExprArena, t: LinearTerms<'_>) -> ExprId {
+fn push_linear(arena: &mut (impl ArenaAccess + ?Sized), t: LinearTerms<'_>) -> ExprId {
     let mut coeffs = t.coeffs.into_owned();
     coeffs.retain(|(_, c)| *c != 0.0);
     arena.push(ExprNode::Linear { coeffs, constant: t.constant })
@@ -151,7 +151,11 @@ fn push_linear(arena: &mut ExprArena, t: LinearTerms<'_>) -> ExprId {
 
 /// Build `lhs + rhs`, preserving the linear fast-path when both sides are
 /// linear. Falls back to an n-ary `Add` node otherwise.
-pub(crate) fn add_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
+pub(crate) fn add_into(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    lhs: ExprId,
+    rhs: ExprId,
+) -> ExprId {
     if let (Some(lt), Some(rt)) = (as_linear(arena, lhs, false), as_linear(arena, rhs, false)) {
         let constant = lt.constant + rt.constant;
         let mut acc = CoeffAccum::with_capacity(lt.coeffs.len() + rt.coeffs.len());
@@ -171,7 +175,7 @@ pub(crate) fn add_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
 ///
 /// # Panics
 /// Panics if `ids` is empty (callers supply at least one term).
-pub(crate) fn add_n(arena: &mut ExprArena, ids: &[ExprId]) -> ExprId {
+pub(crate) fn add_n(arena: &mut (impl ArenaAccess + ?Sized), ids: &[ExprId]) -> ExprId {
     match ids {
         [] => panic!("add_n on an empty term list"),
         [one] => *one,
@@ -180,14 +184,22 @@ pub(crate) fn add_n(arena: &mut ExprArena, ids: &[ExprId]) -> ExprId {
 }
 
 /// Build `lhs - rhs`. Same linear fast-path as `add_into`.
-pub(crate) fn sub_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
+pub(crate) fn sub_into(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    lhs: ExprId,
+    rhs: ExprId,
+) -> ExprId {
     let neg = neg_into(arena, rhs);
     add_into(arena, lhs, neg)
 }
 
 /// Build `lhs * rhs`. If either side is constant and the other is linear, we
 /// stay on the linear fast-path. Otherwise produce a generic n-ary `Mul`.
-pub(crate) fn mul_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
+pub(crate) fn mul_into(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    lhs: ExprId,
+    rhs: ExprId,
+) -> ExprId {
     if let ExprNode::Const(c) = *arena.get(lhs) {
         if let Some(t) = as_linear(arena, rhs, false) {
             let constant = t.constant * c;
@@ -214,7 +226,11 @@ pub(crate) fn mul_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
 /// Build `num / den`. If `den` is a nonzero constant `c`, fold to `num * (1/c)`
 /// so a constant-denominator division stays on the linear fast-path. Otherwise
 /// produce a `Div` node (always nonlinear, even when the numerator is linear).
-pub(crate) fn div_into(arena: &mut ExprArena, num: ExprId, den: ExprId) -> ExprId {
+pub(crate) fn div_into(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    num: ExprId,
+    den: ExprId,
+) -> ExprId {
     if let ExprNode::Const(c) = *arena.get(den) {
         if c != 0.0 {
             if let Some(t) = as_linear(arena, num, false) {
@@ -234,7 +250,7 @@ pub(crate) fn div_into(arena: &mut ExprArena, num: ExprId, den: ExprId) -> ExprI
 }
 
 /// Build `-rhs`, preserving linearity.
-pub(crate) fn neg_into(arena: &mut ExprArena, rhs: ExprId) -> ExprId {
+pub(crate) fn neg_into(arena: &mut (impl ArenaAccess + ?Sized), rhs: ExprId) -> ExprId {
     if let Some(t) = as_linear(arena, rhs, false) {
         let constant = -t.constant;
         let mut coeffs = t.coeffs.into_owned();

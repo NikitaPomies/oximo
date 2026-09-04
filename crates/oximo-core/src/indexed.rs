@@ -195,19 +195,18 @@ impl<'a, K, F, const N: usize> Index<[usize; N]> for IndexedFamily<'a, K, F> {
     }
 }
 
-/// Build [`Storage`] from a family's keys and optional dense axes, registering
-/// each element through `make`.
+/// Build [`Storage`] from ordered keys and their already-registered handles.
 pub(crate) fn build_storage<'a>(
     keys: Vec<IndexKey>,
     axes: Option<Box<[Axis]>>,
-    mut make: impl FnMut(&IndexKey) -> Expr<'a>,
+    values: Vec<Expr<'a>>,
 ) -> Storage<'a> {
+    assert_eq!(keys.len(), values.len(), "indexed storage key/value length mismatch");
     if let Some(axes) = axes {
         let total = keys.len();
         let mut data: Vec<Option<Expr<'a>>> = vec![None; total];
         let mut kept: Vec<Option<IndexKey>> = vec![None; total];
-        for key in keys {
-            let expr = make(&key);
+        for (key, expr) in keys.into_iter().zip(values) {
             let off = grid_offset(&axes, &key).expect("dense grid key out of range");
             data[off] = Some(expr);
             kept[off] = Some(key);
@@ -216,11 +215,7 @@ pub(crate) fn build_storage<'a>(
         let kept = kept.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
         Storage::Dense { data, keys: kept, axes }
     } else {
-        let mut entries = FxHashMap::default();
-        for key in keys {
-            let expr = make(&key);
-            entries.insert(key, expr);
-        }
+        let entries = keys.into_iter().zip(values).collect::<FxHashMap<_, _>>();
         Storage::Sparse(entries)
     }
 }

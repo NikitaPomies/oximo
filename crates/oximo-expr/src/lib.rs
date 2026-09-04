@@ -12,7 +12,10 @@ mod render;
 mod simplify;
 mod visit;
 
-pub use arena::{ExprArena, ExprId, ExprNode, ParamId, VarId};
+pub use arena::{
+    ExprArena, ExprArenaBatchGuard, ExprArenaCell, ExprArenaSnapshot, ExprArenaWriteGuard, ExprId,
+    ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ParamId, VarId,
+};
 pub use classify::{ExprClass, classify};
 pub use eval::{EvalContext, EvalError, evaluate};
 pub use handle::Expr;
