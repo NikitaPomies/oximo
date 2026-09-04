@@ -752,3 +752,29 @@ fn persistent_error_discards_resident_state() {
     assert!(format!("{solver:?}").contains("resident: false"));
     assert!(solver.solve(&m, &PounceOptions::default()).unwrap().has_solution());
 }
+
+#[test]
+fn semi_domains_are_rejected_consistently() {
+    for (label, model) in
+        [("semi-continuous", semi_model(false)), ("semi-integer", semi_model(true))]
+    {
+        let result = Pounce.solve(&model, &PounceOptions::default()).unwrap_err();
+        assert!(matches!(result, SolverError::Backend(_)), "{label} cold: {result}");
+
+        let mut persistent = Pounce.persistent();
+        let result = persistent.solve(&model, &PounceOptions::default()).unwrap_err();
+        assert!(matches!(result, SolverError::Backend(_)), "{label} persistent: {result}");
+    }
+}
+
+fn semi_model(integral: bool) -> Model {
+    let m = Model::new("semi");
+    if integral {
+        variable!(m, s <= 10, SemiInt(5.0));
+        objective!(m, Min, s);
+    } else {
+        variable!(m, s <= 10.0, SemiCont(5.0));
+        objective!(m, Min, s);
+    }
+    m
+}

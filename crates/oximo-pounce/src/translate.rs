@@ -67,17 +67,31 @@ pub(crate) struct Outcome {
     pub raw_log: Option<String>,
 }
 
+pub(crate) fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
+    let vars = model.variables();
+    if let Some(v) = vars.iter().find(|v| v.domain.semi_threshold().is_some()) {
+        return Err(SolverError::Backend(format!(
+            "variable {} has a semicontinuous/semi-integer domain, \
+                which POUNCE does not support",
+            v.name
+        )));
+    }
+    Ok(())
+}
+
 /// Translate `model`, solve with POUNCE (cold), and map the outcome.
 ///
 /// # Errors
 ///
-/// [`SolverError::UnsupportedKind`] for integer/cone model kinds and
+/// [`SolverError::UnsupportedKind`] for integer/cone model kinds,
+/// [`SolverError::Backend`] for a model with semi-continuous/semi-integer variables and
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
+    reject_semi_domains(model)?;
     let route = crate::convex::route(model, opts)?;
     if route != crate::convex::Route::Nlp {
         return crate::convex::solve(model, opts, route);

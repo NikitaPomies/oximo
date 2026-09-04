@@ -8,7 +8,7 @@ use oximo_solver::{Solver, SolverError, SolverResult};
 
 use crate::convex::{self, Route};
 use crate::options::PounceOptions;
-use crate::translate::{WarmStart, assemble, run_nlp_with_retries, setup};
+use crate::translate::{WarmStart, assemble, reject_semi_domains, run_nlp_with_retries, setup};
 
 #[cfg(feature = "enzyme")]
 use crate::exact as backend;
@@ -82,6 +82,8 @@ impl PouncePersistent {
         if model.has_active_sos_constraints() {
             return Err(SolverError::UnsupportedSos);
         }
+        reject_semi_domains(model)?;
+
         let route = convex::route(model, opts)?;
         if route == Route::Nlp {
             return self.solve_nlp(model, opts);
