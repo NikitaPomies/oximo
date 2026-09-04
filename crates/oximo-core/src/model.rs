@@ -3,11 +3,11 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use oximo_expr::{
-    EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot, ExprClass, ExprId, ParamId, VarId,
-    classify,
+    EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot, ExprClass, ExprId, ExprIdRemap,
+    ParamId, VarId, classify,
 };
 use rayon::prelude::*;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
 use crate::constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
@@ -25,6 +25,20 @@ use crate::sos::{
 use crate::var::{VarBuilder, Variable};
 
 const PAR_KIND_THRESHOLD: usize = 256;
+const PAR_INDEXED_METADATA_THRESHOLD: usize = 1_024;
+const PAR_INDEXED_ALGEBRAIC_THRESHOLD: usize = 512;
+const PAR_INDEXED_RANGE_THRESHOLD: usize = 512;
+const PAR_INDEXED_SOC_THRESHOLD: usize = 256;
+const PAR_INDEXED_SOS_THRESHOLD: usize = 512;
+
+fn indexed_parallel(len: usize, forced: Option<bool>, threshold: usize) -> bool {
+    forced.unwrap_or(len >= threshold && rayon::current_num_threads() > 1)
+}
+
+fn indexed_chunk_size(len: usize) -> usize {
+    let chunks = rayon::current_num_threads().saturating_mul(4).max(1);
+    len.div_ceil(chunks).max(1)
+}
 
 fn arena_key(arena: &ExprArenaCell) -> usize {
     std::ptr::from_ref(arena) as usize
@@ -32,6 +46,124 @@ fn arena_key(arena: &ExprArenaCell) -> usize {
 
 fn assert_expr_arena(expr: Expr<'_>, expected: usize) {
     assert_eq!(arena_key(expr.arena), expected, "expression belongs to a different model");
+}
+
+fn validate_batch_names<V>(
+    existing: &FxHashMap<SmolStr, V>,
+    names: impl IntoIterator<Item = SmolStr>,
+    kind: &str,
+) {
+    let mut batch = FxHashSet::default();
+    for name in names {
+        assert!(!existing.contains_key(&name), "{kind} name {name:?} already registered");
+        assert!(batch.insert(name.clone()), "{kind} name {name:?} occurs more than once");
+    }
+}
+
+#[derive(Debug)]
+struct PendingVar {
+    key: IndexKey,
+    name: SmolStr,
+    lb: f64,
+    ub: f64,
+}
+
+#[derive(Debug)]
+struct PendingParam {
+    key: IndexKey,
+    name: SmolStr,
+    value: f64,
+}
+
+#[derive(Debug)]
+struct PendingConstraint {
+    name: SmolStr,
+    lhs: ExprId,
+    lower: f64,
+    upper: f64,
+}
+
+impl PendingConstraint {
+    fn from_expr(name: SmolStr, constraint: ConstraintExpr<'_>) -> Self {
+        let (lower, upper) = match constraint.sense {
+            Sense::Le => (f64::NEG_INFINITY, constraint.rhs),
+            Sense::Ge => (constraint.rhs, f64::INFINITY),
+            Sense::Eq => (constraint.rhs, constraint.rhs),
+        };
+        assert!(
+            !lower.is_nan() && !upper.is_nan(),
+            "constraint {name:?} has NaN bound (lower={lower}, upper={upper})"
+        );
+        Self { name, lhs: constraint.lhs.id, lower, upper }
+    }
+
+    fn remap(&mut self, remap: ExprIdRemap) {
+        self.lhs = remap.apply(self.lhs);
+    }
+}
+
+fn prepare_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
+    name: String,
+    mid: Expr<'a>,
+    lo: B1,
+    hi: B2,
+) -> Vec<PendingConstraint> {
+    if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
+        && mid.__class() == ExprClass::Linear
+    {
+        assert!(
+            !lower.is_nan() && !upper.is_nan(),
+            "constraint {name:?} has NaN bound (lower={lower}, upper={upper})"
+        );
+        vec![PendingConstraint { name: name.into(), lhs: mid.id, lower, upper }]
+    } else {
+        vec![
+            PendingConstraint::from_expr(format!("{name}_lo").into(), mid.ge(lo)),
+            PendingConstraint::from_expr(format!("{name}_hi").into(), mid.le(hi)),
+        ]
+    }
+}
+
+#[derive(Debug)]
+struct PendingSoc {
+    name: SmolStr,
+    terms: Vec<ExprId>,
+    bound: ExprId,
+}
+
+impl PendingSoc {
+    fn remap(&mut self, remap: ExprIdRemap) {
+        for term in &mut self.terms {
+            *term = remap.apply(*term);
+        }
+        self.bound = remap.apply(self.bound);
+    }
+}
+
+fn prepare_soc<'a>(
+    name: SmolStr,
+    terms: impl IntoIterator<Item = Expr<'a>>,
+    bound: Expr<'a>,
+) -> PendingSoc {
+    let terms: Vec<ExprId> = terms
+        .into_iter()
+        .map(|term| {
+            assert!(
+                term.__class() == ExprClass::Linear,
+                "SOC constraint {name:?} has a non-affine term"
+            );
+            term.id
+        })
+        .collect();
+    assert!(!terms.is_empty(), "SOC constraint {name:?} has no terms");
+    assert!(bound.__class() == ExprClass::Linear, "SOC constraint {name:?} has a non-affine bound");
+    PendingSoc { name, terms, bound: bound.id }
+}
+
+#[derive(Debug)]
+struct PendingSos {
+    name: SmolStr,
+    members: Vec<SosMember>,
 }
 
 /// The kind of mathematical program a `Model` represents.
@@ -335,6 +467,38 @@ impl Model {
         Expr::from_var(&self.arena, id)
     }
 
+    fn register_vars_batch<'a>(&'a self, items: &[PendingVar], domain: Domain) -> Vec<Expr<'a>> {
+        let mut names = self.var_names.borrow_mut();
+        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "variable");
+        let mut vars = self.variables.borrow_mut();
+        let final_count = vars.len().checked_add(items.len()).expect("variable count overflow");
+        if final_count > 0 {
+            u32::try_from(final_count - 1).expect("variable count overflow");
+        }
+        vars.reserve(items.len());
+        names.reserve(items.len());
+
+        let mut arena = self.arena.borrow_mut();
+        arena.__reserve_nodes(items.len());
+        let mut handles = Vec::with_capacity(items.len());
+        for item in items {
+            let id = VarId(u32::try_from(vars.len()).expect("variable count overflow"));
+            vars.push(Variable {
+                id,
+                name: item.name.clone(),
+                domain,
+                lb: item.lb,
+                ub: item.ub,
+                initial: None,
+            });
+            names.insert(item.name.clone(), id);
+            let node = arena.var(id);
+            handles.push(Expr::new(node, &self.arena));
+        }
+        self.cached_kind.set(None);
+        handles
+    }
+
     /// Macro-facing entry point backing the indexed form of the `variable!`
     /// macro. Not part of the stable public API.
     #[doc(hidden)]
@@ -353,6 +517,7 @@ impl Model {
             lb_by: None,
             ub_by: None,
             domain: Domain::Real,
+            parallel: None,
             _k: PhantomData,
         }
     }
@@ -523,6 +688,8 @@ impl Model {
     /// (`param!(m, cost[i in items] = data[i])`). Registers one scalar parameter
     /// per key, evaluating `value` on the typed key, and returns an
     /// [`IndexedParam`]. Not part of the stable public API.
+    /// Large families may evaluate `value` concurrently, so it must be safe to
+    /// call from multiple worker threads.
     ///
     /// # Panics
     ///
@@ -532,22 +699,73 @@ impl Model {
         &'a self,
         name: impl Into<String>,
         set: &Set<K>,
-        mut value: F,
+        value: F,
     ) -> IndexedParam<'a, K>
     where
         K: FromIndexKey,
-        F: FnMut(K) -> f64,
+        F: Fn(K) -> f64 + Send + Sync,
     {
-        let base = name.into();
+        self.indexed_param_with(name.into(), set, &value, None)
+    }
+
+    fn indexed_param_with<'a, K, F>(
+        &'a self,
+        base: String,
+        set: &Set<K>,
+        value: &F,
+        forced_parallel: Option<bool>,
+    ) -> IndexedParam<'a, K>
+    where
+        K: FromIndexKey,
+        F: Fn(K) -> f64 + Send + Sync,
+    {
         let axes = set.axes().map(Box::from);
         let keys: Vec<IndexKey> = set.iter().collect();
-        let make = |key: &IndexKey| -> Expr<'a> {
-            let pname: SmolStr = format_index_name(&base, key).into();
-            let v = value(K::from_index_key(key));
-            self.register_param(pname, v)
+        if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_METADATA_THRESHOLD) {
+            let handles = keys
+                .iter()
+                .map(|key| {
+                    let name: SmolStr = format_index_name(&base, key).into();
+                    self.register_param(name, value(K::from_index_key(key)))
+                })
+                .collect();
+            let storage = build_storage(keys, axes, handles);
+            return IndexedFamily { storage, _marker: PhantomData };
+        }
+        let prepare = |key: &IndexKey| PendingParam {
+            key: key.clone(),
+            name: format_index_name(&base, key).into(),
+            value: value(K::from_index_key(key)),
         };
-        let storage = build_storage(keys, axes, make);
+        let prepared: Vec<_> = keys.par_iter().map(prepare).collect();
+        let handles = self.register_params_batch(&prepared);
+        let keys = prepared.into_iter().map(|item| item.key).collect();
+        let storage = build_storage(keys, axes, handles);
         IndexedFamily { storage, _marker: PhantomData }
+    }
+
+    fn register_params_batch<'a>(&'a self, items: &[PendingParam]) -> Vec<Expr<'a>> {
+        let mut names = self.param_names.borrow_mut();
+        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "parameter");
+        let mut params = self.parameters.borrow_mut();
+        let mut arena = self.arena.borrow_mut();
+        let final_count = params.len().checked_add(items.len()).expect("parameter count overflow");
+        if final_count > 0 {
+            u32::try_from(final_count - 1).expect("parameter count overflow");
+        }
+        params.reserve(items.len());
+        names.reserve(items.len());
+        arena.__reserve_nodes(items.len());
+
+        let mut handles = Vec::with_capacity(items.len());
+        for item in items {
+            let id = arena.new_param(item.value);
+            let node = arena.param(id);
+            params.push(Parameter { id, name: item.name.clone() });
+            names.insert(item.name.clone(), id);
+            handles.push(Expr::new(node, &self.arena));
+        }
+        handles
     }
 
     /// Re-bind the parameter at `key` of an indexed family to `value`. Takes
@@ -681,6 +899,32 @@ impl Model {
         id
     }
 
+    fn register_constraints_batch(&self, items: Vec<PendingConstraint>) {
+        let mut names = self.constraint_names.borrow_mut();
+        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "constraint");
+        let mut constraints = self.constraints.borrow_mut();
+        let final_count =
+            constraints.len().checked_add(items.len()).expect("constraint count overflow");
+        if final_count > 0 {
+            u32::try_from(final_count - 1).expect("constraint count overflow");
+        }
+        constraints.reserve(items.len());
+        names.reserve(items.len());
+        for item in items {
+            let id =
+                ConstraintId(u32::try_from(constraints.len()).expect("constraint count overflow"));
+            constraints.push(Constraint {
+                name: item.name.clone(),
+                lhs: item.lhs,
+                lower: item.lower,
+                upper: item.upper,
+                active: true,
+            });
+            names.insert(item.name, id);
+        }
+        self.cached_kind.set(None);
+    }
+
     /// A fresh unique auto-name `_c{n}`, skipping any a user already took.
     fn next_auto_name(&self) -> SmolStr {
         loop {
@@ -729,17 +973,75 @@ impl Model {
     /// (any [`FromIndexKey`]: `i64`, `i32`, `usize`, `String`, raw `IndexKey`, or
     /// tuples up to arity 4). Not part of the stable public API.
     #[doc(hidden)]
-    pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, mut rule: F)
+    pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, rule: F)
     where
         K: FromIndexKey,
-        F: FnMut(K) -> ConstraintExpr<'a>,
+        F: Fn(K) -> ConstraintExpr<'a> + Send + Sync,
     {
-        for key in set {
-            let typed = K::from_index_key(&key);
-            let c = rule(typed);
-            let name: SmolStr = format_index_name(name_prefix, &key).into();
-            self.__add_constraint(name, c);
+        self.add_constraints_over_with(name_prefix, set, &rule, None);
+    }
+
+    fn add_constraints_over_with<'a, K, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        rule: &F,
+        forced_parallel: Option<bool>,
+    ) where
+        K: FromIndexKey,
+        F: Fn(K) -> ConstraintExpr<'a> + Send + Sync,
+    {
+        let keys: Vec<IndexKey> = set.iter().collect();
+        if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_ALGEBRAIC_THRESHOLD) {
+            for key in &keys {
+                let constraint = rule(K::from_index_key(key));
+                self.assert_expr_belongs(constraint.lhs);
+                let name: SmolStr = format_index_name(name_prefix, key).into();
+                self.__add_constraint(name, constraint);
+            }
+            return;
         }
+
+        let arena = &self.arena;
+        let expected_arena = arena_key(arena);
+        let mut batch = arena.__begin_batch();
+        let snapshot = batch.snapshot();
+        let chunk_size = indexed_chunk_size(keys.len());
+        let mut forks: Vec<_> = keys
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                arena.__with_fork(snapshot.clone(), || {
+                    chunk
+                        .iter()
+                        .map(|key| {
+                            let name = format_index_name(name_prefix, key).into();
+                            let constraint = rule(K::from_index_key(key));
+                            assert_expr_arena(constraint.lhs, expected_arena);
+                            PendingConstraint::from_expr(name, constraint)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        drop(snapshot);
+        {
+            let existing = self.constraint_names.borrow();
+            validate_batch_names(
+                &existing,
+                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                "constraint",
+            );
+        }
+        let remaps = batch.merge(&mut forks);
+        let mut pending = Vec::with_capacity(keys.len());
+        for (mut fork, remap) in forks.into_iter().zip(remaps) {
+            for item in &mut fork.value {
+                item.remap(remap);
+            }
+            pending.extend(fork.value);
+        }
+        drop(batch);
+        self.register_constraints_batch(pending);
     }
 
     /// Macro-facing entry point for a two-sided range `lo <= mid <= hi`.
@@ -799,18 +1101,77 @@ impl Model {
         &'a self,
         name: &str,
         set: &Set<K>,
-        mut rule: F,
+        rule: F,
     ) where
         K: FromIndexKey,
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
-        F: FnMut(K) -> (Expr<'a>, B1, B2),
+        F: Fn(K) -> (Expr<'a>, B1, B2) + Send + Sync,
     {
-        for key in set {
-            let (mid, lo, hi) = rule(K::from_index_key(&key));
-            let row_name = format_index_name(name, &key);
-            self.__add_range(&row_name, mid, lo, hi);
+        self.add_range_constraints_over_with(name, set, &rule, None);
+    }
+
+    fn add_range_constraints_over_with<'a, K, B1, B2, F>(
+        &'a self,
+        name: &str,
+        set: &Set<K>,
+        rule: &F,
+        forced_parallel: Option<bool>,
+    ) where
+        K: FromIndexKey,
+        B1: IntoRhs<'a>,
+        B2: IntoRhs<'a>,
+        F: Fn(K) -> (Expr<'a>, B1, B2) + Send + Sync,
+    {
+        let keys: Vec<IndexKey> = set.iter().collect();
+        if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_RANGE_THRESHOLD) {
+            for key in &keys {
+                let (mid, lo, hi) = rule(K::from_index_key(key));
+                self.assert_expr_belongs(mid);
+                self.__add_range(&format_index_name(name, key), mid, lo, hi);
+            }
+            return;
         }
+
+        let arena = &self.arena;
+        let expected_arena = arena_key(arena);
+        let mut batch = arena.__begin_batch();
+        let snapshot = batch.snapshot();
+        let chunk_size = indexed_chunk_size(keys.len());
+        let mut forks: Vec<_> = keys
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                arena.__with_fork(snapshot.clone(), || {
+                    chunk
+                        .iter()
+                        .flat_map(|key| {
+                            let (mid, lo, hi) = rule(K::from_index_key(key));
+                            assert_expr_arena(mid, expected_arena);
+                            prepare_range(format_index_name(name, key), mid, lo, hi)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        drop(snapshot);
+        {
+            let existing = self.constraint_names.borrow();
+            validate_batch_names(
+                &existing,
+                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                "constraint",
+            );
+        }
+        let remaps = batch.merge(&mut forks);
+        let mut pending = Vec::with_capacity(keys.len().saturating_mul(2));
+        for (mut fork, remap) in forks.into_iter().zip(remaps) {
+            for item in &mut fork.value {
+                item.remap(remap);
+            }
+            pending.extend(fork.value);
+        }
+        drop(batch);
+        self.register_constraints_batch(pending);
     }
 
     /// Unified view of every algebraic, explicit SOC, and SOS constraint
@@ -885,6 +1246,32 @@ impl Model {
         id
     }
 
+    fn register_soc_batch(&self, items: Vec<PendingSoc>) {
+        let mut names = self.soc_names.borrow_mut();
+        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "SOC constraint");
+        let mut constraints = self.soc_constraints.borrow_mut();
+        let final_count =
+            constraints.len().checked_add(items.len()).expect("SOC constraint count overflow");
+        if final_count > 0 {
+            u32::try_from(final_count - 1).expect("SOC constraint count overflow");
+        }
+        constraints.reserve(items.len());
+        names.reserve(items.len());
+        for item in items {
+            let id = SocConstraintId(
+                u32::try_from(constraints.len()).expect("SOC constraint count overflow"),
+            );
+            constraints.push(SocConstraint {
+                name: item.name.clone(),
+                terms: item.terms,
+                bound: item.bound,
+                active: true,
+            });
+            names.insert(item.name, id);
+        }
+        self.cached_kind.set(None);
+    }
+
     /// A fresh unique auto-name `_soc{n}` in the SOC namespace, skipping any a
     /// user already took. Shares `auto_seq` with [`Self::next_auto_name`]; the
     /// prefixes differ, so the two namespaces never collide.
@@ -920,18 +1307,85 @@ impl Model {
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
-        mut rule: F,
+        rule: F,
     ) where
         K: FromIndexKey,
         T: IntoIterator<Item = Expr<'a>>,
-        F: FnMut(K) -> (T, Expr<'a>),
+        F: Fn(K) -> (T, Expr<'a>) + Send + Sync,
     {
-        for key in set {
-            let typed = K::from_index_key(&key);
-            let (terms, bound) = rule(typed);
-            let name: SmolStr = format_index_name(name_prefix, &key).into();
-            self.add_soc_constraint(name, terms, bound);
+        self.add_soc_constraints_over_with(name_prefix, set, &rule, None);
+    }
+
+    fn add_soc_constraints_over_with<'a, K, T, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        rule: &F,
+        forced_parallel: Option<bool>,
+    ) where
+        K: FromIndexKey,
+        T: IntoIterator<Item = Expr<'a>>,
+        F: Fn(K) -> (T, Expr<'a>) + Send + Sync,
+    {
+        let keys: Vec<IndexKey> = set.iter().collect();
+        if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_SOC_THRESHOLD) {
+            for key in &keys {
+                let name: SmolStr = format_index_name(name_prefix, key).into();
+                let (terms, bound) = rule(K::from_index_key(key));
+                let terms: Vec<_> = terms.into_iter().collect();
+                for &term in &terms {
+                    self.assert_expr_belongs(term);
+                }
+                self.assert_expr_belongs(bound);
+                self.add_soc_constraint(name, terms, bound);
+            }
+            return;
         }
+
+        let arena = &self.arena;
+        let expected_arena = arena_key(arena);
+        let mut batch = arena.__begin_batch();
+        let snapshot = batch.snapshot();
+        let chunk_size = indexed_chunk_size(keys.len());
+        let mut forks: Vec<_> = keys
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                arena.__with_fork(snapshot.clone(), || {
+                    chunk
+                        .iter()
+                        .map(|key| {
+                            let name = format_index_name(name_prefix, key).into();
+                            let (terms, bound) = rule(K::from_index_key(key));
+                            assert_expr_arena(bound, expected_arena);
+                            let terms: Vec<_> = terms.into_iter().collect();
+                            for &term in &terms {
+                                assert_expr_arena(term, expected_arena);
+                            }
+                            prepare_soc(name, terms, bound)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        drop(snapshot);
+        {
+            let existing = self.soc_names.borrow();
+            validate_batch_names(
+                &existing,
+                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                "SOC constraint",
+            );
+        }
+        let remaps = batch.merge(&mut forks);
+        let mut pending = Vec::with_capacity(keys.len());
+        for (mut fork, remap) in forks.into_iter().zip(remaps) {
+            for item in &mut fork.value {
+                item.remap(remap);
+            }
+            pending.extend(fork.value);
+        }
+        drop(batch);
+        self.register_soc_batch(pending);
     }
 
     /// Typed explicit-SOC registry for specialized backend passes.
@@ -990,6 +1444,94 @@ impl Model {
         by_name.insert(name, id);
         self.cached_kind.set(None);
         SosConstraintHandle { model: self, id }
+    }
+
+    fn register_sos_batch(&self, sos_type: SosType, items: Vec<PendingSos>) {
+        let mut names = self.sos_names.borrow_mut();
+        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "SOS constraint");
+        let mut constraints = self.sos_constraints.borrow_mut();
+        let final_count =
+            constraints.len().checked_add(items.len()).expect("SOS constraint count overflow");
+        if final_count > 0 {
+            u32::try_from(final_count - 1).expect("SOS constraint count overflow");
+        }
+        constraints.reserve(items.len());
+        names.reserve(items.len());
+        for item in items {
+            let id = SosConstraintId(
+                u32::try_from(constraints.len()).expect("SOS constraint count overflow"),
+            );
+            constraints.push(SosConstraint {
+                name: item.name.clone(),
+                sos_type,
+                members: item.members,
+                active: true,
+            });
+            names.insert(item.name, id);
+        }
+        self.cached_kind.set(None);
+    }
+
+    fn register_sos_one(&self, sos_type: SosType, item: PendingSos) {
+        let mut names = self.sos_names.borrow_mut();
+        assert!(
+            !names.contains_key(&item.name),
+            "SOS constraint name {:?} already registered",
+            item.name
+        );
+        let mut constraints = self.sos_constraints.borrow_mut();
+        let id = SosConstraintId(
+            u32::try_from(constraints.len()).expect("SOS constraint count overflow"),
+        );
+        constraints.push(SosConstraint {
+            name: item.name.clone(),
+            sos_type,
+            members: item.members,
+            active: true,
+        });
+        names.insert(item.name, id);
+        self.cached_kind.set(None);
+    }
+
+    fn add_pending_sos_over(
+        &self,
+        keys: Vec<IndexKey>,
+        sos_type: SosType,
+        forced_parallel: Option<bool>,
+        prepare: impl Fn(&IndexKey) -> PendingSos + Send + Sync,
+    ) {
+        if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_SOS_THRESHOLD) {
+            for key in &keys {
+                self.register_sos_one(sos_type, prepare(key));
+            }
+            return;
+        }
+
+        let arena = &self.arena;
+        let batch = arena.__begin_batch();
+        let snapshot = batch.snapshot();
+        let chunk_size = indexed_chunk_size(keys.len());
+        let forks: Vec<_> = keys
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                arena.__with_fork(snapshot.clone(), || {
+                    chunk.iter().map(&prepare).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        drop(snapshot);
+        {
+            let existing = self.sos_names.borrow();
+            validate_batch_names(
+                &existing,
+                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                "SOS constraint",
+            );
+        }
+        // Valid SOS members contain only VarIds, so no expression-root remap is needed.
+        drop(batch);
+        let pending = forks.into_iter().flat_map(|fork| fork.value).collect();
+        self.register_sos_batch(sos_type, pending);
     }
 
     /// Register an SOS1 or SOS2 constraint with consecutive positional
@@ -1057,17 +1599,42 @@ impl Model {
         name_prefix: &str,
         set: &Set<K>,
         sos_type: SosType,
-        mut rule: F,
+        rule: F,
     ) where
         K: FromIndexKey,
         T: IntoIterator<Item = (Expr<'a>, f64)>,
-        F: FnMut(K) -> T,
+        F: Fn(K) -> T + Send + Sync,
     {
-        for key in set {
-            let typed = K::from_index_key(&key);
-            let name: SmolStr = format_index_name(name_prefix, &key).into();
-            self.add_sos_constraint(name, sos_type, rule(typed));
-        }
+        self.add_sos_constraints_over_with(name_prefix, set, sos_type, &rule, None);
+    }
+
+    fn add_sos_constraints_over_with<'a, K, T, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        sos_type: SosType,
+        rule: &F,
+        forced_parallel: Option<bool>,
+    ) where
+        K: FromIndexKey,
+        T: IntoIterator<Item = (Expr<'a>, f64)>,
+        F: Fn(K) -> T + Send + Sync,
+    {
+        let keys: Vec<IndexKey> = set.iter().collect();
+        let expected_arena = arena_key(&self.arena);
+        self.add_pending_sos_over(keys, sos_type, forced_parallel, |key| {
+            let name: SmolStr = format_index_name(name_prefix, key).into();
+            let members: Vec<_> = rule(K::from_index_key(key))
+                .into_iter()
+                .map(|(expr, weight)| {
+                    assert_expr_arena(expr, expected_arena);
+                    let variable = expr.var_id().expect("SOS members must be bare variables");
+                    SosMember { variable, weight }
+                })
+                .collect();
+            validate_members(&name, &members);
+            PendingSos { name, members }
+        });
     }
 
     #[doc(hidden)]
@@ -1076,17 +1643,47 @@ impl Model {
         name_prefix: &str,
         set: &Set<K>,
         sos_type: SosType,
-        mut rule: F,
+        rule: F,
     ) where
         K: FromIndexKey,
         T: IntoIterator<Item = Expr<'a>>,
-        F: FnMut(K) -> T,
+        F: Fn(K) -> T + Send + Sync,
     {
-        for key in set {
-            let typed = K::from_index_key(&key);
-            let name: SmolStr = format_index_name(name_prefix, &key).into();
-            self.add_sos_constraint_auto_weights(name, sos_type, rule(typed));
-        }
+        self.add_sos_constraints_over_auto_weights_with(name_prefix, set, sos_type, &rule, None);
+    }
+
+    fn add_sos_constraints_over_auto_weights_with<'a, K, T, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        sos_type: SosType,
+        rule: &F,
+        forced_parallel: Option<bool>,
+    ) where
+        K: FromIndexKey,
+        T: IntoIterator<Item = Expr<'a>>,
+        F: Fn(K) -> T + Send + Sync,
+    {
+        let keys: Vec<IndexKey> = set.iter().collect();
+        let expected_arena = arena_key(&self.arena);
+        self.add_pending_sos_over(keys, sos_type, forced_parallel, |key| {
+            let name: SmolStr = format_index_name(name_prefix, key).into();
+            let members: Vec<_> = rule(K::from_index_key(key))
+                .into_iter()
+                .enumerate()
+                .map(|(index, expr)| {
+                    let weight = index
+                        .checked_add(1)
+                        .and_then(|index| u32::try_from(index).ok())
+                        .expect("SOS member count exceeds positional weight range");
+                    assert_expr_arena(expr, expected_arena);
+                    let variable = expr.var_id().expect("SOS members must be bare variables");
+                    SosMember { variable, weight: f64::from(weight) }
+                })
+                .collect();
+            validate_members(&name, &members);
+            PendingSos { name, members }
+        });
     }
 
     pub fn sos_constraints(&self) -> Ref<'_, Vec<SosConstraint>> {
@@ -1297,7 +1894,7 @@ impl Model {
 /// `flow[2]` as separate scalar variables in the model. Call `.build()` to get
 /// an [`IndexedVar`] that maps each key to its [`Expr`] handle. Bounds and
 /// domain set here apply uniformly to every scalar in the collection.
-type BoundFn<'a> = Box<dyn Fn(&IndexKey) -> f64 + 'a>;
+type BoundFn<'a> = Box<dyn Fn(&IndexKey) -> f64 + Send + Sync + 'a>;
 
 #[must_use = "IndexedVarBuilder does nothing until you call .build()"]
 pub struct IndexedVarBuilder<'a, K = IndexKey> {
@@ -1310,6 +1907,7 @@ pub struct IndexedVarBuilder<'a, K = IndexKey> {
     lb_by: Option<BoundFn<'a>>,
     ub_by: Option<BoundFn<'a>>,
     domain: Domain,
+    parallel: Option<bool>,
     _k: PhantomData<fn() -> K>,
 }
 
@@ -1353,6 +1951,7 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
     where
         K: FromIndexKey,
         F: Fn(K) -> f64 + 'a,
+        F: Send + Sync,
     {
         self.lb_by = Some(Box::new(move |k: &IndexKey| f(K::from_index_key(k))));
         self
@@ -1369,6 +1968,7 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
     where
         K: FromIndexKey,
         F: Fn(K) -> f64 + 'a,
+        F: Send + Sync,
     {
         self.ub_by = Some(Box::new(move |k: &IndexKey| f(K::from_index_key(k))));
         self
@@ -1393,17 +1993,40 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
     /// # Panics
     /// Panics if a scalar variable name collides with one already registered.
     pub fn build(self) -> IndexedVar<'a, K> {
-        let Self { model, base_name, keys, axes, lb, ub, lb_by, ub_by, domain, _k } = self;
+        let Self { model, base_name, keys, axes, lb, ub, lb_by, ub_by, domain, parallel, _k } =
+            self;
 
-        let make = |key: &IndexKey| -> Expr<'a> {
-            let scalar_name: SmolStr = format_index_name(&base_name, key).into();
-            let lo = lb_by.as_ref().map_or(lb, |f| f(key));
-            let hi = ub_by.as_ref().map_or(ub, |f| f(key));
-            model.__var(scalar_name).lb(lo).ub(hi).domain(domain).build()
+        if !indexed_parallel(keys.len(), parallel, PAR_INDEXED_METADATA_THRESHOLD) {
+            let handles = keys
+                .iter()
+                .map(|key| {
+                    let scalar_name: SmolStr = format_index_name(&base_name, key).into();
+                    let lo = lb_by.as_ref().map_or(lb, |f| f(key));
+                    let hi = ub_by.as_ref().map_or(ub, |f| f(key));
+                    model.__var(scalar_name).lb(lo).ub(hi).domain(domain).build()
+                })
+                .collect();
+            let storage = build_storage(keys, axes, handles);
+            return IndexedFamily { storage, _marker: PhantomData };
+        }
+
+        let prepare = |key: &IndexKey| PendingVar {
+            key: key.clone(),
+            name: format_index_name(&base_name, key).into(),
+            lb: lb_by.as_ref().map_or(lb, |f| f(key)),
+            ub: ub_by.as_ref().map_or(ub, |f| f(key)),
         };
-
-        let storage = build_storage(keys, axes, make);
+        let prepared: Vec<_> = keys.par_iter().map(prepare).collect();
+        let handles = model.register_vars_batch(&prepared, domain);
+        let keys = prepared.into_iter().map(|item| item.key).collect();
+        let storage = build_storage(keys, axes, handles);
         IndexedFamily { storage, _marker: PhantomData }
+    }
+
+    #[cfg(any(test, feature = "benchmark-support"))]
+    fn parallel_for_benchmark(mut self, parallel: bool) -> Self {
+        self.parallel = Some(parallel);
+        self
     }
 }
 
@@ -1481,11 +2104,89 @@ pub mod benchmark_support {
     pub fn infer(model: &Model, parallel: bool) -> ModelKind {
         model.infer_kind(parallel)
     }
+
+    #[derive(Copy, Clone, Debug)]
+    pub enum IndexedBuildCase {
+        Variables,
+        Parameters,
+        Algebraic,
+        Range,
+        Soc,
+        Sos,
+    }
+
+    /// Build and immediately inspect a fresh indexed model so Criterion measures
+    /// construction rather than solver translation.
+    pub fn indexed_build(rows: usize, case: IndexedBuildCase, parallel: bool) -> usize {
+        let model = Model::new("indexed_build_bench");
+        let keys = Set::range(0..rows);
+        match case {
+            IndexedBuildCase::Variables => {
+                let x = model
+                    .__indexed_var("x", &keys)
+                    .lb_by(|i: usize| -(i as f64))
+                    .ub_by(|i: usize| i as f64 + 1.0)
+                    .parallel_for_benchmark(parallel)
+                    .build();
+                std::hint::black_box(x.len());
+            }
+            IndexedBuildCase::Parameters => {
+                let value = |i: usize| i as f64 + 1.0;
+                let p = model.indexed_param_with("p".to_owned(), &keys, &value, Some(parallel));
+                std::hint::black_box(p.len());
+            }
+            IndexedBuildCase::Algebraic => {
+                let x = model.__indexed_var("x", &keys).parallel_for_benchmark(parallel).build();
+                let rule = |i: usize| (2.0 * x[i] + 1.0).le(i as f64 + 10.0);
+                model.add_constraints_over_with("c", &keys, &rule, Some(parallel));
+            }
+            IndexedBuildCase::Range => {
+                let x = model.__indexed_var("x", &keys).parallel_for_benchmark(parallel).build();
+                let rule = |i: usize| (x[i] + 1.0, -(i as f64), i as f64 + 10.0);
+                model.add_range_constraints_over_with("r", &keys, &rule, Some(parallel));
+            }
+            IndexedBuildCase::Soc => {
+                let x = model.__indexed_var("x", &keys).parallel_for_benchmark(parallel).build();
+                let y = model.__indexed_var("y", &keys).parallel_for_benchmark(parallel).build();
+                let t = model.__var("t").lb(0.0).build();
+                let rule = |i: usize| ([x[i] + 1.0, y[i] - 1.0], t + i as f64 + 1.0);
+                model.add_soc_constraints_over_with("q", &keys, &rule, Some(parallel));
+            }
+            IndexedBuildCase::Sos => {
+                let x = model.__indexed_var("x", &keys).parallel_for_benchmark(parallel).build();
+                let y = model.__indexed_var("y", &keys).parallel_for_benchmark(parallel).build();
+                let rule = |i: usize| [(x[i], 1.0), (y[i], 2.0)];
+                model.add_sos_constraints_over_with(
+                    "s",
+                    &keys,
+                    SosType::Sos1,
+                    &rule,
+                    Some(parallel),
+                );
+            }
+        }
+        model.num_variables()
+            + model.num_parameters()
+            + model.num_constraints()
+            + model.arena().len()
+    }
+
+    /// Scalar construction guardrail for the parallel-safe arena migration.
+    pub fn scalar_build(rows: usize) -> usize {
+        let model = Model::new("scalar_build_bench");
+        for i in 0..rows {
+            let x = model.__var(format!("x{i}")).build();
+            model.__add_constraint(format!("c{i}"), (2.0 * x + 1.0).le(i as f64 + 10.0));
+        }
+        model.num_variables() + model.num_constraints() + model.arena().len()
+    }
 }
 
 #[cfg(test)]
 #[expect(clippy::cast_precision_loss)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use oximo_expr::extract_linear;
 
     use super::*;
@@ -1565,6 +2266,16 @@ mod tests {
         m.set_param(param, 2.0);
         assert!((snapshot.param_value(id) - 1.0).abs() < f64::EPSILON);
         assert!((m.param_value(id) - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[should_panic(expected = "different model")]
+    fn indexed_constraints_reject_foreign_expression_arenas() {
+        let target = Model::new("target");
+        let foreign = Model::new("foreign");
+        let x = foreign.__var("x").build();
+        let keys = Set::range(0..1024);
+        target.add_constraints_over_with("c", &keys, &|_| x.le(1.0), Some(true));
     }
 
     #[test]
@@ -1721,5 +2432,153 @@ mod tests {
         let arena = model.arena();
         assert_eq!(model.kind(), ModelKind::LP);
         assert!(matches!(arena.get(x.id), oximo_expr::ExprNode::Var(_)));
+    }
+
+    #[test]
+    fn indexed_build_forced_parallel_matches_serial_for_every_family() {
+        #[derive(Debug, PartialEq)]
+        struct Digest {
+            variables: Vec<String>,
+            parameters: Vec<(String, f64)>,
+            rows: Vec<String>,
+            typed: Vec<String>,
+            arena_len: usize,
+        }
+
+        fn digest(parallel: bool) -> Digest {
+            let model = Model::new("indexed_parity");
+            let keys = Set::range(0..128usize);
+            let x = model
+                .__indexed_var("x", &keys)
+                .lb_by(|i: usize| -(i as f64))
+                .ub_by(|i: usize| i as f64 + 10.0)
+                .parallel_for_benchmark(parallel)
+                .build();
+            let y = model.__indexed_var("y", &keys).parallel_for_benchmark(parallel).build();
+            let values = |i: usize| i as f64 + 0.5;
+            let p = model.indexed_param_with("p".to_owned(), &keys, &values, Some(parallel));
+
+            let algebraic = |i: usize| (2.0 * x[i] + p[i]).le(i as f64 + 20.0);
+            model.add_constraints_over_with("c", &keys, &algebraic, Some(parallel));
+            let ranges = |i: usize| (y[i] + 1.0, -(i as f64), i as f64 + 5.0);
+            model.add_range_constraints_over_with("r", &keys, &ranges, Some(parallel));
+            let symbolic_ranges = |i: usize| (x[i] + 2.0, -p[i], p[i] + 3.0);
+            model.add_range_constraints_over_with("sr", &keys, &symbolic_ranges, Some(parallel));
+            let t = model.__var("t").lb(0.0).build();
+            let cones = |i: usize| ([x[i] + 1.0, y[i] - 1.0], t + p[i]);
+            model.add_soc_constraints_over_with("q", &keys, &cones, Some(parallel));
+            let explicit_sos = |i: usize| [(x[i], 1.0), (y[i], 2.0)];
+            model.add_sos_constraints_over_with(
+                "s",
+                &keys,
+                SosType::Sos1,
+                &explicit_sos,
+                Some(parallel),
+            );
+            let auto_sos = |i: usize| [x[i], y[i]];
+            model.add_sos_constraints_over_auto_weights_with(
+                "a",
+                &keys,
+                SosType::Sos2,
+                &auto_sos,
+                Some(parallel),
+            );
+
+            let variables = model
+                .variables()
+                .iter()
+                .map(|variable| {
+                    format!(
+                        "{}:{:?}:{}:{}:{}",
+                        variable.name, variable.id, variable.lb, variable.ub, variable.domain
+                    )
+                })
+                .collect();
+            let parameters = model
+                .parameters()
+                .iter()
+                .map(|parameter| (parameter.name.to_string(), model.param_value(parameter.id)))
+                .collect();
+            let arena = model.arena();
+            let constraints = model.constraints();
+            let rows = constraints
+                .algebraic()
+                .iter()
+                .map(|constraint| {
+                    let terms = extract_linear(&arena, constraint.lhs).unwrap();
+                    format!(
+                        "{}:{:?}:{}:{}:{}",
+                        constraint.name,
+                        terms.coeffs,
+                        terms.constant,
+                        constraint.lower,
+                        constraint.upper
+                    )
+                })
+                .collect();
+            let mut typed = constraints
+                .second_order_cones()
+                .iter()
+                .map(|constraint| {
+                    let terms: Vec<_> = constraint
+                        .terms
+                        .iter()
+                        .map(|&term| extract_linear(&arena, term).unwrap().into_owned())
+                        .collect();
+                    let bound = extract_linear(&arena, constraint.bound).unwrap().into_owned();
+                    format!("{}:{terms:?}:{bound:?}", constraint.name)
+                })
+                .collect::<Vec<_>>();
+            typed.extend(
+                constraints
+                    .special_ordered_sets()
+                    .iter()
+                    .map(|constraint| format!("{constraint:?}")),
+            );
+            let arena_len = arena.len();
+            Digest { variables, parameters, rows, typed, arena_len }
+        }
+
+        assert_eq!(digest(false), digest(true));
+    }
+
+    #[test]
+    fn parallel_duplicate_name_failure_does_not_mutate_model_or_arena() {
+        let model = Model::new("indexed_atomicity");
+        let x = model.__var("x").build();
+        let duplicate_keys = Set::from_ints([0usize, 0]);
+        let arena_len = model.arena().len();
+        let rule = |i: usize| (x + i as f64).le(1.0);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            model.add_constraints_over_with("dup", &duplicate_keys, &rule, Some(true));
+        }));
+        assert!(result.is_err());
+        assert_eq!(model.num_constraints(), 0);
+        assert_eq!(model.arena().len(), arena_len);
+
+        model.__add_constraint("after", x.le(2.0));
+        assert_eq!(model.constraint_id("after"), Some(ConstraintId(0)));
+    }
+
+    #[test]
+    fn parallel_callback_panic_does_not_mutate_model_or_arena() {
+        let model = Model::new("indexed_callback_atomicity");
+        let x = model.__var("x").build();
+        let keys = Set::range(0..128usize);
+        let arena_len = model.arena().len();
+        let rule = |i: usize| {
+            let constraint = (x + i as f64).le(1.0);
+            assert_ne!(i, 17, "deliberate callback panic");
+            constraint
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            model.add_constraints_over_with("panic", &keys, &rule, Some(true));
+        }));
+        assert!(result.is_err());
+        assert_eq!(model.num_constraints(), 0);
+        assert_eq!(model.arena().len(), arena_len);
+
+        model.__add_constraint("after", x.le(2.0));
+        assert_eq!(model.constraint_id("after"), Some(ConstraintId(0)));
     }
 }
