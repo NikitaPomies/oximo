@@ -347,6 +347,18 @@ fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
     }
 }
 
+type EquationRow = (&'static str, &'static str, f64);
+
+fn equation_rows(c: &Constraint) -> [Option<EquationRow>; 2] {
+    match c.as_single() {
+        Some((Sense::Le, rhs)) => [Some(("", "<=", rhs)), None],
+        Some((Sense::Ge, rhs)) => [Some(("", ">=", rhs)), None],
+        Some((Sense::Eq, rhs)) => [Some(("", "==", rhs)), None],
+        None if c.is_range() => [Some(("_lo", ">=", c.lower)), Some(("_hi", "<=", c.upper))],
+        None => [None, None],
+    }
+}
+
 /// Write the `EQUATIONS` block, returning the emit-order map.
 /// The `ConstraintId` behind each emitted equation, in BARON's 1-based
 /// "Constraint no." order. BARON has no two-sided equation,
@@ -360,30 +372,15 @@ fn write_equations(
     socs: &[SocConstraint],
 ) -> Result<Vec<ConstraintId>, SolverError> {
     let mut emit_map: Vec<ConstraintId> = Vec::with_capacity(constraints.len());
-    if constraints.is_empty() && socs.is_empty() {
-        return Ok(emit_map);
-    }
-
     let mut names: Vec<String> = Vec::with_capacity(constraints.len() + 2 * socs.len());
-    for (i, c) in constraints.iter().enumerate() {
-        let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
-        if c.is_range() {
-            names.push(format!("c{i}_lo"));
-            names.push(format!("c{i}_hi"));
-            emit_map.push(id);
-            emit_map.push(id);
-        } else {
-            names.push(format!("c{i}"));
-            emit_map.push(id);
-        }
-    }
-    for i in 0..socs.len() {
-        names.push(format!("soc{i}"));
-        names.push(format!("soc{i}_sign"));
-    }
-    writeln!(bar, "EQUATIONS {};", names.join(", ")).unwrap();
+    let mut bodies = String::new();
 
     for (i, c) in constraints.iter().enumerate() {
+        let rows = equation_rows(c);
+        if rows.iter().all(Option::is_none) {
+            // Free `[-inf, +inf]` row
+            continue;
+        }
         // BARON rejects a constraint whose expression evaluates to a constant,
         // so surface a clear error instead of emitting an invalid `.bar`.
         if !expr_has_var(arena, c.lhs) {
@@ -393,22 +390,24 @@ fn write_equations(
                 c.name
             )));
         }
-        if let Some((sense, rhs)) = c.as_single() {
-            let op = match sense {
-                Sense::Le => "<=",
-                Sense::Ge => ">=",
-                Sense::Eq => "==",
-            };
-            write!(bar, "c{i}: ").unwrap();
-            write_constraint_body(bar, arena, c.lhs, op, rhs)?;
-        } else {
-            // Two-sided range -> `_lo` (>= lower) and `_hi` (<= upper).
-            write!(bar, "c{i}_lo: ").unwrap();
-            write_constraint_body(bar, arena, c.lhs, ">=", c.lower)?;
-            write!(bar, "c{i}_hi: ").unwrap();
-            write_constraint_body(bar, arena, c.lhs, "<=", c.upper)?;
+        let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
+        for (suffix, op, rhs) in rows.into_iter().flatten() {
+            names.push(format!("c{i}{suffix}"));
+            emit_map.push(id);
+            write!(bodies, "c{i}{suffix}: ").unwrap();
+            write_constraint_body(&mut bodies, arena, c.lhs, op, rhs)?;
         }
     }
+    for i in 0..socs.len() {
+        names.push(format!("soc{i}"));
+        names.push(format!("soc{i}_sign"));
+    }
+    if names.is_empty() {
+        return Ok(emit_map);
+    }
+
+    writeln!(bar, "EQUATIONS {};", names.join(", ")).unwrap();
+    bar.push_str(&bodies);
     write_soc_rows(bar, arena, socs);
     writeln!(bar).unwrap();
     Ok(emit_map)
@@ -1841,6 +1840,22 @@ The best solution found is:
         assert_eq!(dual.len(), 1);
         assert_eq!(soc.get(&0), Some(&-0.75));
         assert_eq!(soc.len(), 1);
+    }
+
+    #[test]
+    fn free_row_from_infinite_bound_emits_no_equation() {
+        let capacity = [f64::INFINITY, 10.0];
+        let m = Model::new("freerow");
+        variable!(m, 0.0 <= x[i in 0..2] <= 10.0);
+        constraint!(m, cap[i in 0..2], x[i] <= capacity[i]);
+        objective!(m, Max, x[0] + x[1]);
+
+        let (bar, _vars, con_order, _soc) =
+            build_bar(&m, &BaronOptions::default()).expect("build_bar");
+
+        assert!(bar.contains("EQUATIONS c1;"), "{bar}");
+        assert!(!bar.contains("c0"), "free row must emit nothing: {bar}");
+        assert_eq!(con_order, vec![ConstraintId(1)], "{con_order:?}");
     }
 
     #[test]
