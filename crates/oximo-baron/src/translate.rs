@@ -1290,11 +1290,8 @@ pub mod benchmark_support {
         let mut names = Vec::with_capacity(constraints.len() + 2 * socs.len());
         for (i, c) in constraints.iter().enumerate() {
             let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
-            if c.is_range() {
-                names.extend([format!("c{i}_lo"), format!("c{i}_hi")]);
-                emit_map.extend([id, id]);
-            } else {
-                names.push(format!("c{i}"));
+            for (suffix, _, _) in equation_rows(c).into_iter().flatten() {
+                names.push(format!("c{i}{suffix}"));
                 emit_map.push(id);
             }
         }
@@ -1327,19 +1324,9 @@ pub mod benchmark_support {
             )));
         }
         let mut out = String::new();
-        if let Some((sense, rhs)) = c.as_single() {
-            let op = match sense {
-                Sense::Le => "<=",
-                Sense::Ge => ">=",
-                Sense::Eq => "==",
-            };
-            write!(out, "c{index}: ").unwrap();
+        for (suffix, op, rhs) in equation_rows(c).into_iter().flatten() {
+            write!(out, "c{index}{suffix}: ").unwrap();
             write_constraint_body(&mut out, arena, c.lhs, op, rhs)?;
-        } else {
-            write!(out, "c{index}_lo: ").unwrap();
-            write_constraint_body(&mut out, arena, c.lhs, ">=", c.lower)?;
-            write!(out, "c{index}_hi: ").unwrap();
-            write_constraint_body(&mut out, arena, c.lhs, "<=", c.upper)?;
         }
         Ok(out)
     }
@@ -1856,6 +1843,23 @@ The best solution found is:
         assert!(bar.contains("EQUATIONS c1;"), "{bar}");
         assert!(!bar.contains("c0"), "free row must emit nothing: {bar}");
         assert_eq!(con_order, vec![ConstraintId(1)], "{con_order:?}");
+    }
+
+    #[cfg(feature = "benchmark-support")]
+    #[test]
+    fn benchmark_render_uses_equation_rows_for_ranges() {
+        let m = Model::new("benchmark-range");
+        let x = m.__var("x").lb(-5.0).ub(5.0).build();
+        m.__add_constraint_interval("free", x, f64::NEG_INFINITY, f64::INFINITY);
+        m.__add_constraint_interval("range", x, 1.0, 3.0);
+
+        let parallel = super::benchmark_support::render_equations(&m, true).unwrap();
+        let serial = super::benchmark_support::render_equations(&m, false).unwrap();
+
+        assert_eq!(parallel, serial, "benchmark rendering must preserve BARON output");
+        assert!(parallel.contains("EQUATIONS c1_lo, c1_hi;"), "{parallel}");
+        assert!(parallel.contains("c1_lo:") && parallel.contains("c1_hi:"), "{parallel}");
+        assert!(!parallel.contains("c0"), "unconstrained row must emit nothing: {parallel}");
     }
 
     #[test]
