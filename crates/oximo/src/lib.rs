@@ -1,4 +1,20 @@
 #![doc = include_str!("../README.md")]
+#![doc = r#"
+## API map
+
+The most commonly used modeling and solver types are re-exported at the crate
+root and by [`prelude`]:
+
+- Build models with [`Model`], [`variable!`], [`constraint!`], and [`objective!`].
+- Create indexed families with [`Set`], [`IndexedVar`], and [`IndexedParam`].
+- Compose algebraic expressions with [`Expr`], [`sum!`], [`min!`], and [`max!`].
+- Select a backend from [`solvers`] and solve through the [`Solver`] trait.
+- Inspect termination, primal, and dual information in [`SolverResult`].
+- Read or write optimization formats through the `io` module when that feature is enabled.
+
+Lower-level modeling, expression, and solver APIs remain available through
+[`core`], [`expr`], and [`solver`], respectively.
+"#]
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -7,13 +23,18 @@
 extern crate self as oximo;
 
 pub use oximo_core as core;
-pub use oximo_core::SosType;
+pub use oximo_core::prelude::*;
 
 // Runtime glue the modeling macros expand into.
 #[doc(hidden)]
 pub use oximo_core::__macro_support;
 pub use oximo_expr as expr;
 pub use oximo_solver as solver;
+pub use oximo_solver::{
+    ConstraintEvaluation, DualStatus, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis,
+    ModelReport, PersistentSolver, PrimalStatus, SocEvaluation, SolutionPoint, Solver, SolverError,
+    SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt, VarBoundKind,
+};
 
 #[cfg(feature = "io")]
 #[cfg_attr(docsrs, doc(cfg(feature = "io")))]
@@ -46,6 +67,12 @@ pub use oximo_baron::BaronOptions;
 #[cfg_attr(docsrs, doc(cfg(feature = "clarabel")))]
 pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions};
 
+#[cfg(feature = "pounce")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
+pub use oximo_pounce::{
+    MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection,
+};
+
 /// GAMS backend types: sub-solver selection and per-solver option structs.
 #[cfg(feature = "gams")]
 #[cfg_attr(docsrs, doc(cfg(feature = "gams")))]
@@ -56,6 +83,8 @@ pub mod gams {
 #[cfg(feature = "pounce")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
 pub mod pounce {
+    //! POUNCE backend options, algorithm selection, and persistent solver types.
+
     pub use oximo_pounce::{
         MuStrategy, Pounce, PounceAlgorithm, PounceOptionValue, PounceOptions, PouncePersistent,
         PounceSolverSelection,
