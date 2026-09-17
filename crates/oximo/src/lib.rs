@@ -1,5 +1,5 @@
 #![doc = include_str!("../README.md")]
-#![doc = r#"
+#![doc = r"
 ## API map
 
 The most commonly used modeling and solver types are re-exported at the crate
@@ -14,7 +14,7 @@ root and by [`prelude`]:
 
 Lower-level modeling, expression, and solver APIs remain available through
 [`core`], [`expr`], and [`solver`], respectively.
-"#]
+"]
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
