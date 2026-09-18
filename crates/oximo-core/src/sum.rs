@@ -84,8 +84,9 @@ impl SumDomain<i32> for std::ops::Range<i32> {
 /// of `Copy` keys).
 ///
 /// # Panics
-/// Panics if `domain` is empty, the resulting expression has no arena to
-/// attach to.
+/// Panics if `domain` is empty, because there is no generated expression from
+/// which to recover an arena. Use the anchored macro form
+/// `sum!(model, body for key in domain)` when the domain may be empty.
 /// Macro-facing entry point backing the `sum!` macro. Not part of the stable
 /// public API.
 #[doc(hidden)]

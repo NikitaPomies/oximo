@@ -14,3 +14,9 @@ use oximo::prelude::*;
 
 The macros expand to the typed builder API in `oximo-core` (`Model`, `Set`,
 `Expr`, `sum_over`, ...). See the `oximo` crate docs for the macro grammar and examples.
+
+Sums inside `constraint!`, `soc_constraint!`, and `objective!` inherit the model's
+expression context and return `0` for empty domains or filters. For standalone
+sums, use `sum!(model, body for i in domain)` to supply that context explicitly.
+Nested sums inherit it, and selected terms are checked for model ownership.
+Standalone unanchored sums still require at least one term.

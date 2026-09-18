@@ -88,7 +88,11 @@ pub fn objective(input: TokenStream) -> TokenStream {
 }
 
 /// `sum!(body for pat in domain[, pat in domain ...])`, algebraic summation,
-/// lowered to nested `sum_over` folds.
+/// lowered to nested `sum_over` folds. To allow an empty domain (or an empty
+/// filter), anchor the sum to its model: `sum!(model, body for pat in domain)`.
+/// Sums written inside `constraint!`, `soc_constraint!`, `objective!`, or an
+/// anchored sum inherit its expression context automatically. Selected terms
+/// must belong to that model. Standalone unanchored sums require a first term.
 #[proc_macro]
 pub fn sum(input: TokenStream) -> TokenStream {
     sum::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()

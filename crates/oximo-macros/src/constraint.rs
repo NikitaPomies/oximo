@@ -19,7 +19,8 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "constraint! needs a model expression")
     })?;
-    let model: Expr = syn::parse2(model_ts)?;
+    let mut sums = crate::sum::ModelSums::new(syn::parse2(model_ts)?);
+    let model = sums.receiver();
 
     let first = parts.next().ok_or_else(|| {
         syn::Error::new_spanned(&model, "constraint! needs a relational expression")
@@ -31,28 +32,32 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
     let root = oximo_root();
 
-    match second {
-        None => Ok(register_anonymous(&model, build_relations(first, &root)?)),
+    let expanded = match second {
+        None => register_anonymous(&model, build_relations(first, &root, &mut sums)?),
         Some(rel_tokens) => {
             // Computed name at run-time: `constraint!(m, name = expr, <relation>)`.
             if let Some(name_expr) = computed_name(&first) {
-                let rel = build_relations(rel_tokens, &root)?;
-                return Ok(register_computed(&model, &name_expr, rel));
+                let rel = build_relations(rel_tokens, &root, &mut sums)?;
+                return Ok(sums.wrap(register_computed(&model, &name_expr, rel)));
             }
 
             let Named { name, binds, cond } = parse_named(first)?;
             let name_str = name.to_string();
-            let rel = build_relations(rel_tokens, &root)?;
+            if let Some(binds) = &binds {
+                sums.indexed(binds);
+            }
+            let rel = build_relations(rel_tokens, &root, &mut sums)?;
             match binds {
-                None => Ok(register_named(&model, &name_str, rel)),
+                None => register_named(&model, &name_str, rel),
                 Some(binds) => {
                     let set = build_set(&binds, &root)?;
                     let set = filtered_set(set, &binds, cond.as_ref(), &root);
-                    Ok(register_family(&model, &name_str, &set, &binds, rel))
+                    register_family(&model, &name_str, &set, &binds, rel)
                 }
             }
         }
-    }
+    };
+    Ok(sums.wrap(expanded))
 }
 
 /// Detect the computed-name form `name = EXPR` in the name slot, returning the
@@ -80,28 +85,32 @@ enum Relations {
     Range { mid: Expr, lo: Expr, hi: Expr },
 }
 
-fn parse_seg(ts: TokenStream2) -> syn::Result<Expr> {
-    syn::parse2(crate::index::rewrite_index_subscripts(ts))
+fn parse_seg(ts: TokenStream2, sums: &mut crate::sum::ModelSums) -> syn::Result<Expr> {
+    sums.rewrite(syn::parse2(crate::index::rewrite_index_subscripts(ts))?)
 }
 
 /// Split the relation on its relational operators. One operator yields a
 /// [`Relations::Single`]. Two like operators (`<= <=` or `>= >=`) a
 /// [`Relations::Range`].
-fn build_relations(tokens: TokenStream2, root: &TokenStream2) -> syn::Result<Relations> {
+fn build_relations(
+    tokens: TokenStream2,
+    root: &TokenStream2,
+    sums: &mut crate::sum::ModelSums,
+) -> syn::Result<Relations> {
     let (segs, ops) = split_relops(&tokens);
     match (segs.len(), ops.as_slice()) {
         (2, [op]) => {
             let method = op.method();
             let mut segs = segs.into_iter();
-            let lhs = parse_seg(next_seg(&mut segs)?)?;
-            let rhs = parse_seg(next_seg(&mut segs)?)?;
+            let lhs = parse_seg(next_seg(&mut segs)?, sums)?;
+            let rhs = parse_seg(next_seg(&mut segs)?, sums)?;
             Ok(Relations::Single(quote!( #root::__macro_support::Relate::#method(#lhs, #rhs) )))
         }
         (3, [a, b]) => {
             let mut segs = segs.into_iter();
-            let s0 = parse_seg(next_seg(&mut segs)?)?;
-            let mid = parse_seg(next_seg(&mut segs)?)?;
-            let s2 = parse_seg(next_seg(&mut segs)?)?;
+            let s0 = parse_seg(next_seg(&mut segs)?, sums)?;
+            let mid = parse_seg(next_seg(&mut segs)?, sums)?;
+            let s2 = parse_seg(next_seg(&mut segs)?, sums)?;
             match (a, b) {
                 // lo <= mid <= hi
                 (RelOp::Le, RelOp::Le) => Ok(Relations::Range { mid, lo: s0, hi: s2 }),

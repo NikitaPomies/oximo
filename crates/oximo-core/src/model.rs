@@ -451,6 +451,13 @@ impl Model {
         Expr::constant(&self.arena, value)
     }
 
+    /// Expression-only context captured by modeling macros before entering
+    /// indexed callbacks.
+    #[doc(hidden)]
+    pub fn __sum_context(&self) -> &ExprArenaCell {
+        &self.arena
+    }
+
     /// Called by [`VarBuilder::build`]. Pushes the var into the registry and
     /// returns its `Expr` handle.
     pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a> {

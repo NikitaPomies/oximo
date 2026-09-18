@@ -200,6 +200,29 @@ impl<'a> Expr<'a> {
         Some(Self::new(id, first.arena))
     }
 
+    /// Model-anchored summation. Validate all term owners before emitting the
+    /// sum, and construct zero in the supplied arena when there are no terms.
+    #[doc(hidden)]
+    pub fn __sum_terms_in(
+        arena: &'a crate::ExprArenaCell,
+        mut iter: impl Iterator<Item = Self>,
+    ) -> Self {
+        let Some(first) = iter.next() else {
+            return Self::constant(arena, 0.0);
+        };
+        let mut same_arena = std::ptr::eq(arena, first.arena);
+        let ids = sum_children(
+            first.id,
+            iter.map(|expr| {
+                same_arena &= std::ptr::eq(arena, expr.arena);
+                expr.id
+            }),
+        );
+        assert!(same_arena, "sum! terms belong to a different model");
+        let id = arena.with_mut(|arena| add_n(arena, ids));
+        Self::new(id, arena)
+    }
+
     fn extrema_terms(mut iter: impl Iterator<Item = Self>, is_min: bool) -> Option<Self> {
         let first = iter.next()?;
         let mut same_arena = true;

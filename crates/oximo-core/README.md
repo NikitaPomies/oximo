@@ -229,6 +229,19 @@ objective!(m, Min, sum!(c[i, j] * x[i, j] for i in rows, j in cols));
 let evens = sum!(x[i] for i in items if i % 2 == 0); // filtered
 ```
 
+Inside `constraint!`, `soc_constraint!`, and `objective!`, sums inherit the
+model's expression context. Empty domains and filters produce the constant
+expression `0`, including in indexed families and nested sums.
+
+For a standalone sum, pass the model explicitly when the domain or filter can
+be empty:
+
+```rust,ignore
+let total = sum!(m, x[i] for i in possibly_empty_items);
+let filtered = sum!(m, x[i] for i in items if predicate(i));
+// Both produce the constant expression 0 when no term is selected.
+```
+
 ### Special ordered sets
 
 SOS1 and SOS2 constraints apply ordering weights to bare variables. SOS1 allows

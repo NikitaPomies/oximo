@@ -67,7 +67,10 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                     ));
                 }
             };
-            Ok(quote!( (#model).#method(#expr) ))
+            let mut sums = crate::sum::ModelSums::new(model);
+            let expr = sums.rewrite(expr)?;
+            let model = sums.receiver();
+            Ok(sums.wrap(quote!( (#model).#method(#expr) )))
         }
     }
 }

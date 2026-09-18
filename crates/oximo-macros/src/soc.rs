@@ -19,7 +19,8 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "soc_constraint! needs a model expression")
     })?;
-    let model: Expr = syn::parse2(model_ts)?;
+    let mut sums = crate::sum::ModelSums::new(syn::parse2(model_ts)?);
+    let model = sums.receiver();
 
     let first = parts.next().ok_or_else(|| {
         syn::Error::new_spanned(&model, "soc_constraint! needs `[terms] <= bound`")
@@ -34,48 +35,55 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
     let root = oximo_root();
 
-    match second {
+    let expanded = match second {
         None => {
-            let (terms, bound) = parse_relation(first)?;
-            Ok(quote!( (#model).__add_soc_constraint_auto([#(#terms),*], #bound) ))
+            let (terms, bound) = parse_relation(first, &mut sums)?;
+            quote!( (#model).__add_soc_constraint_auto([#(#terms),*], #bound) )
         }
         Some(rel_tokens) => {
             // Computed name at run-time: `soc_constraint!(m, name = expr, ..)`.
             if let Some(name_expr) = computed_name(&first) {
-                let (terms, bound) = parse_relation(rel_tokens)?;
-                return Ok(quote!(
+                let (terms, bound) = parse_relation(rel_tokens, &mut sums)?;
+                return Ok(sums.wrap(quote!(
                     (#model).add_soc_constraint(#name_expr, [#(#terms),*], #bound)
-                ));
+                )));
             }
 
             let Named { name, binds, cond } = parse_named(first)?;
             let name_str = name.to_string();
-            let (terms, bound) = parse_relation(rel_tokens)?;
+            if let Some(binds) = &binds {
+                sums.indexed(binds);
+            }
+            let (terms, bound) = parse_relation(rel_tokens, &mut sums)?;
             match binds {
-                None => Ok(quote!(
+                None => quote!(
                     (#model).add_soc_constraint(#name_str, [#(#terms),*], #bound)
-                )),
+                ),
                 Some(binds) => {
                     let param = family_closure_param(&binds);
                     let used = mark_bindings_used(&binds);
                     let set = build_set(&binds, &root)?;
                     let set = filtered_set(set, &binds, cond.as_ref(), &root);
-                    Ok(quote! {
+                    quote! {
                         (#model).__add_soc_constraints_over(
                             #name_str,
                             &(#set),
                             |#param| { #used ([#(#terms),*], #bound) },
                         );
-                    })
+                    }
                 }
             }
         }
-    }
+    };
+    Ok(sums.wrap(expanded))
 }
 
 /// Parse the relation `[term, term, ...] <= bound` into the term expressions
 /// and the bound expression.
-fn parse_relation(tokens: TokenStream2) -> syn::Result<(Vec<Expr>, Expr)> {
+fn parse_relation(
+    tokens: TokenStream2,
+    sums: &mut crate::sum::ModelSums,
+) -> syn::Result<(Vec<Expr>, Expr)> {
     const SHAPE: &str = "a SOC constraint must be written `[term, term, ...] <= bound`";
     let (segs, ops) = split_relops(&tokens);
     let (lhs, rhs) = match (segs.len(), ops.as_slice()) {
@@ -96,16 +104,16 @@ fn parse_relation(tokens: TokenStream2) -> syn::Result<(Vec<Expr>, Expr)> {
     let terms = split_top_commas(group.stream())
         .into_iter()
         .filter(|seg| !seg.is_empty())
-        .map(parse_seg)
+        .map(|ts| parse_seg(ts, sums))
         .collect::<syn::Result<Vec<Expr>>>()?;
     if terms.is_empty() {
         return Err(syn::Error::new(group.span(), "a SOC constraint needs at least one term"));
     }
 
-    let bound = parse_seg(rhs)?;
+    let bound = parse_seg(rhs, sums)?;
     Ok((terms, bound))
 }
 
-fn parse_seg(ts: TokenStream2) -> syn::Result<Expr> {
-    syn::parse2(crate::index::rewrite_index_subscripts(ts))
+fn parse_seg(ts: TokenStream2, sums: &mut crate::sum::ModelSums) -> syn::Result<Expr> {
+    sums.rewrite(syn::parse2(crate::index::rewrite_index_subscripts(ts))?)
 }
