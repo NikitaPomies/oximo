@@ -85,6 +85,39 @@ fn filtered_sum_skips_nonmatching_keys() {
 }
 
 #[test]
+fn anchored_sum_uses_zero_for_empty_domain_and_filter() {
+    let m = Model::new("empty_sum");
+    let items = Set::range(0..0);
+    variable!(m, x[i in 0..3] >= 0.0);
+
+    let empty_domain = sum!(m, x[i] for i in items);
+    let empty_filter = sum!(m, x[i] for i in 0..3 if i > 10);
+    let nonempty = sum!(m, x[i] for i in 0..3);
+    let arena = m.arena();
+
+    assert!(
+        matches!(arena.get(empty_domain.id), oximo_core::ExprNode::Const(value) if *value == 0.0)
+    );
+    assert!(
+        matches!(arena.get(empty_filter.id), oximo_core::ExprNode::Const(value) if *value == 0.0)
+    );
+    let terms = oximo_expr::extract_linear(&arena, nonempty.id).expect("linear");
+    assert_eq!(terms.coeffs.len(), 3);
+}
+
+#[test]
+fn anchored_empty_sum_can_be_used_in_constraints_and_objectives() {
+    let m = Model::new("empty_sum_model");
+    let items = Set::range(0..0);
+    variable!(m, x >= 0.0);
+    constraint!(m, c, sum!(m, x for _i in items) <= 3.0);
+    objective!(m, Min, sum!(m, x for _i in items));
+
+    assert_eq!(m.num_constraints(), 1);
+    assert_eq!(m.kind(), ModelKind::LP);
+}
+
+#[test]
 fn large_sum_builds_correctly() {
     const N: usize = 2000;
     let m = Model::new("bigsum");

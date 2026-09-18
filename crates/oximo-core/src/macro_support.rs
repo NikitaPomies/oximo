@@ -12,11 +12,37 @@ pub use crate::set::{FromIndexKey, FromIndexKeyRef, IndexKeyRef, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;
 
+/// Sum over a domain while retaining a model-owned additive identity for an
+/// empty domain. This is the implementation behind the anchored
+/// `sum!(model, body for ...)` form.
+#[must_use]
+pub fn sum_over_in<'a, K, D, F>(
+    arena: &'a oximo_expr::ExprArenaCell,
+    domain: &D,
+    f: F,
+) -> oximo_expr::Expr<'a>
+where
+    D: SumDomain<K> + ?Sized,
+    F: FnMut(K) -> oximo_expr::Expr<'a>,
+{
+    oximo_expr::Expr::__sum_terms_in(arena, domain.keys().map(f))
+}
+
 /// Flatten already-collected `sum!` terms into one expression (a single n-ary
 /// `Add`).
 #[must_use]
 pub fn sum_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
     terms.into_iter().sum()
+}
+
+/// Flatten collected terms, returning a model-owned zero when the collection
+/// is empty. This is used by the filtered anchored `sum!` form.
+#[must_use]
+pub fn sum_terms_in<'a>(
+    arena: &'a oximo_expr::ExprArenaCell,
+    terms: Vec<oximo_expr::Expr<'a>>,
+) -> oximo_expr::Expr<'a> {
+    oximo_expr::Expr::__sum_terms_in(arena, terms.into_iter())
 }
 
 #[must_use]
