@@ -198,7 +198,7 @@ fn pattern_bindings_do_not_shadow_let_initializers_or_for_iterators() {
             let m = sum!(m, x for _j in 0..1);
             m
         };
-        for m in [sum!(m, x for _j in 0..1)] {
+        for m in std::iter::once(sum!(m, x for _j in 0..1)) {
             let _ = m;
         }
         from_let
