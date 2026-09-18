@@ -141,61 +141,100 @@ fn stable_model(expr: &Expr) -> Option<String> {
 }
 
 /// Visit Rust expressions, expanding nested oximo sums with the same context.
+struct Rewriter<'a> {
+    context: Option<&'a Context>,
+    error: Option<syn::Error>,
+    captures: &'a mut Captures,
+}
+
+impl VisitMut for Rewriter<'_> {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if self.error.is_some() {
+            return;
+        }
+        let scope = self.captures.blocked.len();
+        if let Expr::Macro(call) = expr
+            && is_sum_path(&call.mac.path)
+        {
+            match expand_in(call.mac.tokens.clone(), self.context, self.captures)
+                .and_then(syn::parse2)
+            {
+                Ok(expanded) => *expr = expanded,
+                Err(error) => self.error = Some(error),
+            }
+        } else {
+            visit_mut::visit_expr_mut(self, expr);
+        }
+        self.captures.blocked.truncate(scope);
+    }
+
+    fn visit_expr_match_mut(&mut self, expr: &mut syn::ExprMatch) {
+        self.visit_attributes_mut(&mut expr.attrs);
+        self.visit_expr_mut(&mut expr.expr);
+        for arm in &mut expr.arms {
+            let arm_scope = self.captures.blocked.len();
+            self.visit_attributes_mut(&mut arm.attrs);
+            self.visit_pat_mut(&mut arm.pat);
+            self.visit_expr_mut(&mut arm.body);
+            self.captures.blocked.truncate(arm_scope);
+        }
+    }
+
+    fn visit_expr_let_mut(&mut self, expr: &mut syn::ExprLet) {
+        self.visit_attributes_mut(&mut expr.attrs);
+        self.visit_expr_mut(&mut expr.expr);
+        self.visit_pat_mut(&mut expr.pat);
+    }
+
+    fn visit_expr_for_loop_mut(&mut self, expr: &mut syn::ExprForLoop) {
+        self.visit_attributes_mut(&mut expr.attrs);
+        if let Some(label) = &mut expr.label {
+            self.visit_label_mut(label);
+        }
+        self.visit_expr_mut(&mut expr.expr);
+        self.visit_pat_mut(&mut expr.pat);
+        self.visit_block_mut(&mut expr.body);
+    }
+
+    fn visit_pat_mut(&mut self, pat: &mut syn::Pat) {
+        self.captures.block_pattern(pat);
+    }
+
+    fn visit_stmt_mut(&mut self, stmt: &mut syn::Stmt) {
+        if let syn::Stmt::Macro(call) = stmt
+            && is_sum_path(&call.mac.path)
+        {
+            let semi = call.semi_token;
+            let mut expr =
+                Expr::Macro(syn::ExprMacro { attrs: call.attrs.clone(), mac: call.mac.clone() });
+            self.visit_expr_mut(&mut expr);
+            *stmt = syn::Stmt::Expr(expr, semi);
+        } else {
+            visit_mut::visit_stmt_mut(self, stmt);
+        }
+    }
+
+    fn visit_local_mut(&mut self, local: &mut syn::Local) {
+        self.visit_attributes_mut(&mut local.attrs);
+        if let Some(init) = &mut local.init {
+            self.visit_expr_mut(&mut init.expr);
+            if let Some((_, diverge)) = &mut init.diverge {
+                self.visit_expr_mut(diverge);
+            }
+        }
+        self.visit_pat_mut(&mut local.pat);
+    }
+
+    fn visit_item_mut(&mut self, _item: &mut syn::Item) {
+        // A nested function/item cannot capture the surrounding arena.
+    }
+}
+
 fn rewrite(
     mut expr: Expr,
     context: Option<&Context>,
     captures: &mut Captures,
 ) -> syn::Result<Expr> {
-    struct Rewriter<'a> {
-        context: Option<&'a Context>,
-        error: Option<syn::Error>,
-        captures: &'a mut Captures,
-    }
-    impl VisitMut for Rewriter<'_> {
-        fn visit_expr_mut(&mut self, expr: &mut Expr) {
-            if self.error.is_some() {
-                return;
-            }
-            let scope = self.captures.blocked.len();
-            if let Expr::Macro(call) = expr
-                && is_sum_path(&call.mac.path)
-            {
-                match expand_in(call.mac.tokens.clone(), self.context, self.captures)
-                    .and_then(syn::parse2)
-                {
-                    Ok(expanded) => *expr = expanded,
-                    Err(error) => self.error = Some(error),
-                }
-            } else {
-                visit_mut::visit_expr_mut(self, expr);
-            }
-            self.captures.blocked.truncate(scope);
-        }
-
-        fn visit_pat_mut(&mut self, pat: &mut syn::Pat) {
-            self.captures.block_pattern(pat);
-        }
-
-        fn visit_stmt_mut(&mut self, stmt: &mut syn::Stmt) {
-            if let syn::Stmt::Macro(call) = stmt
-                && is_sum_path(&call.mac.path)
-            {
-                let semi = call.semi_token;
-                let mut expr = Expr::Macro(syn::ExprMacro {
-                    attrs: call.attrs.clone(),
-                    mac: call.mac.clone(),
-                });
-                self.visit_expr_mut(&mut expr);
-                *stmt = syn::Stmt::Expr(expr, semi);
-            } else {
-                visit_mut::visit_stmt_mut(self, stmt);
-            }
-        }
-
-        fn visit_item_mut(&mut self, _item: &mut syn::Item) {
-            // A nested function/item cannot capture the surrounding arena.
-        }
-    }
     let mut rewriter = Rewriter { context, error: None, captures };
     rewriter.visit_expr_mut(&mut expr);
     match rewriter.error {

@@ -187,3 +187,22 @@ fn explicit_model_anchors_respect_local_shadowing() {
     assert!(message.contains("different model"));
     assert_eq!(value(sum!(m, x for _i in 0..1)), 1.0);
 }
+
+#[test]
+fn pattern_bindings_do_not_shadow_let_initializers_or_for_iterators() {
+    let m = Model::new("pattern_scope");
+    variable!(m, x);
+
+    let total = sum!(m, {
+        let from_let = {
+            let m = sum!(m, x for _j in 0..1);
+            m
+        };
+        for m in [sum!(m, x for _j in 0..1)] {
+            let _ = m;
+        }
+        from_let
+    } for _i in 0..1);
+
+    assert_eq!(value(total), 1.0);
+}
