@@ -16,34 +16,71 @@ pub(crate) trait Folder {
     fn accept(&self, state: &mut Self::State, value: Self::Value);
 }
 
+fn is_compound(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
+    matches!(
+        arena.get(id),
+        ExprNode::Add(_)
+            | ExprNode::Mul(_)
+            | ExprNode::Min(_)
+            | ExprNode::Max(_)
+            | ExprNode::Unary(_, _)
+            | ExprNode::Pow(_, _)
+            | ExprNode::Div(_, _)
+            | ExprNode::Atan2(_, _)
+    )
+}
+
 fn shared_nodes(arena: &(impl ArenaAccess + ?Sized), root: ExprId) -> FxHashSet<ExprId> {
     let mut seen = FxHashSet::default();
     let mut shared = FxHashSet::default();
     let mut stack = SmallVec::<[ExprId; 16]>::new();
-    stack.push(root);
+    // Only compound roots can have shared descendants. Leaves need no scan.
+    if is_compound(arena, root) {
+        seen.insert(root);
+        stack.push(root);
+    }
     while let Some(id) = stack.pop() {
-        let children: &[ExprId] = match arena.get(id) {
-            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::Min(c) | ExprNode::Max(c) => c,
-            ExprNode::Unary(_, c) | ExprNode::Pow(c, _) => std::slice::from_ref(c),
-            _ => continue,
-        };
-        for &child in children {
-            if !matches!(
-                arena.get(child),
-                ExprNode::Add(_)
-                    | ExprNode::Mul(_)
-                    | ExprNode::Min(_)
-                    | ExprNode::Max(_)
-                    | ExprNode::Unary(_, _)
-                    | ExprNode::Pow(_, _)
-            ) {
-                continue;
+        match arena.get(id) {
+            ExprNode::Add(children)
+            | ExprNode::Mul(children)
+            | ExprNode::Min(children)
+            | ExprNode::Max(children) => {
+                for &child in children {
+                    if !is_compound(arena, child) {
+                        continue;
+                    }
+                    if seen.insert(child) {
+                        stack.push(child);
+                    } else {
+                        shared.insert(child);
+                    }
+                }
             }
-            if seen.insert(child) {
-                stack.push(child);
-            } else {
-                shared.insert(child);
+            ExprNode::Unary(_, inner) => {
+                if is_compound(arena, *inner) {
+                    if seen.insert(*inner) {
+                        stack.push(*inner);
+                    } else {
+                        shared.insert(*inner);
+                    }
+                }
             }
+            ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) | ExprNode::Atan2(base, exp) => {
+                for &child in &[*base, *exp] {
+                    if !is_compound(arena, child) {
+                        continue;
+                    }
+                    if seen.insert(child) {
+                        stack.push(child);
+                    } else {
+                        shared.insert(child);
+                    }
+                }
+            }
+            ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Param(_)
+            | ExprNode::Linear { .. } => {}
         }
     }
     shared
