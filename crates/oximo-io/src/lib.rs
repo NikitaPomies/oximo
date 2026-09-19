@@ -5,6 +5,7 @@ pub mod error;
 pub mod lp;
 pub mod mps;
 pub mod nl;
+mod objective;
 
 pub use error::IoError;
 pub use lp::{read_lp, read_lp_file, to_lp_string, write_lp};

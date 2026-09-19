@@ -76,11 +76,14 @@ pub fn to_nl_string(model: &Model) -> Result<String, IoError> {
 
 /// Write `model` to `out`, honouring `opts`.
 ///
+/// A feasibility model (`objective!(m, Feasibility)`) declares zero objectives
+/// in the header and writes no `O` segment.
+///
 /// # Errors
 ///
-/// Returns [`IoError`] on missing objective, unsupported nodes, second-order
-/// cone constraints ([`IoError::Conic`]; the NL format has no conic segment),
-/// or I/O failure.
+/// Returns [`IoError`] on an undeclared objective, unsupported nodes,
+/// second-order cone constraints ([`IoError::Conic`]; the NL format has no
+/// conic segment), or I/O failure.
 pub fn write_nl_with<W: Write>(
     model: &Model,
     out: &mut W,
@@ -98,11 +101,19 @@ pub fn write_nl_with<W: Write>(
     let vars = model.variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
-    let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
+    // A feasibility model writes a header with zero objectives and no `O`
+    // segment; only a model that declared no direction at all is an error.
+    model.ensure_objective_declared().map_err(|_| IoError::NoObjective)?;
+    let objective = model.objective().clone();
 
     let arena = model.arena();
-    let analysis =
-        analyze::Analysis::build(&arena, &vars, constraints, &objective, opts.nonfinite_strings)?;
+    let analysis = analyze::Analysis::build(
+        &arena,
+        &vars,
+        constraints,
+        objective.as_ref(),
+        opts.nonfinite_strings,
+    )?;
     let perm = permute::Permutation::build(&vars, &analysis);
     let stats = header::Stats::build(&vars, constraints, &analysis, &perm, opts);
 
@@ -113,7 +124,7 @@ pub fn write_nl_with<W: Write>(
         &arena,
         &vars,
         constraints,
-        &objective,
+        objective.as_ref(),
         &analysis,
         &perm,
         &stats,
@@ -128,8 +139,8 @@ pub fn write_nl_with<W: Write>(
 ///
 /// Returns [`IoError::BinaryToString`] when `opts.format` is
 /// [`NlFormat::Binary`] (binary output is not UTF-8, so use [`write_nl_with`]
-/// with a byte sink instead), or [`IoError`] on missing objective, unsupported
-/// nodes, or I/O failure.
+/// with a byte sink instead), or [`IoError`] on an undeclared objective,
+/// unsupported nodes, or I/O failure.
 pub fn to_nl_string_with(model: &Model, opts: &WriteOptions) -> Result<String, IoError> {
     if opts.format == NlFormat::Binary {
         return Err(IoError::BinaryToString);
@@ -168,11 +179,17 @@ fn write_aux_files(model: &Model, stub: &Path, nonfinite_strings: bool) -> Resul
     let vars = model.variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
-    let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
+    model.ensure_objective_declared().map_err(|_| IoError::NoObjective)?;
+    let objective = model.objective().clone();
 
     let arena = model.arena();
-    let analysis =
-        analyze::Analysis::build(&arena, &vars, constraints, &objective, nonfinite_strings)?;
+    let analysis = analyze::Analysis::build(
+        &arena,
+        &vars,
+        constraints,
+        objective.as_ref(),
+        nonfinite_strings,
+    )?;
     let perm = permute::Permutation::build(&vars, &analysis);
 
     let row_path = stub.with_extension("row");
@@ -182,8 +199,11 @@ fn write_aux_files(model: &Model, stub: &Path, nonfinite_strings: bool) -> Resul
             writeln!(f, "{}", constraints[orig].name)?;
         }
         // AMPL `.row` includes objective names after constraint names.
-        // oximo has at most one objective (for now).
-        writeln!(f, "{}", model.name)?;
+        // oximo has at most one objective (for now), and none at all for a
+        // feasibility model.
+        if objective.is_some() {
+            writeln!(f, "{}", model.name)?;
+        }
     }
     let col_path = stub.with_extension("col");
     {
