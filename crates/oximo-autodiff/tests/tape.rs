@@ -9,7 +9,7 @@ use oximo_autodiff::slot::{
 use oximo_autodiff::sparsity::{
     hessian_lagrangian_structure, jacobian_structure, variable_support,
 };
-use oximo_autodiff::tape::Tape;
+use oximo_autodiff::tape::{CompiledBatch, CompiledExpr, Tape, TapeScratch};
 use oximo_expr::{ExprArena, ExprId, ExprNode, UnaryOp, VarId, evaluate};
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
@@ -263,4 +263,110 @@ fn tape_matches_direct_evaluation_for_full_nonlinear_vocabulary() {
     for root in roots {
         check_matches_evaluate(&arena, root.id, &points);
     }
+}
+
+#[test]
+fn deep_lowering_is_stack_safe_and_matches_evaluate() {
+    let mut arena = ExprArena::new();
+    let mut root = arena.push(ExprNode::Var(VarId(0)));
+    for _ in 0..20_000 {
+        root = arena.push(ExprNode::Unary(UnaryOp::Neg, root));
+    }
+    let tape = Tape::compile(&arena, root);
+    let mut regs = vec![0.0; tape.n_regs()];
+    let x = vec![0.7];
+    assert_eq!(tape.value(&x, &[], &[], &mut regs), evaluate(&arena, root, &x.as_slice()).unwrap());
+
+    let mut compiled = CompiledExpr::compile(&arena, root);
+    assert_eq!(compiled.eval(&x, &[]), 0.7);
+}
+
+#[test]
+fn heavily_shared_dag_lowers_once_per_level() {
+    let mut arena = ExprArena::new();
+    let mut root = arena.push(ExprNode::Var(VarId(0)));
+    for _ in 0..20 {
+        root = arena.push(ExprNode::Add([root, root].into_iter().collect()));
+    }
+    let tape = Tape::compile(&arena, root);
+    assert!(tape.n_regs() <= 22, "dedup expected, got {} regs", tape.n_regs());
+    let x = vec![0.5];
+    let mut regs = vec![0.0; tape.n_regs()];
+    assert_eq!(tape.value(&x, &[], &[], &mut regs), 2f64.powi(20) * 0.5);
+}
+
+#[test]
+fn compiled_expr_matches_evaluation_across_points() {
+    let mut arena = ExprArena::new();
+    let x0 = arena.var(VarId(0));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
+    let root = arena.push(ExprNode::Mul([sin, x0].into_iter().collect()));
+    let mut compiled = CompiledExpr::compile(&arena, root);
+    for x in [vec![0.5], vec![1.5], vec![-0.25]] {
+        let want = evaluate(&arena, root, &x.as_slice()).unwrap();
+        assert!((compiled.eval(&x, &[]) - want).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn tape_scratch_grows_and_reuses() {
+    let mut arena = ExprArena::new();
+    let x0 = arena.var(VarId(0));
+    let small = Tape::compile(&arena, x0);
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
+    let big = Tape::compile(&arena, sin);
+    assert!(big.n_regs() >= small.n_regs());
+    let mut scratch = TapeScratch::new();
+    assert!(scratch.is_empty());
+    let x = [0.7];
+    assert_eq!(small.value_with_scratch(&x, &[], &[], &mut scratch), 0.7);
+    let len = scratch.len();
+    assert_eq!(big.value_with_scratch(&x, &[], &[], &mut scratch), 0.7f64.sin());
+    assert!(scratch.len() >= len);
+}
+
+#[test]
+fn compiled_batch_shares_subexpressions_in_one_pass() {
+    let mut arena = ExprArena::new();
+    let x0 = arena.var(VarId(0));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
+    let f0 = arena.push(ExprNode::Mul([sin, x0].into_iter().collect()));
+    let f1 = arena.push(ExprNode::Unary(UnaryOp::Exp, sin));
+    let f2 = arena.push(ExprNode::Mul([sin, sin].into_iter().collect()));
+    let exprs = [f0, f1, f2];
+
+    let mut batch = CompiledBatch::compile(&arena, &exprs);
+    assert_eq!(batch.len(), 3);
+    assert!(!batch.is_empty());
+    let separate: usize = exprs.iter().map(|&e| Tape::compile(&arena, e).n_regs()).sum();
+    assert!(batch.n_regs() <= separate, "batch shares subexpressions");
+
+    let x = vec![0.6];
+    let mut out = vec![0.0; 3];
+    batch.eval(&x, &[], &mut out);
+    for (slot, &expr) in out.iter().zip(&exprs) {
+        assert!((*slot - evaluate(&arena, expr, &x.as_slice()).unwrap()).abs() < 1e-14);
+    }
+
+    let points = vec![vec![0.6], vec![-0.3]];
+    let mut flat = Vec::new();
+    batch.eval_points(&points, &[], &mut flat);
+    assert_eq!(flat.len(), 6);
+
+    let empty = CompiledBatch::compile(&arena, &[]);
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn batch_keeps_aliased_and_repeated_root_registers() {
+    let mut arena = ExprArena::new();
+    let v = arena.var(VarId(0));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, v));
+    let alias = arena.push(ExprNode::Add([sin].into_iter().collect()));
+    let other = arena.push(ExprNode::Unary(UnaryOp::Cos, v));
+    let roots = [sin, alias, other, sin, v];
+    let mut batch = CompiledBatch::compile(&arena, &roots);
+    let mut out = [0.0; 5];
+    batch.eval(&[0.7], &[], &mut out);
+    assert_eq!(out, [0.7_f64.sin(), 0.7_f64.sin(), 0.7_f64.cos(), 0.7_f64.sin(), 0.7]);
 }
