@@ -26,4 +26,4 @@ pub use ops::dot;
 pub use quadratic::{QuadraticTerms, extract_quadratic};
 pub use render::{render_expr, render_linear_terms};
 pub use simplify::simplify;
-pub use visit::{Visitor, walk};
+pub use visit::{Visitor, walk, walk_shared};

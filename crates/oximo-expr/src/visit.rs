@@ -7,34 +7,77 @@ pub trait Visitor {
 }
 
 /// Walk the subtree rooted at `id` in pre-order.
+///
+/// Implemented with an explicit stack so arbitrarily deep expressions are
+/// safe.
 pub fn walk<V: Visitor>(arena: &ExprArena, id: ExprId, visitor: &mut V) {
-    let node = arena.get(id);
-    visitor.visit(arena, id, node);
-    match node {
-        ExprNode::Add(children)
-        | ExprNode::Mul(children)
-        | ExprNode::Min(children)
-        | ExprNode::Max(children) => {
-            for &child in children {
-                walk(arena, child, visitor);
+    let mut stack = vec![id];
+    while let Some(cur) = stack.pop() {
+        let node = arena.get(cur);
+        visitor.visit(arena, cur, node);
+        match node {
+            ExprNode::Add(children)
+            | ExprNode::Mul(children)
+            | ExprNode::Min(children)
+            | ExprNode::Max(children) => {
+                for &child in children.iter().rev() {
+                    stack.push(child);
+                }
             }
+            ExprNode::Unary(_, inner) => {
+                stack.push(*inner);
+            }
+            ExprNode::Pow(base, exp) | ExprNode::Atan2(base, exp) => {
+                stack.push(*exp);
+                stack.push(*base);
+            }
+            ExprNode::Div(num, den) => {
+                stack.push(*den);
+                stack.push(*num);
+            }
+            ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Param(_)
+            | ExprNode::Linear { .. } => {}
         }
-        ExprNode::Unary(_, inner) => {
-            let inner = *inner;
-            walk(arena, inner, visitor);
+    }
+}
+
+/// Walk the distinct nodes reachable from `id` in pre-order, visiting each
+/// shared subexpression exactly once.
+pub fn walk_shared<V: Visitor>(arena: &ExprArena, id: ExprId, visitor: &mut V) {
+    let mut visited = rustc_hash::FxHashSet::default();
+    let mut stack = vec![id];
+    while let Some(cur) = stack.pop() {
+        if !visited.insert(cur) {
+            continue;
         }
-        ExprNode::Pow(base, exp) | ExprNode::Atan2(base, exp) => {
-            let base = *base;
-            let exp = *exp;
-            walk(arena, base, visitor);
-            walk(arena, exp, visitor);
+        let node = arena.get(cur);
+        visitor.visit(arena, cur, node);
+        match node {
+            ExprNode::Add(children)
+            | ExprNode::Mul(children)
+            | ExprNode::Min(children)
+            | ExprNode::Max(children) => {
+                for &child in children.iter().rev() {
+                    stack.push(child);
+                }
+            }
+            ExprNode::Unary(_, inner) => {
+                stack.push(*inner);
+            }
+            ExprNode::Pow(base, exp) | ExprNode::Atan2(base, exp) => {
+                stack.push(*exp);
+                stack.push(*base);
+            }
+            ExprNode::Div(num, den) => {
+                stack.push(*den);
+                stack.push(*num);
+            }
+            ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Param(_)
+            | ExprNode::Linear { .. } => {}
         }
-        ExprNode::Div(num, den) => {
-            let num = *num;
-            let den = *den;
-            walk(arena, num, visitor);
-            walk(arena, den, visitor);
-        }
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
     }
 }
