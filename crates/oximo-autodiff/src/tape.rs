@@ -104,7 +104,7 @@ impl Tape {
     }
 
     /// Evaluate with a reusable [`TapeScratch`].
-	/// The scratch is grown to [`Tape::n_regs`] when necessary and
+    /// The scratch is grown to [`Tape::n_regs`] when necessary and
     /// reused across calls.
     pub fn value_with_scratch(
         &self,
@@ -385,7 +385,7 @@ impl Builder {
             return reg;
         }
         // Complete one dependency at a time.
-		// Completed nodes are already in memo.
+        // Completed nodes are already in memo.
         let mut stack = smallvec::SmallVec::<[LoweringFrame; 16]>::new();
         stack.push(LoweringFrame::new(arena, id));
         while let Some(frame) = stack.last_mut() {

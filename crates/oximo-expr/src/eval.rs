@@ -113,8 +113,8 @@ fn eval_shallow<C: EvalContext>(
         _ => return None,
     };
     // Ascending IDs prove these leaves are distinct without a hash set.
-	// We do the shape check before querying the context, so fallback never
-	// repeats context calls or changes which missing value is reported first.
+    // We do the shape check before querying the context, so fallback never
+    // repeats context calls or changes which missing value is reported first.
     let mut previous = None;
     if !children.iter().all(|&child| {
         let distinct = previous.is_none_or(|p| child.index() > p);
