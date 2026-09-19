@@ -26,3 +26,7 @@ smallvec.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "tape_eval"
+harness = false
