@@ -1240,7 +1240,9 @@ pub fn read_mps_file_with(
 /// The objective row is named `OBJ`.
 /// Variable and constraint names have whitespace replaced by underscores and
 /// are made unique within their respective MPS namespaces. The generated
-/// objective row reserves the name `OBJ`.
+/// objective row reserves the name `OBJ`. A feasibility model
+/// (`objective!(m, Feasibility)`) leaves that row without coefficients and
+/// declares `OBJSENSE MIN`.
 ///
 /// # Errors
 ///
@@ -1280,16 +1282,9 @@ pub fn write_mps_with<W: Write>(
     let vars = model.variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
-    let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
+    let (obj_sense, obj_terms) = crate::objective::export_terms(model, &arena, &vars)?;
     let variable_names = unique_mps_names(vars.iter().map(|v| v.name.as_str()), "C", []);
     let row_names = unique_mps_names(constraints.iter().map(|c| c.name.as_str()), "R", ["OBJ"]);
-
-    let obj_terms =
-        extract_quadratic(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
-            location: "the objective".into(),
-            term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
-                .unwrap_or_else(|| "<nonlinear>".into()),
-        })?;
 
     // Pre-compute quadratic terms once, reused for COLUMNS, RHS, and quadratic sections.
     let con_terms: Vec<QuadraticTerms> = constraints
@@ -1318,7 +1313,7 @@ pub fn write_mps_with<W: Write>(
     writeln!(
         out,
         "* sense: {}",
-        match objective.sense {
+        match obj_sense {
             ObjectiveSense::Minimize => "minimize",
             ObjectiveSense::Maximize => "maximize",
         }
@@ -1328,7 +1323,7 @@ pub fn write_mps_with<W: Write>(
     writeln!(
         out,
         " {}",
-        match objective.sense {
+        match obj_sense {
             ObjectiveSense::Minimize => "MIN",
             ObjectiveSense::Maximize => "MAX",
         }

@@ -36,7 +36,8 @@ impl Row {
 #[derive(Debug)]
 pub(crate) struct Analysis {
     pub(crate) cons: Vec<Row>,
-    pub(crate) obj: Row,
+    /// `None` for a feasibility model, which NL writes with zero objectives.
+    pub(crate) obj: Option<Row>,
     /// Concatenated sorted variable supports for all constraint rows.
     cons_vars: Vec<VarId>,
     /// Row starts into `cons_vars`.
@@ -63,7 +64,7 @@ impl Analysis {
         arena: &ExprArena,
         vars: &[Variable],
         constraints: &[Constraint],
-        objective: &Objective,
+        objective: Option<&Objective>,
         nonfinite_strings: bool,
     ) -> Result<Self, IoError> {
         for v in vars {
@@ -109,23 +110,28 @@ impl Analysis {
             cons_var_offsets.push(cons_vars.len());
         }
 
-        let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
         let mut obj_all = FxHashSet::default();
-        for (v, _) in obj_linear.coeffs.iter() {
-            obj_all.insert(*v);
-        }
-        if !obj_residual.is_empty() {
-            let mut nl_set: FxHashSet<VarId> = FxHashSet::default();
-            for r in &obj_residual {
-                validate(arena, r.id, nonfinite_strings)?;
-                collect_vars(arena, r.id, &mut nl_set)?;
+        let obj = match objective {
+            Some(objective) => {
+                let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
+                for (v, _) in obj_linear.coeffs.iter() {
+                    obj_all.insert(*v);
+                }
+                if !obj_residual.is_empty() {
+                    let mut nl_set: FxHashSet<VarId> = FxHashSet::default();
+                    for r in &obj_residual {
+                        validate(arena, r.id, nonfinite_strings)?;
+                        collect_vars(arena, r.id, &mut nl_set)?;
+                    }
+                    for v in &nl_set {
+                        nl_vars_o.insert(*v);
+                        obj_all.insert(*v);
+                    }
+                }
+                Some(Row { linear: obj_linear.into_owned(), residual: obj_residual })
             }
-            for v in &nl_set {
-                nl_vars_o.insert(*v);
-                obj_all.insert(*v);
-            }
-        }
-        let obj = Row { linear: obj_linear.into_owned(), residual: obj_residual };
+            None => None,
+        };
 
         Ok(Self {
             cons,
@@ -332,7 +338,7 @@ pub mod benchmark_support {
             collect_vars(arena, residual.id, &mut nl_vars_o)?;
         }
         obj_all.extend(nl_vars_o.iter().copied());
-        let obj = Row { linear: obj_linear.into_owned(), residual: obj_residual };
+        let obj = Some(Row { linear: obj_linear.into_owned(), residual: obj_residual });
         let obj_vars = sorted(obj_all);
         Ok(Analysis { cons, obj, cons_vars, cons_var_offsets, obj_vars, nl_vars_c, nl_vars_o })
     }

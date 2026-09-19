@@ -181,7 +181,7 @@ All functions return `Result<_, IoError>`:
 
 | Variant                       | Cause                                                                      |
 | ----------------------------- | -------------------------------------------------------------------------- |
-| `IoError::NoObjective`        | Model has no objective set                                                 |
+| `IoError::NoObjective`        | Model declared neither an objective nor `Feasibility`                      |
 | `IoError::Nonlinear`          | Unsupported nonlinear node in an MPS/LP model (LP accepts degree <= 2)     |
 | `IoError::UnsupportedNode(n)` | Node not representable in the target format, e.g. `Param` in NL            |
 | `IoError::InvalidNumber`      | Non-finite (NaN/Inf) constant while `nonfinite_strings` is off             |

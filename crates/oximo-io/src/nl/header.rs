@@ -4,7 +4,7 @@ use std::io::Write;
 
 use oximo_core::{Constraint, Domain, Model, Sense, Variable};
 
-use super::analyze::Analysis;
+use super::analyze::{Analysis, Row};
 use super::options::{NlFormat, WriteOptions};
 use super::permute::Permutation;
 use super::writer::Writer;
@@ -45,7 +45,7 @@ impl Stats {
             constraints.iter().filter(|c| matches!(c.as_single(), Some((Sense::Eq, _)))).count();
         let n_ranges = constraints.iter().filter(|c| c.is_range()).count();
         let nl_con = analysis.cons.iter().filter(|r| r.is_nonlinear()).count();
-        let nl_obj = usize::from(analysis.obj.is_nonlinear());
+        let nl_obj = usize::from(analysis.obj.as_ref().is_some_and(Row::is_nonlinear));
 
         let cv = &analysis.nl_vars_c;
         let ov = &analysis.nl_vars_o;
@@ -93,7 +93,7 @@ impl Stats {
         Self {
             n_var: vars.len(),
             n_con: constraints.len(),
-            n_obj: 1,
+            n_obj: usize::from(analysis.obj.is_some()),
             n_ranges,
             n_eqns,
             nl_con,

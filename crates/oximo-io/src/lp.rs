@@ -956,7 +956,7 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
 ///
 /// Sections emitted:
 /// - `\* ... *\` header comment with model name and original sense
-/// - `Minimize` / `Maximize` with `obj:` row
+/// - `Minimize` / `Maximize` with `obj:` row (`obj: 0` for a feasibility model)
 /// - `Subject To` with each constraint
 /// - `Bounds` (only non-default bounds)
 /// - `General` (non-binary integer vars)
@@ -968,10 +968,13 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
 /// [`IoError::Nonlinear`]; second-order cone constraints raise
 /// [`IoError::Conic`].
 ///
+/// A feasibility model (`objective!(m, Feasibility)`) is written as
+/// `Minimize` with a zero objective row.
+///
 /// # Errors
 ///
-/// Returns [`IoError`] on I/O failure, missing objective, or nonlinear/conic
-/// constructs.
+/// Returns [`IoError`] on I/O failure, nonlinear/conic constructs, or
+/// [`IoError::NoObjective`] when the model declares no objective at all
 #[expect(clippy::too_many_lines)]
 pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     if model.num_soc_constraints() > 0
@@ -983,18 +986,11 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     let vars = model.variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
-    let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
-
-    let obj_terms =
-        extract_quadratic(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
-            location: "the objective".into(),
-            term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
-                .unwrap_or_else(|| "<nonlinear>".into()),
-        })?;
+    let (obj_sense, obj_terms) = crate::objective::export_terms(model, &arena, &vars)?;
 
     writeln!(out, "\\* OXIMO LP export - model: {} *\\", model.name)?;
 
-    let sense_kw = match objective.sense {
+    let sense_kw = match obj_sense {
         ObjectiveSense::Minimize => "Minimize",
         ObjectiveSense::Maximize => "Maximize",
     };

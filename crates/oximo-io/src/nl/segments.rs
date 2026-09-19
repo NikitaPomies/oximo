@@ -24,7 +24,7 @@ pub(crate) fn write_segments<W: Write>(
     arena: &ExprArena,
     vars: &[Variable],
     constraints: &[Constraint],
-    objective: &Objective,
+    objective: Option<&Objective>,
     analysis: &Analysis,
     perm: &Permutation,
     _stats: &Stats,
@@ -34,7 +34,7 @@ pub(crate) fn write_segments<W: Write>(
     write_s_segments(w, &opts.suffixes)?;
     write_v_segments(w, &opts.defined_vars)?;
     write_c_segments(w, arena, perm, analysis)?;
-    write_o_segment(w, arena, perm, objective, &analysis.obj)?;
+    write_o_segment(w, arena, perm, objective, analysis.obj.as_ref())?;
     write_d_segment(w, &opts.dual_init)?;
     write_x_segment(w, vars, perm)?;
     write_r_segment(w, constraints, perm, analysis, &opts.complementarity)?;
@@ -135,13 +135,17 @@ fn write_c_segments<W: Write>(
     Ok(())
 }
 
+/// Feasibility models declare zero objectives, so there is no `O` segment.
 fn write_o_segment<W: Write>(
     w: &mut Writer<'_, W>,
     arena: &ExprArena,
     perm: &Permutation,
-    objective: &Objective,
-    obj: &Row,
+    objective: Option<&Objective>,
+    obj: Option<&Row>,
 ) -> Result<(), IoError> {
+    let (Some(objective), Some(obj)) = (objective, obj) else {
+        return Ok(());
+    };
     let sense_flag: i64 = match objective.sense {
         ObjectiveSense::Minimize => 0,
         ObjectiveSense::Maximize => 1,
@@ -378,10 +382,10 @@ fn write_g_segment<W: Write>(
     perm: &Permutation,
     analysis: &Analysis,
 ) -> Result<(), IoError> {
-    if analysis.obj_vars.is_empty() {
+    let Some(obj) = analysis.obj.as_ref().filter(|_| !analysis.obj_vars.is_empty()) else {
         return Ok(());
-    }
-    let entries = row_entries(&analysis.obj, &analysis.obj_vars, &perm.var_index);
+    };
+    let entries = row_entries(obj, &analysis.obj_vars, &perm.var_index);
     w.seg_header(b'G', &[0, i64::try_from(entries.len()).expect("G nz")], None)?;
     for (col, coef) in entries {
         w.int(i64::from(col))?;
