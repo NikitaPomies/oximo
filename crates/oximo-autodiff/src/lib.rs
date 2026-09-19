@@ -16,7 +16,7 @@ mod linearize;
 
 pub use error::AutodiffError;
 pub use slot::{FunctionSlot, SlotKind};
-pub use tape::Tape;
+pub use tape::{CompiledBatch, CompiledExpr, Tape, TapeScratch, params_snapshot};
 
 #[cfg(feature = "enzyme")]
 pub use evaluator::NlpEvaluator;

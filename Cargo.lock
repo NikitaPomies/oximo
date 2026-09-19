@@ -1619,6 +1619,7 @@ dependencies = [
  "oximo-expr",
  "rayon",
  "rustc-hash",
+ "smallvec",
  "thiserror 2.0.18",
 ]
 
