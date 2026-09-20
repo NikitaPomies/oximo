@@ -9,8 +9,9 @@ use oximo_solver::prepare::LoweringContext;
 use oximo_solver::{DualStatus, SolverError, SolverResult, TerminationStatus};
 use pounce_rs::IpoptApplication;
 use pounce_rs::convex::{
-    ActiveSetOverrides, ConeSpec, QpOptions, QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet,
-    solve_qp_active_set, solve_qp_ipm, solve_qp_ipm_warm, solve_socp_ipm, solve_socp_ipm_warm,
+    ActiveSetOverrides, ConeSpec, ConvexPresolveSession, QpOptions, QpProblem, QpSolution,
+    QpStatus, QpWarmStart, Triplet, solve_qp_active_set, solve_qp_ipm, solve_qp_ipm_warm,
+    solve_socp_ipm, solve_socp_ipm_warm,
 };
 use pounce_rs::linsol::backend;
 
@@ -613,7 +614,7 @@ fn convex_log(route: Route, sol: &QpSolution) -> String {
     log
 }
 
-fn qp_options(opts: &PounceOptions) -> QpOptions {
+pub(crate) fn qp_options(opts: &PounceOptions) -> QpOptions {
     let mut out = QpOptions::default();
     if let Some(value) = opts.tol {
         out.tol = value;
@@ -674,7 +675,7 @@ fn active_set_options(opts: &PounceOptions) -> ActiveSetOverrides {
     }
 }
 
-fn presolve_enabled(opts: &PounceOptions) -> bool {
+pub(crate) fn presolve_enabled(opts: &PounceOptions) -> bool {
     bool_value(opts, "qp_presolve").or_else(|| bool_value(opts, "presolve")).unwrap_or(true)
 }
 
@@ -794,6 +795,33 @@ pub(crate) struct ActivePersistent {
     session: pounce_rs::convex::ActiveSetSession,
     engine: ActiveSetOverrides,
     presolve: bool,
+}
+
+/// Resident convex-IPM session. POUNCE owns the retained presolve transform
+/// and projects each original-space warm point through it.
+pub(crate) struct IpmPersistent {
+    session: ConvexPresolveSession,
+}
+
+impl IpmPersistent {
+    pub(crate) fn new() -> Self {
+        Self { session: ConvexPresolveSession::new() }
+    }
+
+    pub(crate) fn solve(
+        &mut self,
+        problem: &Problem,
+        opts: &PounceOptions,
+        warm: Option<&QpWarmStart>,
+    ) -> QpSolution {
+        self.session.set_presolve(presolve_enabled(opts));
+        self.session.solve(&problem.qp, warm, &qp_options(opts), backend)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_reused_transform(&self) -> bool {
+        self.session.last_reused_transform()
+    }
 }
 
 impl ActivePersistent {

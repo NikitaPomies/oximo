@@ -11,7 +11,8 @@ and its IPOPT-based general NLP engines.
     low-level `TNLP` surface with exact analytic gradients, Jacobian rows,
     and the exact constant Hessian of the Lagrangian including duals,
     reduced costs, iteration counts, and full primal-dual warm starts
-    via the persistent handle.
+    via the persistent handle. Interior-point warm starts are projected through
+    POUNCE's retained presolve transformation when NLP presolve is enabled.
   - A model with a nonlinear function solves through POUNCE's `builder` surface,
     where it uses finite differences and limited-memory L-BFGS Hessian.
     The backend supplies values from compiled tapes and still fills the exact
