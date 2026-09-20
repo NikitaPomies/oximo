@@ -24,6 +24,7 @@ use crate::translate::{
 
 /// The resident derivative oracle, shared between the handle and the solve.
 pub(crate) type Oracle = Rc<RefCell<HybridOracle>>;
+pub(crate) type Resident = tnlp::Resident<HybridOracle>;
 
 const GENERATED_FBBT_TAPE_REJECTED: &str = "oximo-pounce: generated FBBT tape rejected";
 
@@ -43,6 +44,10 @@ pub(crate) fn try_reuse(oracle: &Oracle, model: &Model) -> bool {
     } else {
         false
     }
+}
+
+pub(crate) fn supports_resident(oracle: &Oracle) -> bool {
+    oracle.borrow().all_closed_form()
 }
 
 /// Solve on the exact `TNLP` path when the whole model is closed-form,
@@ -195,6 +200,7 @@ fn run_builder(
         z_l: sol.z_l.clone(),
         z_u: sol.z_u.clone(),
         lambda: sol.multipliers.clone(),
+        mu: Some(sol.stats.final_mu),
         sqp_working: None,
     });
     Ok(Outcome {

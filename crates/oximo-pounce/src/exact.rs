@@ -13,6 +13,7 @@ use crate::tnlp::DerivativeOracle;
 
 /// The resident derivative oracle, shared between the handle and the `TNLP`.
 pub(crate) type Oracle = Rc<RefCell<NlpEvaluator>>;
+pub(crate) type Resident = crate::tnlp::Resident<NlpEvaluator>;
 
 /// Build a fresh evaluator.
 ///
@@ -27,6 +28,10 @@ pub(crate) fn build(model: &Model) -> Result<Oracle, SolverError> {
 /// Reuse the resident evaluator for `model` when the structure is unchanged.
 pub(crate) fn try_reuse(oracle: &Oracle, model: &Model) -> bool {
     oracle.borrow_mut().try_refresh(model)
+}
+
+pub(crate) fn supports_resident(_oracle: &Oracle) -> bool {
+    true
 }
 
 /// Exact derivatives always drive the `TNLP` surface directly.

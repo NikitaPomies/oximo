@@ -45,6 +45,7 @@ pub(crate) struct WarmStart {
     pub z_l: Vec<f64>,
     pub z_u: Vec<f64>,
     pub lambda: Vec<f64>,
+    pub mu: Option<f64>,
     pub sqp_working: Option<pounce_rs::sqp::WorkingSet>,
 }
 
@@ -136,7 +137,21 @@ pub(crate) fn run_nlp_with_retries(
     warm: Option<&WarmStart>,
 ) -> Result<Outcome, SolverError> {
     let started = Instant::now();
-    let mut original = backend::run(model, oracle, prep, opts, warm)?;
+    let original = backend::run(model, oracle, prep, opts, warm)?;
+    run_nlp_retries_after(model, oracle, prep, opts, started, original)
+}
+
+/// Apply oximo's local-infeasibility second opinions after a caller-specific
+/// primary solve. Persistent TNLP sessions use this so retries retain the same
+/// policy without giving up their resident presolve transform.
+pub(crate) fn run_nlp_retries_after(
+    model: &Model,
+    oracle: &backend::Oracle,
+    prep: &Prepared,
+    opts: &PounceOptions,
+    started: Instant,
+    mut original: Outcome,
+) -> Result<Outcome, SolverError> {
     if original.termination != TerminationStatus::LocallyInfeasible {
         return Ok(original);
     }

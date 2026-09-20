@@ -11,6 +11,8 @@ use std::rc::Rc;
 
 use oximo_solver::{DualStatus, SolverError};
 use pounce_rs::pounce_nlp::solve_statistics::SolveStatistics;
+use pounce_rs::presolve::WarmPoint;
+use pounce_rs::session::{SessionSolution, TnlpPresolveSession};
 use pounce_rs::{
     ApplicationReturnStatus, BoundsInfo, Index, IndexStyle, IpoptApplication, IpoptCq, IpoptData,
     NlpInfo, Solution, SparsityRequest, StartingPoint, TNLP,
@@ -65,17 +67,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
     opts: &PounceOptions,
     warm: Option<&WarmStart>,
 ) -> Result<Outcome, SolverError> {
-    let tnlp = Rc::new(RefCell::new(OximoTnlp {
-        oracle: Rc::clone(oracle),
-        sign: prep.sign,
-        x_l: prep.x_l.clone(),
-        x_u: prep.x_u.clone(),
-        g_l: prep.g_l.clone(),
-        g_u: prep.g_u.clone(),
-        x0: prep.x0.clone(),
-        warm: warm.cloned(),
-        captured: None,
-    }));
+    let tnlp = Rc::new(RefCell::new(OximoTnlp::new(Rc::clone(oracle), prep, warm.cloned())));
 
     let mut app = IpoptApplication::new();
     app.initialize().map_err(|e| SolverError::Backend(format!("pounce init: {e:?}")))?;
@@ -108,6 +100,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
 
     if let Some(captured) = &mut tnlp.borrow_mut().captured {
         captured.warm.sqp_working = sqp_working;
+        captured.warm.mu = Some(stats.final_mu);
     }
     let t = tnlp.borrow();
     Ok(match &t.captured {
@@ -144,6 +137,122 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
             raw_log,
         },
     })
+}
+
+/// A live TNLP plus POUNCE's presolve-aware warm session.
+///
+/// The typed handle is retained alongside the erased handle owned by POUNCE so
+/// refreshed model data can be installed before each solve.
+pub(crate) struct Resident<O> {
+    tnlp: Rc<RefCell<OximoTnlp<O>>>,
+    session: TnlpPresolveSession,
+    options: PounceOptions,
+}
+
+impl<O: DerivativeOracle + 'static> Resident<O> {
+    pub(crate) fn new(
+        oracle: &Rc<RefCell<O>>,
+        prep: &Prepared,
+        opts: &PounceOptions,
+    ) -> Result<Self, SolverError> {
+        let tnlp = Rc::new(RefCell::new(OximoTnlp::new(Rc::clone(oracle), prep, None)));
+        let inner = Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>;
+        let mut session = TnlpPresolveSession::new(inner)
+            .map_err(|error| SolverError::Backend(format!("pounce session: {error}")))?;
+        if !oracle.borrow().has_exact_hessian() {
+            set_str(session.options_mut(), "hessian_approximation", "limited-memory")?;
+        }
+        apply_options(session.options_mut(), opts, true)?;
+        if let Some(mu) = opts.effective_num("mu_init") {
+            session
+                .set_option_num("mu_init", mu)
+                .map_err(|error| SolverError::Backend(format!("pounce session: {error}")))?;
+        }
+        if opts.universal.verbose == Some(true) {
+            session.enable_iter_history();
+        }
+        Ok(Self { tnlp, session, options: opts.clone() })
+    }
+
+    pub(crate) fn matches_options(&self, opts: &PounceOptions) -> bool {
+        self.options == *opts
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.session.invalidate();
+    }
+
+    pub(crate) fn solve(
+        &mut self,
+        prep: &Prepared,
+        opts: &PounceOptions,
+        warm: Option<&WarmStart>,
+    ) -> Result<Outcome, SolverError> {
+        self.tnlp.borrow_mut().refresh(prep);
+        let result = match warm {
+            Some(warm) => {
+                let point = WarmPoint {
+                    x: warm.x.clone(),
+                    lambda: warm.lambda.clone(),
+                    z_l: warm.z_l.clone(),
+                    z_u: warm.z_u.clone(),
+                    mu: warm.mu,
+                };
+                self.session.solve_warm(&point)
+            }
+            None => self.session.solve_cold(),
+        }
+        .map_err(|error| SolverError::Backend(format!("pounce session: {error}")))?;
+        Ok(session_outcome(result, opts, &self.tnlp.borrow()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_presolve_reused(&self) -> Option<bool> {
+        self.session.last().map(|solution| solution.presolve_reused)
+    }
+}
+
+fn session_outcome<O: DerivativeOracle>(
+    solution: SessionSolution,
+    opts: &PounceOptions,
+    tnlp: &OximoTnlp<O>,
+) -> Outcome {
+    let SessionSolution { status, x, objective, lambda, z_l, z_u, stats, .. } = solution;
+    let termination = map_status(status);
+    let has_point = crate::translate::nlp_has_point(status, &stats, opts);
+    let iterations = u64::try_from(stats.iteration_count.max(0)).unwrap_or(0);
+    let raw_log = (opts.universal.verbose == Some(true)).then(|| format_raw_log(&stats, status));
+    let captured = x.len() == tnlp.oracle.borrow().num_variables()
+        && lambda.len() == tnlp.oracle.borrow().num_constraints()
+        && z_l.len() == x.len()
+        && z_u.len() == x.len();
+    let reduced = captured.then(|| z_l.iter().zip(&z_u).map(|(&zl, &zu)| zl - zu).collect());
+    let warm = captured.then(|| WarmStart {
+        x: x.clone(),
+        z_l: z_l.clone(),
+        z_u: z_u.clone(),
+        lambda: lambda.clone(),
+        mu: Some(stats.final_mu),
+        sqp_working: None,
+    });
+    Outcome {
+        has_point,
+        termination,
+        dual_status: if matches!(status, ApplicationReturnStatus::SolveSucceeded) {
+            DualStatus::FeasiblePoint
+        } else {
+            DualStatus::Unknown
+        },
+        raw_status: format!("{status:?}"),
+        x,
+        lambda,
+        soc_dual: Vec::new(),
+        reduced,
+        objective: captured.then_some(objective),
+        iterations,
+        warm,
+        raw_log,
+    }
 }
 
 /// The Ipopt-style end-of-solve report off the application's statistics
@@ -280,6 +389,33 @@ struct OximoTnlp<O> {
     captured: Option<Captured>,
 }
 
+impl<O> OximoTnlp<O> {
+    fn new(oracle: Rc<RefCell<O>>, prep: &Prepared, warm: Option<WarmStart>) -> Self {
+        Self {
+            oracle,
+            sign: prep.sign,
+            x_l: prep.x_l.clone(),
+            x_u: prep.x_u.clone(),
+            g_l: prep.g_l.clone(),
+            g_u: prep.g_u.clone(),
+            x0: prep.x0.clone(),
+            warm,
+            captured: None,
+        }
+    }
+
+    fn refresh(&mut self, prep: &Prepared) {
+        self.sign = prep.sign;
+        self.x_l.clone_from(&prep.x_l);
+        self.x_u.clone_from(&prep.x_u);
+        self.g_l.clone_from(&prep.g_l);
+        self.g_u.clone_from(&prep.g_u);
+        self.x0.clone_from(&prep.x0);
+        self.warm = None;
+        self.captured = None;
+    }
+}
+
 impl<O: DerivativeOracle> TNLP for OximoTnlp<O> {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         let e = self.oracle.borrow();
@@ -394,6 +530,7 @@ impl<O: DerivativeOracle> TNLP for OximoTnlp<O> {
                 z_l: sol.z_l.to_vec(),
                 z_u: sol.z_u.to_vec(),
                 lambda: sol.lambda.to_vec(),
+                mu: None,
                 sqp_working: None,
             },
             reduced,
