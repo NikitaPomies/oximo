@@ -28,7 +28,7 @@ fn gurobi_multi_optima_returns_pool() {
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-6);
     let mut prev = f64::INFINITY;
     for s in &r.solutions {
-        let chosen: f64 = (0..4).filter_map(|i| s.value_of_idx(&x, i)).sum();
+        let chosen: f64 = (0..4).filter_map(|i| s.value_of_idx(&x, i).unwrap()).sum();
         assert!(chosen <= 2.0 + 1e-6, "infeasible pool point: sum={chosen}");
         let obj = s.objective.expect("pool point has an objective");
         assert!(obj <= prev + 1e-9, "pool not ordered best-first");
@@ -50,9 +50,9 @@ fn gurobi_qp_duals_linear_constraint() {
     let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 2.0).abs() < 1e-5);
-    assert!((result.value_of(x).unwrap() - 1.0).abs() < 1e-5);
+    assert!((result.value_of(x).unwrap().unwrap() - 1.0).abs() < 1e-5);
 
-    let dual = result.dual_of(cap).expect("dual missing for cap");
+    let dual = result.dual_of(cap).expect("matching model").expect("dual missing for cap");
     assert!((dual.abs() - 2.0).abs() < 1e-5, "dual={dual}");
     let rc = result.reduced_costs.get(&x.var_id().unwrap()).copied();
     assert!(rc.expect("reduced cost missing").abs() < 1e-5, "rc={rc:?}");
@@ -74,9 +74,9 @@ fn gurobi_qcp_duals_quadratic_constraint() {
     let result = Gurobi.solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() + 2.0).abs() < 1e-5);
-    assert!((result.value_of(x).unwrap() + 1.0).abs() < 1e-5);
+    assert!((result.value_of(x).unwrap().unwrap() + 1.0).abs() < 1e-5);
 
-    let dual = result.dual_of(ball).expect("dual missing for ball");
+    let dual = result.dual_of(ball).expect("matching model").expect("dual missing for ball");
     assert!((dual.abs() - 0.5).abs() < 1e-5, "dual={dual}");
 }
 
@@ -96,8 +96,16 @@ fn gurobi_semicontinuous_respects_threshold_gap() {
     let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 10.0).abs() < 1e-5, "obj={:?}", result.objective());
-    assert!((result.value_of(s).unwrap() - 5.0).abs() < 1e-5, "s={:?}", result.value_of(s));
-    assert!((result.value_of(t).unwrap() - 5.0).abs() < 1e-5, "t={:?}", result.value_of(t));
+    assert!(
+        (result.value_of(s).unwrap().unwrap() - 5.0).abs() < 1e-5,
+        "s={:?}",
+        result.value_of(s)
+    );
+    assert!(
+        (result.value_of(t).unwrap().unwrap() - 5.0).abs() < 1e-5,
+        "t={:?}",
+        result.value_of(t)
+    );
 }
 
 #[test]

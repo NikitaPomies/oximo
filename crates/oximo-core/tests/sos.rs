@@ -163,6 +163,7 @@ fn single_sos_reformulation_is_independent_and_tracks_artifacts() {
     let choice = sos_constraint!(m, choice, SOS1, [(x, 1.0), (y, 2.0)]);
 
     let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    assert_ne!(transformed.id(), m.id());
 
     assert_eq!(m.num_variables(), 2);
     assert_eq!(m.constraints().algebraic().len(), 0);
@@ -443,6 +444,32 @@ fn preserving_reformulation_leaves_source_member_bounds_mutable() {
 
     assert!((m.variables()[x.var_id().unwrap().index()].ub - 100.0).abs() < f64::EPSILON);
     assert!((transformed.variables()[x.var_id().unwrap().index()].ub - 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn reformulated_clone_rejects_source_handles_even_when_numeric_ids_collide() {
+    let source = Model::new("forked_identity");
+    variable!(source, 0.0 <= x <= 1.0);
+    variable!(source, 0.0 <= y <= 1.0);
+    sos_constraint!(source, choice, SOS1, [x, y]);
+
+    let transformed = source.to_reformulated_sos_model(SosReformulationOptions::default()).unwrap();
+    assert_ne!(source.id(), transformed.id());
+    let auxiliary = transformed.sos_reformulations()[0].variables[0];
+
+    // The independently mutable source allocates the same raw slot next. Its
+    // model-bound handle must not be allowed to mutate the generated auxiliary.
+    let late_source_variable = source.__var("late").build();
+    assert_eq!(late_source_variable.var_id(), Some(auxiliary));
+    assert_eq!(
+        transformed.set_initial(late_source_variable, 0.75),
+        Err(ModelMismatchError::new(transformed.id(), source.id()))
+    );
+    assert_eq!(transformed.variables()[auxiliary.index()].initial, None);
+
+    let transformed_x = transformed.variable_handle(x.var_id().unwrap());
+    transformed.set_initial(transformed_x, 0.25).unwrap();
+    assert_eq!(transformed.variables()[x.var_id().unwrap().index()].initial, Some(0.25));
 }
 
 #[test]

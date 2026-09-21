@@ -29,7 +29,7 @@ fn socp_round_trip() {
     variable!(m, x);
     variable!(m, y);
     variable!(m, t >= 0.0);
-    m.fix(t, 1.0);
+    m.fix(t, 1.0).unwrap();
     soc_constraint!(m, disk, [x, y] <= t);
     objective!(m, Min, x + y);
     assert_eq!(m.kind(), ModelKind::SOCP);

@@ -16,10 +16,10 @@ fn lp_range_duals_reduced_costs_and_maximization() {
 
     let result = solve(&model, &MosekOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
-    close(result.value_of(x).unwrap(), 3.0);
-    close(result.value_of(y).unwrap(), 0.0);
+    close(result.value_of(x).unwrap().unwrap(), 3.0);
+    close(result.value_of(y).unwrap().unwrap(), 0.0);
     close(result.objective().unwrap(), 11.0);
-    close(result.dual_of(model.constraint_id("band").unwrap()).unwrap(), 3.0);
+    close(result.dual_of(model.constraint_handle("band").unwrap()).unwrap().unwrap(), 3.0);
     close(*result.reduced_costs.get(&y.var_id().unwrap()).unwrap(), -2.0);
 }
 
@@ -31,8 +31,8 @@ fn milp_and_quadratic_model_classes() {
     constraint!(milp, cap, 2.0 * x + 3.0 * y <= 4.0);
     objective!(milp, Max, 3.0 * x + 4.0 * y);
     let result = solve(&milp, &MosekOptions::default()).unwrap();
-    close(result.value_of(x).unwrap(), 0.0);
-    close(result.value_of(y).unwrap(), 1.0);
+    close(result.value_of(x).unwrap().unwrap(), 0.0);
+    close(result.value_of(y).unwrap().unwrap(), 1.0);
 
     let qp = Model::new("qp");
     variable!(qp, qx >= 0.0);
@@ -40,15 +40,15 @@ fn milp_and_quadratic_model_classes() {
     constraint!(qp, sum, qx + qy == 1.0);
     objective!(qp, Min, qx.powi(2) + qy.powi(2));
     let result = solve(&qp, &MosekOptions::default()).unwrap();
-    close(result.value_of(qx).unwrap(), 0.5);
-    close(result.value_of(qy).unwrap(), 0.5);
+    close(result.value_of(qx).unwrap().unwrap(), 0.5);
+    close(result.value_of(qy).unwrap().unwrap(), 0.5);
     close(result.objective().unwrap(), 0.5);
 
     let miqp = Model::new("miqp");
     variable!(miqp, 0.0 <= z <= 5.0, Int);
     objective!(miqp, Min, (z - 2.2).powi(2));
     let result = solve(&miqp, &MosekOptions::default()).unwrap();
-    close(result.value_of(z).unwrap(), 2.0);
+    close(result.value_of(z).unwrap().unwrap(), 2.0);
     close(result.objective().unwrap(), 0.04);
 }
 
@@ -59,14 +59,14 @@ fn qcp_and_miqcp() {
     constraint!(qcp, ball, (x - 2.0).powi(2) <= 1.0);
     objective!(qcp, Min, x);
     let result = solve(&qcp, &MosekOptions::default()).unwrap();
-    close(result.value_of(x).unwrap(), 1.0);
+    close(result.value_of(x).unwrap().unwrap(), 1.0);
 
     let miqcp = Model::new("miqcp");
     variable!(miqcp, 0.0 <= z <= 4.0, Int);
     constraint!(miqcp, ball, (z - 2.0).powi(2) <= 1.0);
     objective!(miqcp, Max, z);
     let result = solve(&miqcp, &MosekOptions::default()).unwrap();
-    close(result.value_of(z).unwrap(), 3.0);
+    close(result.value_of(z).unwrap().unwrap(), 3.0);
 }
 
 #[test]
@@ -80,8 +80,8 @@ fn explicit_detected_and_mixed_integer_socp() {
     let cone = explicit.add_soc_constraint("cone", [x, y], t);
     objective!(explicit, Min, t);
     let result = solve(&explicit, &MosekOptions::default()).unwrap();
-    close(result.value_of(t).unwrap(), 5.0);
-    close(result.soc_dual_of(cone).unwrap(), 1.0);
+    close(result.value_of(t).unwrap().unwrap(), 5.0);
+    close(result.soc_dual_of(cone).unwrap().unwrap(), 1.0);
 
     let detected = Model::new("detected");
     variable!(detected, dx);
@@ -92,7 +92,7 @@ fn explicit_detected_and_mixed_integer_socp() {
     constraint!(detected, cone, dx.powi(2) + dy.powi(2) <= dt.powi(2));
     objective!(detected, Min, dt);
     let result = solve(&detected, &MosekOptions::default()).unwrap();
-    close(result.value_of(dt).unwrap(), 5.0);
+    close(result.value_of(dt).unwrap().unwrap(), 5.0);
 
     let mixed = Model::new("mixed_socp");
     variable!(mixed, 3.0 <= ix <= 3.0, Int);
@@ -102,7 +102,7 @@ fn explicit_detected_and_mixed_integer_socp() {
     mixed.add_soc_constraint("cone", [ix, iy], it);
     objective!(mixed, Min, it);
     let result = solve(&mixed, &MosekOptions::default()).unwrap();
-    close(result.value_of(it).unwrap(), 5.0);
+    close(result.value_of(it).unwrap().unwrap(), 5.0);
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn feasibility_model_returns_a_point() {
 
     let result = solve(&model, &MosekOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
-    assert!((2.0..=3.0).contains(&result.value_of(x).unwrap()));
+    assert!((2.0..=3.0).contains(&result.value_of(x).unwrap().unwrap()));
     close(result.objective().unwrap(), 0.0);
 }
 
@@ -206,7 +206,7 @@ fn branch_limit_keeps_constructed_incumbent() {
     let items = Set::range(0..40);
     variable!(model, x[i in items], Bin);
     for i in 0..40 {
-        model.set_initial(x[i], 0.0);
+        model.set_initial(x[i], 0.0).unwrap();
     }
     constraint!(
         model,
@@ -242,7 +242,7 @@ fn persistent_updates_linear_objective_and_bounds() {
         let resident = solver.solve(&model, &MosekOptions::default()).unwrap();
         let cold = Mosek.solve(&model, &MosekOptions::default()).unwrap();
         assert_eq!(resident.termination, TerminationStatus::Optimal);
-        close(resident.value_of(x).unwrap(), cold.value_of(x).unwrap());
+        close(resident.value_of(x).unwrap().unwrap(), cold.value_of(x).unwrap().unwrap());
         close(resident.objective().unwrap(), cold.objective().unwrap());
     }
 }
@@ -260,7 +260,7 @@ fn persistent_rebuilds_after_linear_row_change() {
         capacity.set_param_value(bound);
         let resident = solver.solve(&model, &MosekOptions::default()).unwrap();
         let cold = Mosek.solve(&model, &MosekOptions::default()).unwrap();
-        close(resident.value_of(x).unwrap(), cold.value_of(x).unwrap());
+        close(resident.value_of(x).unwrap().unwrap(), cold.value_of(x).unwrap().unwrap());
         close(resident.objective().unwrap(), cold.objective().unwrap());
     }
 }

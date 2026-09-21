@@ -18,8 +18,8 @@ fn lp_canonical() {
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-6);
-    assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-6);
-    assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-6);
+    assert!((result.value_of(x).unwrap().unwrap() - 6.0).abs() < 1e-6);
+    assert!((result.value_of(y).unwrap().unwrap() - 4.0).abs() < 1e-6);
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn highs_multi_optima_returns_single_best() {
     assert_eq!(r.termination, TerminationStatus::Optimal);
     assert_eq!(r.result_count(), 1);
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-6);
-    let chosen: f64 = (0..4).filter_map(|i| r.value_of_idx(&x, i)).sum();
+    let chosen: f64 = (0..4).filter_map(|i| r.value_of_idx(&x, i).unwrap()).sum();
     assert!((chosen - 2.0).abs() < 1e-6, "best is not an optimum: sum={chosen}");
 }
 
@@ -55,7 +55,7 @@ fn indexed_constraint_handles_query_known_duals() {
     assert_eq!(cover.get(1), None);
     for (i, cid) in cover.iter() {
         assert_eq!(cover.get(i), Some(cid));
-        let dual = result.dual_of(cid).expect("cover dual missing");
+        let dual = result.dual_of(cid).expect("matching model").expect("cover dual missing");
         assert!((dual - costs[i]).abs() < 1e-6, "cover[{i}]: {dual}");
     }
 }
@@ -72,16 +72,33 @@ fn range_family_handles_query_interval_and_split_duals() {
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     for (i, group) in bands.iter() {
-        let RangeConstraintIds::Interval(cid) = group else { panic!("expected interval") };
+        let RangeConstraintHandles::Interval(cid) = group else { panic!("expected interval") };
         let expected = [2.0, -3.0][i];
-        assert!((result.dual_of(cid).expect("interval dual missing") - expected).abs() < 1e-6);
+        assert!(
+            (result.dual_of(cid).expect("matching model").expect("interval dual missing")
+                - expected)
+                .abs()
+                < 1e-6
+        );
     }
     for (i, group) in split.iter() {
-        let RangeConstraintIds::Split { lower, upper } = group else { panic!("expected split") };
+        let RangeConstraintHandles::Split { lower, upper } = group else {
+            panic!("expected split")
+        };
         let expected_lower = [5.0, 0.0][i];
         let expected_upper = [0.0, -7.0][i];
-        assert!((result.dual_of(lower).expect("lower dual missing") - expected_lower).abs() < 1e-6);
-        assert!((result.dual_of(upper).expect("upper dual missing") - expected_upper).abs() < 1e-6);
+        assert!(
+            (result.dual_of(lower).expect("matching model").expect("lower dual missing")
+                - expected_lower)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (result.dual_of(upper).expect("matching model").expect("upper dual missing")
+                - expected_upper)
+                .abs()
+                < 1e-6
+        );
     }
 }
 
@@ -98,9 +115,9 @@ fn range_constraint_solves_as_single_row() {
     let r = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(r.termination, TerminationStatus::Optimal);
     assert!((r.objective().unwrap() - 4.0).abs() < 1e-6);
-    assert!((r.value_of(x).unwrap() - 4.0).abs() < 1e-6);
-    let band = m.constraint_id("band").unwrap();
-    assert!(r.dual_of(band).is_some());
+    assert!((r.value_of(x).unwrap().unwrap() - 4.0).abs() < 1e-6);
+    let band = m.constraint_handle("band").unwrap();
+    assert!(r.dual_of(band).unwrap().is_some());
 }
 
 #[test]
@@ -119,13 +136,13 @@ fn indexed_param_rebind_changes_solution() {
     let r1 = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(r1.termination, TerminationStatus::Optimal);
     assert!((r1.objective().unwrap() - 3.0).abs() < 1e-6);
-    assert!((r1.value_of_idx(&x, 1usize).unwrap() - 1.0).abs() < 1e-6);
+    assert!((r1.value_of_idx(&x, 1usize).unwrap().unwrap() - 1.0).abs() < 1e-6);
 
-    m.set_param_idx(&p, 2usize, 5.0);
+    m.set_param_idx(&p, 2usize, 5.0).unwrap();
     let r2 = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(r2.termination, TerminationStatus::Optimal);
     assert!((r2.objective().unwrap() - 5.0).abs() < 1e-6);
-    assert!((r2.value_of_idx(&x, 2usize).unwrap() - 1.0).abs() < 1e-6);
+    assert!((r2.value_of_idx(&x, 2usize).unwrap().unwrap() - 1.0).abs() < 1e-6);
 }
 
 #[test]
@@ -138,8 +155,8 @@ fn highs_solves_semi_domains() {
 
     let r = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(r.termination, TerminationStatus::Optimal);
-    assert!((r.value_of(s).unwrap() - 3.0).abs() < 1e-6, "s = {:?}", r.value_of(s));
-    assert!(r.value_of(t).unwrap().abs() < 1e-9, "t = {:?}", r.value_of(t));
+    assert!((r.value_of(s).unwrap().unwrap() - 3.0).abs() < 1e-6, "s = {:?}", r.value_of(s));
+    assert!(r.value_of(t).unwrap().unwrap().abs() < 1e-9, "t = {:?}", r.value_of(t));
     assert!((r.objective().unwrap() - 3.0).abs() < 1e-6);
 }
 
@@ -155,7 +172,7 @@ fn param_coefficient_lp_rebinds_without_rebuild() {
     assert_eq!(r.termination, TerminationStatus::Optimal);
     assert!((r.objective().unwrap() - 30.0).abs() < 1e-6);
 
-    m.set_param(price, 5.0);
+    m.set_param(price, 5.0).unwrap();
     let r2 = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert!((r2.objective().unwrap() - 50.0).abs() < 1e-6);
 }
@@ -170,11 +187,11 @@ fn param_coefficient_qp_rebinds() {
 
     let r = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(r.termination, TerminationStatus::Optimal);
-    assert!((r.value_of(x).unwrap() - 2.0).abs() < 1e-5);
+    assert!((r.value_of(x).unwrap().unwrap() - 2.0).abs() < 1e-5);
 
-    m.set_param(t, 4.0);
+    m.set_param(t, 4.0).unwrap();
     let r2 = Highs.solve(&m, &HighsOptions::default()).unwrap();
-    assert!((r2.value_of(x).unwrap() - 4.0).abs() < 1e-5);
+    assert!((r2.value_of(x).unwrap().unwrap() - 4.0).abs() < 1e-5);
 }
 
 #[cfg(feature = "io")]
@@ -192,7 +209,7 @@ fn io_linear_writers_fold_param_coefficient() {
     assert!(mps_record(&mps, &["x", "OBJ", "3"]), "got:\n{mps}");
     assert!(to_lp_string(&m).is_ok());
 
-    m.set_param(cost, 5.0);
+    m.set_param(cost, 5.0).unwrap();
     let mps2 = to_mps_string(&m).unwrap();
     assert!(mps_record(&mps2, &["x", "OBJ", "5"]), "got:\n{mps2}");
 }
@@ -232,8 +249,8 @@ fn lp_initial_values_do_not_affect_optimum() {
     let m = Model::new("lp_warm");
     variable!(m, x >= 0.0);
     variable!(m, 0.0 <= y <= 4.0);
-    m.set_initial(x, 6.0);
-    m.set_initial(y, 4.0);
+    m.set_initial(x, 6.0).unwrap();
+    m.set_initial(y, 4.0).unwrap();
     constraint!(m, c1, x + 2.0 * y <= 14.0);
     constraint!(m, c2, 3.0 * x - y >= 0.0);
     constraint!(m, c3, x - y <= 2.0);
@@ -242,8 +259,8 @@ fn lp_initial_values_do_not_affect_optimum() {
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-6);
-    assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-6);
-    assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-6);
+    assert!((result.value_of(x).unwrap().unwrap() - 6.0).abs() < 1e-6);
+    assert!((result.value_of(y).unwrap().unwrap() - 4.0).abs() < 1e-6);
 }
 
 #[test]
@@ -258,7 +275,7 @@ fn milp_warm_start_finds_optimum() {
     let m = Model::new("knapsack_warm");
     variable!(m, x[i in 0..n], Bin);
     for i in 0..n {
-        m.set_initial(x[i], warm_start[i]);
+        m.set_initial(x[i], warm_start[i]).unwrap();
     }
     constraint!(m, cap, sum!(weights[i] * x[i] for i in 0..n) <= 15.0);
     objective!(m, Max, sum!(values[i] * x[i] for i in 0..n));
@@ -287,7 +304,7 @@ fn feasibility_problem_finds_a_point() {
     objective!(m, Feasibility);
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert!(result.has_solution(), "status: {:?}", result.termination);
-    let (vx, vy) = (result.value_of(x).unwrap(), result.value_of(y).unwrap());
+    let (vx, vy) = (result.value_of(x).unwrap().unwrap(), result.value_of(y).unwrap().unwrap());
     assert!((vx + vy - 5.0).abs() < 1e-6, "x + y = {}", vx + vy);
 }
 
@@ -315,8 +332,8 @@ fn presolve_off_gives_correct_result() {
     let result = Highs.solve(&m, &HighsOptions::default().presolve(HighsPresolve::Off)).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-6);
-    assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-6);
-    assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-6);
+    assert!((result.value_of(x).unwrap().unwrap() - 6.0).abs() < 1e-6);
+    assert!((result.value_of(y).unwrap().unwrap() - 4.0).abs() < 1e-6);
 }
 
 #[test]
@@ -331,8 +348,8 @@ fn ipm_method_gives_correct_result() {
     let result = Highs.solve(&m, &HighsOptions::default().method(HighsMethod::Ipm)).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-6);
-    assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-6);
-    assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-6);
+    assert!((result.value_of(x).unwrap().unwrap() - 6.0).abs() < 1e-6);
+    assert!((result.value_of(y).unwrap().unwrap() - 4.0).abs() < 1e-6);
 }
 
 #[test]
@@ -347,8 +364,8 @@ fn threads_one_gives_correct_result() {
     let result = Highs.solve(&m, &HighsOptions::default().threads(1)).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-6);
-    assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-6);
-    assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-6);
+    assert!((result.value_of(x).unwrap().unwrap() - 6.0).abs() < 1e-6);
+    assert!((result.value_of(y).unwrap().unwrap() - 4.0).abs() < 1e-6);
 }
 
 #[test]
@@ -385,14 +402,14 @@ fn indexed_var_retrieval() {
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
 
-    assert!((result.value_of_idx(&flow, "a").unwrap() - 3.0).abs() < 1e-6);
-    assert!((result.value_of_idx(&flow, "b").unwrap() - 7.0).abs() < 1e-6);
+    assert!((result.value_of_idx(&flow, "a").unwrap().unwrap() - 3.0).abs() < 1e-6);
+    assert!((result.value_of_idx(&flow, "b").unwrap().unwrap() - 7.0).abs() < 1e-6);
 
-    let mut vals: Vec<_> = result.values_of(&flow).collect();
+    let mut vals: Vec<_> = result.values_of(&flow).unwrap().collect();
     vals.sort_by(|(a, _), (b, _)| format!("{a:?}").cmp(&format!("{b:?}")));
     assert_eq!(vals.len(), 2);
 
-    let nonzero: Vec<_> = result.values_of(&flow).filter(|(_, v)| *v != 0.0).collect();
+    let nonzero: Vec<_> = result.values_of(&flow).unwrap().filter(|(_, v)| *v != 0.0).collect();
     assert_eq!(nonzero.len(), 2);
 }
 
@@ -443,7 +460,7 @@ fn mps_fixed_variable_emits_fx_bound() {
     let m = Model::new("fixed");
     variable!(m, 0.0 <= x <= 10.0);
     variable!(m, y);
-    m.fix(y, 3.5);
+    m.fix(y, 3.5).unwrap();
     constraint!(m, c, x + y <= 20.0);
     objective!(m, Min, x + y);
 

@@ -51,8 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let result = Highs.solve(&m, &HighsOptions::default())?;
         assert_eq!(result.termination, TerminationStatus::Optimal);
 
-        let x1v = result.value_of(x1).unwrap_or(0.0);
-        let x2v = result.value_of(x2).unwrap_or(0.0);
+        let x1v = result.value_of(x1)?.unwrap_or(0.0);
+        let x2v = result.value_of(x2)?.unwrap_or(0.0);
         let profit = result.objective().unwrap_or(0.0);
         println!(" {price:>4.1} | {x1v:>8.2} | {x2v:>8.2} | {profit:>7.2}");
     }

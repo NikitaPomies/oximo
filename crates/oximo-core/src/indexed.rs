@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 use std::ops::Index;
 
-use oximo_expr::Expr;
+use oximo_expr::{Expr, ModelId};
 use rustc_hash::FxHashMap;
 
-use crate::constraint::{ConstraintId, RangeConstraintIds};
+use crate::constraint::{ConstraintHandle, RangeConstraintHandles};
 use crate::set::{Axis, FromIndexKey, IndexKey};
 
 /// Owned, ordered IDs with a domain-specific lookup index.
@@ -97,7 +97,7 @@ constraint_family!(
     ///
     /// IDs refer to rows of the originating model.
     /// `get` supports integer, string, and tuple keys, including sparse domains.
-    IndexedConstraint, ConstraintId
+    IndexedConstraint, ConstraintHandle
 );
 
 constraint_family!(
@@ -105,7 +105,7 @@ constraint_family!(
     ///
     /// Each key maps to one interval ID or separate lower/upper IDs. Entries can
     /// have different lowering forms within the same family.
-    IndexedRangeConstraint, RangeConstraintIds
+    IndexedRangeConstraint, RangeConstraintHandles
 );
 
 /// Backing storage for an [`IndexedFamily`].
@@ -166,6 +166,7 @@ impl Family for ParamFamily {
 /// String, sparse, and `filter`ed families fall back to a hash map.
 pub struct IndexedFamily<'a, K = IndexKey, F = VarFamily> {
     pub(crate) storage: Storage<'a>,
+    pub(crate) model_id: ModelId,
     pub(crate) _marker: PhantomData<fn() -> (K, F)>,
 }
 
@@ -179,7 +180,7 @@ pub type IndexedParam<'a, K = IndexKey> = IndexedFamily<'a, K, ParamFamily>;
 
 impl<'a, K, F> Clone for IndexedFamily<'a, K, F> {
     fn clone(&self) -> Self {
-        Self { storage: self.storage.clone(), _marker: PhantomData }
+        Self { storage: self.storage.clone(), model_id: self.model_id, _marker: PhantomData }
     }
 }
 
@@ -190,6 +191,12 @@ impl<'a, K, F: Family> std::fmt::Debug for IndexedFamily<'a, K, F> {
 }
 
 impl<'a, K, F> IndexedFamily<'a, K, F> {
+    /// Identity of the model that created this indexed family.
+    #[must_use]
+    pub const fn model_id(&self) -> ModelId {
+        self.model_id
+    }
+
     pub fn len(&self) -> usize {
         match &self.storage {
             Storage::Dense { data, .. } => data.len(),

@@ -125,9 +125,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut e_max = 0.0f64;
     for i in 0..N {
         for p in 0..TAU {
-            let sv = res.value_of(s[(i, p)]).unwrap();
-            let xv = res.value_of(x[(i, p)]).unwrap();
-            let tv = res.value_of(kin[(i, p)]).unwrap();
+            let sv = res.value_of(s[(i, p)])?.unwrap();
+            let xv = res.value_of(x[(i, p)])?.unwrap();
+            let tv = res.value_of(kin[(i, p)])?.unwrap();
             let denom = sv + xv;
             if denom > 1e-9 {
                 let r = sv * xv / denom;

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use oximo_expr::{Expr, ExprId};
+use oximo_expr::{Expr, ExprId, ModelId};
 use smol_str::SmolStr;
 
 /// The sense of a constraint: less-than-or-equal, greater-than-or-equal, or equality.
@@ -24,6 +24,56 @@ impl fmt::Display for Sense {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConstraintId(pub u32);
 
+/// A model-bound handle to an algebraic constraint.
+///
+/// Constraint declaration macros return this type.
+/// Use [`Self::id`] when a backend-facing raw numeric ID
+/// is explicitly required.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ConstraintHandle {
+    id: ConstraintId,
+    model_id: ModelId,
+}
+
+impl ConstraintHandle {
+    pub(crate) const fn new(id: ConstraintId, model_id: ModelId) -> Self {
+        Self { id, model_id }
+    }
+
+    #[must_use]
+    pub const fn id(self) -> ConstraintId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn model_id(self) -> ModelId {
+        self.model_id
+    }
+
+    #[must_use]
+    pub fn index(self) -> usize {
+        self.id.index()
+    }
+}
+
+impl From<ConstraintHandle> for ConstraintId {
+    fn from(value: ConstraintHandle) -> Self {
+        value.id
+    }
+}
+
+impl PartialEq<ConstraintId> for ConstraintHandle {
+    fn eq(&self, other: &ConstraintId) -> bool {
+        self.id == *other
+    }
+}
+
+impl PartialEq<ConstraintHandle> for ConstraintId {
+    fn eq(&self, other: &ConstraintHandle) -> bool {
+        *self == other.id
+    }
+}
+
 /// Model row IDs produced by a two-sided range declaration.
 ///
 /// Constant bounds with a linear body produce one interval row. Other ranges
@@ -32,6 +82,43 @@ pub struct ConstraintId(pub u32);
 pub enum RangeConstraintIds {
     Interval(ConstraintId),
     Split { lower: ConstraintId, upper: ConstraintId },
+}
+
+/// Model-bound handles produced by a two-sided range declaration.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RangeConstraintHandles {
+    Interval(ConstraintHandle),
+    Split { lower: ConstraintHandle, upper: ConstraintHandle },
+}
+
+impl RangeConstraintHandles {
+    #[must_use]
+    pub const fn ids(self) -> RangeConstraintIds {
+        match self {
+            Self::Interval(handle) => RangeConstraintIds::Interval(handle.id()),
+            Self::Split { lower, upper } => {
+                RangeConstraintIds::Split { lower: lower.id(), upper: upper.id() }
+            }
+        }
+    }
+}
+
+impl From<RangeConstraintHandles> for RangeConstraintIds {
+    fn from(value: RangeConstraintHandles) -> Self {
+        value.ids()
+    }
+}
+
+impl PartialEq<RangeConstraintIds> for RangeConstraintHandles {
+    fn eq(&self, other: &RangeConstraintIds) -> bool {
+        self.ids() == *other
+    }
+}
+
+impl PartialEq<RangeConstraintHandles> for RangeConstraintIds {
+    fn eq(&self, other: &RangeConstraintHandles) -> bool {
+        *self == other.ids()
+    }
 }
 
 impl ConstraintId {

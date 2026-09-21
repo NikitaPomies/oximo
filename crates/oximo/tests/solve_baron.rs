@@ -34,7 +34,7 @@ fn baron_enumerates_multiple_solutions() {
 
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-4, "best obj={:?}", r.objective());
     for s in &r.solutions {
-        let chosen: f64 = (0..4).filter_map(|i| s.value_of_idx(&x, i)).sum();
+        let chosen: f64 = (0..4).filter_map(|i| s.value_of_idx(&x, i).unwrap()).sum();
         assert!(chosen <= 2.0 + 1e-4, "infeasible point: sum={chosen}");
     }
 }
@@ -53,9 +53,9 @@ fn baron_lp_duals_and_reduced_costs() {
     let result = Baron::new().solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 5.0).abs() < 1e-6);
-    assert!((result.value_of(x).unwrap() - 5.0).abs() < 1e-6);
+    assert!((result.value_of(x).unwrap().unwrap() - 5.0).abs() < 1e-6);
 
-    let dual = result.dual_of(cap).expect("dual missing for cap");
+    let dual = result.dual_of(cap).expect("matching model").expect("dual missing for cap");
     assert!((dual - 1.0).abs() < 1e-6, "dual={dual}");
 
     let rc = |v: Expr<'_>| result.reduced_costs.get(&v.var_id().unwrap()).copied();
@@ -95,7 +95,7 @@ fn baron_milp_duals_at_best_point() {
     let result = Baron::new().solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 3.0).abs() < 1e-6);
-    assert!(result.dual_of(cap).is_some(), "dual missing for cap");
+    assert!(result.dual_of(cap).unwrap().is_some(), "dual missing for cap");
     assert!(!result.reduced_costs.is_empty(), "reduced costs missing");
 }
 
@@ -109,7 +109,7 @@ fn baron_soc_dual_matches_norm_form_multiplier() {
     variable!(m, -10.0 <= x <= 10.0);
     variable!(m, -10.0 <= y <= 10.0);
     variable!(m, t >= 0.0);
-    m.fix(t, 1.0);
+    m.fix(t, 1.0).unwrap();
     let disk = m.add_soc_constraint("disk", [x, y], t);
     objective!(m, Min, x + y);
     assert_eq!(m.kind(), ModelKind::SOCP);
@@ -118,7 +118,7 @@ fn baron_soc_dual_matches_norm_form_multiplier() {
     let r = Baron::new().solve(&m, &opts).unwrap();
     assert!(r.has_solution());
     assert!((r.objective().unwrap() + std::f64::consts::SQRT_2).abs() < 1e-4);
-    let z0 = r.soc_dual_of(disk).expect("SOC dual missing");
+    let z0 = r.soc_dual_of(disk).expect("matching model").expect("SOC dual missing");
     assert!((z0 - std::f64::consts::SQRT_2).abs() < 1e-3, "z0 = {z0}");
 }
 

@@ -101,7 +101,7 @@ impl ClarabelPersistent {
         let started = Instant::now();
         state.solver.solve();
         let elapsed = started.elapsed();
-        Ok(read_result(&state.solver, &state.problem.meta, elapsed))
+        Ok(read_result(&state.solver, &state.problem.meta, model.id(), elapsed))
     }
 }
 
@@ -164,7 +164,10 @@ mod tests {
             let c = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap();
             assert_eq!(s.termination, TerminationStatus::Optimal, "price {price}");
             assert!(close(s.objective().unwrap(), c.objective().unwrap()), "price {price}");
-            assert!(close(s.value_of(x1).unwrap(), c.value_of(x1).unwrap()), "price {price}");
+            assert!(
+                close(s.value_of(x1).unwrap().unwrap(), c.value_of(x1).unwrap().unwrap()),
+                "price {price}"
+            );
         }
     }
 
@@ -227,11 +230,11 @@ mod tests {
         let r = solver.solve(&m, &ClarabelOptions::default()).unwrap();
         assert!(r.has_solution(), "termination = {:?}", r.termination);
 
-        m.fix(x, 2.0);
+        m.fix(x, 2.0).unwrap();
         let r2 = solver.solve(&m, &ClarabelOptions::default()).unwrap();
         let cold = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap();
-        assert!(close(r2.value_of(x).unwrap(), 2.0));
-        assert!(close(r2.value_of(y).unwrap(), 3.0));
+        assert!(close(r2.value_of(x).unwrap().unwrap(), 2.0));
+        assert!(close(r2.value_of(y).unwrap().unwrap(), 3.0));
         assert!(close(r2.objective().unwrap(), cold.objective().unwrap()));
     }
 
@@ -244,7 +247,7 @@ mod tests {
         variable!(m, x);
         variable!(m, y);
         variable!(m, t >= 0.0);
-        m.fix(t, 1.0);
+        m.fix(t, 1.0).unwrap();
         m.add_soc_constraint("disk", [x, y], t); // ||(x, y)|| <= 1
         objective!(m, Min, wt * x + y);
 

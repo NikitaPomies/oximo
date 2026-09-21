@@ -111,6 +111,10 @@ pub fn relative_gap(primal: Option<f64>, bound: Option<f64>) -> Option<f64> {
 /// termination was `Optimal`. Invalid incumbents cause the same downgrade for
 /// surviving pool points. Normalizing an already normalized result is safe.
 pub fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverResult {
+    let model_id = result.model_id;
+    for point in &mut result.solutions {
+        point.model_id = model_id;
+    }
     let mut first = true;
     let mut lost_incumbent = false;
     result.solutions.retain_mut(|point| {

@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("curve_1", result.value_of(curve_1)),
         ("curve_2", result.value_of(curve_2)),
     ] {
-        println!("{name:>8} = {:.6}", value.unwrap_or_default());
+        println!("{name:>8} = {:.6}", value?.unwrap_or_default());
     }
     Ok(())
 }

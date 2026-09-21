@@ -39,7 +39,7 @@ let m = Model::new("socp");
 variable!(m, x);
 variable!(m, y);
 variable!(m, t >= 0.0);
-m.fix(t, 1.0);
+m.fix(t, 1.0).unwrap();
 soc_constraint!(m, disk, [x, y] <= t); // ||(x, y)||_2 <= t
 objective!(m, Min, x + y);
 

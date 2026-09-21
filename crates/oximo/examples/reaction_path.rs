@@ -92,10 +92,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     variable!(m, y[v in chemicals], Bin);
     // Fix availability: raw materials/catalysts to 1, unavailable chemicals to 0.
     for &i in available {
-        m.fix(y[CHEMICALS[i]], 1.0);
+        m.fix(y[CHEMICALS[i]], 1.0)?;
     }
     for &i in unavailable {
-        m.fix(y[CHEMICALS[i]], 0.0);
+        m.fix(y[CHEMICALS[i]], 0.0)?;
     }
 
     // sum_vv (1 - y[vv]) >= 1 - y[v]
@@ -131,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let synthesizable: Vec<&str> = CHEMICALS
         .iter()
         .copied()
-        .filter(|name| (result.value_of(y[*name]).unwrap_or(0.0) - 1.0).abs() < 1e-6)
+        .filter(|name| (result.value_of(y[*name]).unwrap().unwrap_or(0.0) - 1.0).abs() < 1e-6)
         .collect();
     if !synthesizable.is_empty() {
         println!("Synthesizable chemicals: {}", synthesizable.join(", "));

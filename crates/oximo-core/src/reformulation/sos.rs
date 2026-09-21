@@ -490,7 +490,7 @@ fn add_at_most_one(
         .reduce(|left, right| left + right)
         .expect("nontrivial SOS has at least one activation");
     let name = unique_constraint_name(model, &format!("__oximo_sos{}_select", sos_id.index()));
-    generated.push(model.__add_constraint(name, sum.le(1.0)));
+    generated.push(model.__add_constraint(name, sum.le(1.0)).id());
 }
 
 fn add_planned_member_gates(
@@ -513,14 +513,16 @@ fn add_planned_member_gates(
             model,
             &format!("__oximo_sos{}_member_{}_lower", sos_id.index(), planned.member_index),
         );
-        generated.push(model.__add_constraint(lower_name, variable.ge(planned.lower * activation)));
+        generated
+            .push(model.__add_constraint(lower_name, variable.ge(planned.lower * activation)).id());
     }
     if planned.upper > 0.0 {
         let upper_name = unique_constraint_name(
             model,
             &format!("__oximo_sos{}_member_{}_upper", sos_id.index(), planned.member_index),
         );
-        generated.push(model.__add_constraint(upper_name, variable.le(planned.upper * activation)));
+        generated
+            .push(model.__add_constraint(upper_name, variable.le(planned.upper * activation)).id());
     }
 }
 

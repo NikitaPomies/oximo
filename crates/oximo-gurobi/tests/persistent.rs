@@ -21,8 +21,8 @@ fn persistent_matches_cold_solve_on_objective_sweep() {
         let c = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
         assert_eq!(s.termination, TerminationStatus::Optimal, "price {price}");
         assert!((s.objective().unwrap() - c.objective().unwrap()).abs() < 1e-6, "price {price}");
-        assert!((s.value_of(x1).unwrap() - c.value_of(x1).unwrap()).abs() < 1e-6);
-        assert!((s.value_of(x2).unwrap() - c.value_of(x2).unwrap()).abs() < 1e-6);
+        assert!((s.value_of(x1).unwrap().unwrap() - c.value_of(x1).unwrap().unwrap()).abs() < 1e-6);
+        assert!((s.value_of(x2).unwrap().unwrap() - c.value_of(x2).unwrap().unwrap()).abs() < 1e-6);
     }
 }
 
@@ -56,11 +56,11 @@ fn persistent_bound_change_via_fix() {
 
     let mut solver = Gurobi.persistent();
     solver.solve(&m, &GurobiOptions::default()).expect("first solve");
-    m.fix(x1, 10.0);
+    m.fix(x1, 10.0).unwrap();
     let s = solver.solve(&m, &GurobiOptions::default()).expect("after fix");
     let cold = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
     assert_eq!(s.termination, TerminationStatus::Optimal);
-    assert!((s.value_of(x1).unwrap() - 10.0).abs() < 1e-6);
+    assert!((s.value_of(x1).unwrap().unwrap() - 10.0).abs() < 1e-6);
     assert!((s.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-6);
 }
 
@@ -75,11 +75,11 @@ fn persistent_feasibility_no_objective() {
     let mut solver = Gurobi.persistent();
     let r = solver.solve(&m, &GurobiOptions::default()).expect("feasibility solve");
     assert!(r.has_solution(), "termination = {:?}", r.termination);
-    m.fix(x, 2.0);
+    m.fix(x, 2.0).unwrap();
     let r2 = solver.solve(&m, &GurobiOptions::default()).expect("after fix");
     assert!(r2.has_solution());
-    assert!((r2.value_of(x).unwrap() - 2.0).abs() < 1e-6);
-    assert!((r2.value_of(y).unwrap() - 3.0).abs() < 1e-6);
+    assert!((r2.value_of(x).unwrap().unwrap() - 2.0).abs() < 1e-6);
+    assert!((r2.value_of(y).unwrap().unwrap() - 3.0).abs() < 1e-6);
 }
 
 #[test]
@@ -98,8 +98,8 @@ fn persistent_reset_rebuilds_cleanly() {
     let cold = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
     assert_eq!(s.termination, TerminationStatus::Optimal);
     assert!((s.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-6);
-    assert!((s.value_of(x1).unwrap() - cold.value_of(x1).unwrap()).abs() < 1e-6);
-    assert!((s.value_of(x2).unwrap() - cold.value_of(x2).unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x1).unwrap().unwrap() - cold.value_of(x1).unwrap().unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x2).unwrap().unwrap() - cold.value_of(x2).unwrap().unwrap()).abs() < 1e-6);
 }
 
 #[test]
@@ -119,8 +119,8 @@ fn persistent_rebuilds_on_new_constraint() {
     let cold = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
     assert_eq!(s.termination, TerminationStatus::Optimal);
     assert!((s.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-6);
-    assert!((s.value_of(x1).unwrap() - cold.value_of(x1).unwrap()).abs() < 1e-6);
-    assert!((s.value_of(x2).unwrap() - cold.value_of(x2).unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x1).unwrap().unwrap() - cold.value_of(x1).unwrap().unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x2).unwrap().unwrap() - cold.value_of(x2).unwrap().unwrap()).abs() < 1e-6);
 }
 
 #[test]

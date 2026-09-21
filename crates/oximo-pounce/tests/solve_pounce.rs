@@ -36,9 +36,9 @@ fn hs071() {
 
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution(), "hs071 should solve");
-    assert_close(res.value_of(x1).unwrap(), 1.0, 1e-3, "x1");
-    assert_close(res.value_of(x2).unwrap(), 4.743, 1e-3, "x2");
-    assert_close(res.value_of(x4).unwrap(), 1.379_408, 1e-3, "x4");
+    assert_close(res.value_of(x1).unwrap().unwrap(), 1.0, 1e-3, "x1");
+    assert_close(res.value_of(x2).unwrap().unwrap(), 4.743, 1e-3, "x2");
+    assert_close(res.value_of(x4).unwrap().unwrap(), 1.379_408, 1e-3, "x4");
     assert_close(res.objective().unwrap(), 17.014, 1e-2, "objective");
     assert!(res.iterations > 0, "builder path reports iterations");
     if res.dual_status == oximo_solver::DualStatus::FeasiblePoint {
@@ -57,8 +57,8 @@ fn rosenbrock_unconstrained() {
 
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert_eq!(res.termination, TerminationStatus::LocallyOptimal);
-    assert_close(res.value_of(x).unwrap(), 1.0, 1e-4, "x");
-    assert_close(res.value_of(y).unwrap(), 1.0, 1e-4, "y");
+    assert_close(res.value_of(x).unwrap().unwrap(), 1.0, 1e-4, "x");
+    assert_close(res.value_of(y).unwrap().unwrap(), 1.0, 1e-4, "y");
     assert!(res.objective().unwrap().abs() < 1e-6, "objective");
 }
 
@@ -71,7 +71,7 @@ fn maximize_flips_sign_back() {
 
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert_eq!(res.termination, TerminationStatus::Optimal);
-    assert_close(res.value_of(x).unwrap(), 2.0, 1e-4, "x");
+    assert_close(res.value_of(x).unwrap().unwrap(), 2.0, 1e-4, "x");
     assert_close(res.objective().unwrap(), 4.0, 1e-5, "objective");
 }
 
@@ -98,10 +98,10 @@ fn lp_duals_match_lp_convention() {
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution());
     assert_close(res.objective().unwrap(), 400.0, 1e-3, "objective");
-    assert_close(res.value_of(x).unwrap(), 4.0, 1e-3, "x");
-    assert_close(res.value_of(y).unwrap(), 8.0, 1e-3, "y");
-    assert_close(res.dual_of(labor).unwrap(), 20.0, 1e-3, "labor dual");
-    assert_close(res.dual_of(material).unwrap(), 10.0, 1e-3, "material dual");
+    assert_close(res.value_of(x).unwrap().unwrap(), 4.0, 1e-3, "x");
+    assert_close(res.value_of(y).unwrap().unwrap(), 8.0, 1e-3, "y");
+    assert_close(res.dual_of(labor).unwrap().unwrap(), 20.0, 1e-3, "labor dual");
+    assert_close(res.dual_of(material).unwrap().unwrap(), 10.0, 1e-3, "material dual");
 
     let z_id = m.variable_id("z").unwrap();
     assert_close(res.reduced_costs[&z_id], -30.0, 1e-3, "z reduced cost");
@@ -120,8 +120,8 @@ fn quadratic_constraint_qcp() {
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution());
     let r = -1.0 / 2.0_f64.sqrt();
-    assert_close(res.value_of(x).unwrap(), r, 1e-4, "x");
-    assert_close(res.value_of(y).unwrap(), r, 1e-4, "y");
+    assert_close(res.value_of(x).unwrap().unwrap(), r, 1e-4, "x");
+    assert_close(res.value_of(y).unwrap().unwrap(), r, 1e-4, "y");
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn feasibility_problem_returns_feasible_point() {
 
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution(), "feasibility solve should return a point");
-    let (xv, yv) = (res.value_of(x).unwrap(), res.value_of(y).unwrap());
+    let (xv, yv) = (res.value_of(x).unwrap().unwrap(), res.value_of(y).unwrap().unwrap());
     assert!(xv * xv + yv * yv <= 1.0 + 1e-5, "inside disk: ({xv}, {yv})");
     assert!(xv + yv >= 1.0 - 1e-5, "above line: ({xv}, {yv})");
 }
@@ -196,8 +196,14 @@ fn persistent_matches_cold_on_parameter_sweep() {
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "w {wv}: no solution");
         assert!(close(warm.objective().unwrap(), cold.objective().unwrap()), "w {wv}: objective");
-        assert!(close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap()), "w {wv}: x");
-        assert!(close(warm.value_of(y).unwrap(), cold.value_of(y).unwrap()), "w {wv}: y");
+        assert!(
+            close(warm.value_of(x).unwrap().unwrap(), cold.value_of(x).unwrap().unwrap()),
+            "w {wv}: x"
+        );
+        assert!(
+            close(warm.value_of(y).unwrap().unwrap(), cold.value_of(y).unwrap().unwrap()),
+            "w {wv}: y"
+        );
     }
 }
 
@@ -380,8 +386,8 @@ fn active_set_sqp_solves_a_qp() {
     let res = Pounce.solve(&m, &opts).unwrap();
     assert!(res.has_solution(), "active-set SQP failed: {:?}", res.termination);
     assert!(res.iterations > 0);
-    assert_close(res.value_of(x).unwrap(), 1.0, 1e-4, "x");
-    assert_close(res.value_of(y).unwrap(), 2.0, 1e-4, "y");
+    assert_close(res.value_of(x).unwrap().unwrap(), 1.0, 1e-4, "x");
+    assert_close(res.value_of(y).unwrap().unwrap(), 2.0, 1e-4, "y");
 }
 
 #[test]
@@ -395,7 +401,7 @@ fn persistent_active_set_sqp_warm_starts_the_tnlp_path() {
     assert!(solver.solve(&m, &opts).unwrap().has_solution());
     let warm = solver.solve(&m, &opts).unwrap();
     assert!(warm.has_solution());
-    assert_close(warm.value_of(x).unwrap(), 2.0, 1e-4, "warm x");
+    assert_close(warm.value_of(x).unwrap().unwrap(), 2.0, 1e-4, "warm x");
 }
 
 #[test]
@@ -458,7 +464,7 @@ fn automatic_convexity_respects_objective_sense() {
     variable!(concave_max, -10.0 <= x <= 10.0);
     objective!(concave_max, Max, 4.0 * x - x.powi(2));
     let result = Pounce.solve(&concave_max, &PounceOptions::default().verbose(true)).unwrap();
-    assert_close(result.value_of(x).unwrap(), 2.0, 1e-5, "concave maximize x");
+    assert_close(result.value_of(x).unwrap().unwrap(), 2.0, 1e-5, "concave maximize x");
     assert!(
         result.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route: QpIpm")),
         "automatic concave-max normalization did not use the convex QP engine"
@@ -528,8 +534,8 @@ fn explicit_soc_routes_to_conic_ipm_and_reports_dual() {
 
     let result = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(result.has_solution(), "{:?}", result.termination);
-    assert_close(result.value_of(x).unwrap(), 1.0, 1e-5, "soc x");
-    assert!(result.soc_dual_of(cone).is_some());
+    assert_close(result.value_of(x).unwrap().unwrap(), 1.0, 1e-5, "soc x");
+    assert!(result.soc_dual_of(cone).unwrap().is_some());
 }
 
 #[test]
@@ -547,7 +553,12 @@ fn persistent_convex_ipm_and_active_set_follow_parameter_sweeps() {
             let warm = persistent.solve(&m, &options).unwrap();
             let cold = Pounce.solve(&m, &options).unwrap();
             assert!(warm.has_solution(), "{selection:?}, target={value}");
-            assert_close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap(), 1e-6, "x");
+            assert_close(
+                warm.value_of(x).unwrap().unwrap(),
+                cold.value_of(x).unwrap().unwrap(),
+                1e-6,
+                "x",
+            );
         }
     }
 }
@@ -611,8 +622,14 @@ fn persistent_sweep_reclassifies_nonlinear_objective() {
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "w {wv}: no solution");
         assert!(close(warm.objective().unwrap(), cold.objective().unwrap()), "w {wv}: objective");
-        assert!(close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap()), "w {wv}: x");
-        assert!(close(warm.value_of(y).unwrap(), cold.value_of(y).unwrap()), "w {wv}: y");
+        assert!(
+            close(warm.value_of(x).unwrap().unwrap(), cold.value_of(x).unwrap().unwrap()),
+            "w {wv}: x"
+        );
+        assert!(
+            close(warm.value_of(y).unwrap().unwrap(), cold.value_of(y).unwrap().unwrap()),
+            "w {wv}: y"
+        );
     }
 }
 
@@ -711,9 +728,9 @@ fn detected_socp_routes_to_conic_ipm() {
 
     let result = Pounce.solve(&m, &PounceOptions::default().qp_presolve(false)).unwrap();
     assert!(result.has_solution(), "{:?}", result.termination);
-    assert_close(result.value_of(t).unwrap(), 5.0, 1e-5, "t");
+    assert_close(result.value_of(t).unwrap().unwrap(), 5.0, 1e-5, "t");
     assert!(
-        result.dual_of(m.constraint_id("cone").unwrap()).is_none(),
+        result.dual_of(m.constraint_handle("cone").unwrap()).unwrap().is_none(),
         "detected cones do not retain the original quadratic multiplier scaling"
     );
 }
@@ -727,10 +744,15 @@ fn ranged_linear_constraint_maps_both_sides_and_dual() {
     objective!(m, Max, 3.0 * x + y + 2.0);
 
     let result = Pounce.solve(&m, &PounceOptions::default()).unwrap();
-    assert_close(result.value_of(x).unwrap(), 3.0, 1e-5, "x");
-    assert_close(result.value_of(y).unwrap(), 0.0, 1e-5, "y");
+    assert_close(result.value_of(x).unwrap().unwrap(), 3.0, 1e-5, "x");
+    assert_close(result.value_of(y).unwrap().unwrap(), 0.0, 1e-5, "y");
     assert_close(result.objective().unwrap(), 11.0, 1e-5, "objective");
-    assert_close(result.dual_of(m.constraint_id("band").unwrap()).unwrap(), 3.0, 1e-5, "band dual");
+    assert_close(
+        result.dual_of(m.constraint_handle("band").unwrap()).unwrap().unwrap(),
+        3.0,
+        1e-5,
+        "band dual",
+    );
 }
 
 #[test]

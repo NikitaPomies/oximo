@@ -1,4 +1,4 @@
-use crate::arena::{Children, ExprArenaCell, ExprId, ExprNode, ParamId, UnaryOp, VarId};
+use crate::arena::{Children, ExprArenaCell, ExprId, ExprNode, ModelId, ParamId, UnaryOp, VarId};
 use crate::classify::{ExprClass, classify_access};
 
 /// Lightweight handle to a node in an [`ExprArenaCell`].
@@ -9,19 +9,27 @@ use crate::classify::{ExprClass, classify_access};
 #[derive(Copy, Clone)]
 pub struct Expr<'a> {
     pub id: ExprId,
+    model_id: ModelId,
     pub arena: &'a ExprArenaCell,
 }
 
 impl std::fmt::Debug for Expr<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Expr").field("id", &self.id).finish()
+        f.debug_struct("Expr").field("id", &self.id).field("model_id", &self.model_id).finish()
     }
 }
 
 impl<'a> Expr<'a> {
     #[inline]
     pub fn new(id: ExprId, arena: &'a ExprArenaCell) -> Self {
-        Self { id, arena }
+        Self { id, model_id: arena.model_id(), arena }
+    }
+
+    /// Identity of the model/expression arena that created this handle.
+    #[inline]
+    #[must_use]
+    pub const fn model_id(self) -> ModelId {
+        self.model_id
     }
 
     pub fn constant(arena: &'a ExprArenaCell, v: f64) -> Self {

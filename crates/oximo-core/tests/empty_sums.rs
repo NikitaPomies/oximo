@@ -103,7 +103,7 @@ fn model_macros_supply_context_including_qualified_sums() {
         let terms = extract_linear(&arena, constraints.algebraic()[id.index()].lhs).unwrap();
         assert!(terms.coeffs.is_empty());
     }
-    assert!(matches!(range, RangeConstraintIds::Interval(_)));
+    assert!(matches!(range, RangeConstraintHandles::Interval(_)));
     assert_eq!(evaluate(&arena, m.try_objective().unwrap().expr, &&[][..]).unwrap(), 2.0);
 }
 
@@ -127,7 +127,7 @@ fn indexed_sums_work_with_serial_and_parallel_arena_forks() {
             let arena = m.arena();
             let constraints = m.constraints();
             for i in 0..1024_usize {
-                let RangeConstraintIds::Interval(range) = ranged.get(i).unwrap() else {
+                let RangeConstraintHandles::Interval(range) = ranged.get(i).unwrap() else {
                     panic!("expected an interval row");
                 };
                 for id in [

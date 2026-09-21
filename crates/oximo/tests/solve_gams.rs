@@ -34,8 +34,8 @@ fn gams_lp_canonical() {
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective());
-    assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-4);
-    assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-4);
+    assert!((result.value_of(x).unwrap().unwrap() - 6.0).abs() < 1e-4);
+    assert!((result.value_of(y).unwrap().unwrap() - 4.0).abs() < 1e-4);
     assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
     assert_eq!(result.best_bound, result.objective());
     assert_eq!(result.gap, None);
@@ -57,7 +57,7 @@ fn gams_lp_duals_and_reduced_costs() {
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 5.0).abs() < 1e-6);
 
-    let d = result.dual_of(c).expect("dual missing for cap constraint");
+    let d = result.dual_of(c).expect("matching model").expect("dual missing for cap constraint");
     assert!((d.abs() - 1.0).abs() < 1e-6, "dual={d}");
 
     // Only one variable in the model -> VarId(0).
@@ -86,9 +86,9 @@ fn gams_nlp_duals_at_local_point() {
         result.primal_status
     );
     assert!((result.objective().unwrap() - std::f64::consts::E).abs() < 1e-5);
-    assert!((result.value_of(x).unwrap() - 1.0).abs() < 1e-5);
+    assert!((result.value_of(x).unwrap().unwrap() - 1.0).abs() < 1e-5);
 
-    let dual = result.dual_of(cap).expect("dual missing for cap");
+    let dual = result.dual_of(cap).expect("matching model").expect("dual missing for cap");
     assert!((dual.abs() - std::f64::consts::E).abs() < 1e-5, "dual={dual}");
     let rc = result.reduced_costs.get(&VarId(0)).copied().expect("reduced cost missing for x");
     assert!(rc.abs() < 1e-5, "reduced_cost(x)={rc}");
@@ -102,7 +102,7 @@ fn gams_continuous_abs_routes_to_dnlp() {
 
     let result = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
     assert!(result.has_solution(), "termination={:?}", result.termination);
-    assert!((result.value_of(x).unwrap() - 2.0).abs() < 1e-5);
+    assert!((result.value_of(x).unwrap().unwrap() - 2.0).abs() < 1e-5);
     assert!(result.objective().unwrap().abs() < 1e-5);
 }
 
@@ -113,8 +113,8 @@ fn gams_generated_supported_nonlinear_vocabulary_solves() {
     let m = Model::new("dnlp_supported_functions");
     variable!(m, 0.1 <= x <= 2.0);
     variable!(m, 0.1 <= y <= 2.0);
-    m.fix(x, x_value);
-    m.fix(y, y_value);
+    m.fix(x, x_value).unwrap();
+    m.fix(y, y_value).unwrap();
 
     let expression = (x - y).abs()
         + x.sqrt()
@@ -185,7 +185,7 @@ fn gams_mip_duals_at_fixed_point() {
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 3.0).abs() < 1e-6);
-    assert!(result.dual_of(cap).is_some(), "dual missing for cap");
+    assert!(result.dual_of(cap).unwrap().is_some(), "dual missing for cap");
     assert!(!result.reduced_costs.is_empty(), "reduced costs missing");
 }
 
@@ -223,8 +223,16 @@ fn gams_semicontinuous_respects_threshold_gap() {
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 10.0).abs() < 1e-4, "obj={:?}", result.objective());
-    assert!((result.value_of(s).unwrap() - 5.0).abs() < 1e-4, "s={:?}", result.value_of(s));
-    assert!((result.value_of(t).unwrap() - 5.0).abs() < 1e-4, "t={:?}", result.value_of(t));
+    assert!(
+        (result.value_of(s).unwrap().unwrap() - 5.0).abs() < 1e-4,
+        "s={:?}",
+        result.value_of(s)
+    );
+    assert!(
+        (result.value_of(t).unwrap().unwrap() - 5.0).abs() < 1e-4,
+        "t={:?}",
+        result.value_of(t)
+    );
 }
 
 #[test]
@@ -238,8 +246,8 @@ fn gams_sos1_allows_at_most_one_signed_nonzero_member() {
     let result = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() + 4.0).abs() < 1e-6);
-    let x_value = result.value_of(x).unwrap();
-    let y_value = result.value_of(y).unwrap();
+    let x_value = result.value_of(x).unwrap().unwrap();
+    let y_value = result.value_of(y).unwrap().unwrap();
     assert!(
         x_value.abs() <= 1e-6 || y_value.abs() <= 1e-6,
         "both SOS1 members are nonzero: x={x_value}, y={y_value}"
@@ -258,8 +266,8 @@ fn gams_sos2_uses_weight_order_for_adjacency() {
     let result = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!(result.objective().unwrap() <= 1.0 + 1e-6);
-    let x_value = result.value_of(x).unwrap();
-    let z_value = result.value_of(z).unwrap();
+    let x_value = result.value_of(x).unwrap().unwrap();
+    let z_value = result.value_of(z).unwrap().unwrap();
     assert!(
         x_value <= 1e-6 || z_value <= 1e-6,
         "nonadjacent SOS2 members selected: x={x_value}, z={z_value}"
@@ -335,7 +343,7 @@ fn gams_multi_optima_returns_single_best() {
     assert_eq!(r.termination, TerminationStatus::Optimal);
     assert_eq!(r.result_count(), 1);
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-4);
-    let chosen: f64 = (0..4).filter_map(|i| r.value_of_idx(&x, i)).sum();
+    let chosen: f64 = (0..4).filter_map(|i| r.value_of_idx(&x, i).unwrap()).sum();
     assert!((chosen - 2.0).abs() < 1e-4, "best is not an optimum: sum={chosen}");
 }
 
@@ -367,7 +375,7 @@ fn gams_reads_cplex_solution_pool() {
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-4);
     let mut prev = f64::INFINITY;
     for s in &r.solutions {
-        let chosen: f64 = (0..4).filter_map(|i| s.value_of_idx(&x, i)).sum();
+        let chosen: f64 = (0..4).filter_map(|i| s.value_of_idx(&x, i).unwrap()).sum();
         assert!(chosen <= 2.0 + 1e-6, "infeasible pool point: sum={chosen}");
         let obj = s.objective.expect("pool point has an objective");
         assert!(obj <= prev + 1e-9, "pool not ordered best-first");
@@ -385,7 +393,7 @@ fn gams_soc_dual_matches_norm_form_multiplier() {
     variable!(m, -10.0 <= x <= 10.0);
     variable!(m, -10.0 <= y <= 10.0);
     variable!(m, t >= 0.0);
-    m.fix(t, 1.0);
+    m.fix(t, 1.0).unwrap();
     let disk = m.add_soc_constraint("disk", [x, y], t);
     objective!(m, Min, x + y);
     assert_eq!(m.kind(), ModelKind::SOCP);
@@ -395,6 +403,6 @@ fn gams_soc_dual_matches_norm_form_multiplier() {
     let r = Gams::new().solve(&m, &opts).unwrap();
     assert!(r.has_solution());
     assert!((r.objective().unwrap() + std::f64::consts::SQRT_2).abs() < 1e-4);
-    let z0 = r.soc_dual_of(disk).expect("SOC dual missing");
+    let z0 = r.soc_dual_of(disk).expect("matching model").expect("SOC dual missing");
     assert!((z0 - std::f64::consts::SQRT_2).abs() < 1e-4, "z0 = {z0}");
 }

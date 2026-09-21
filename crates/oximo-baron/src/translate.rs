@@ -8,8 +8,8 @@ use std::time::Instant;
 use std::{fs, io};
 
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, Objective, ObjectiveSense, Sense, SocConstraint,
-    SocConstraintId, VarId, Variable,
+    Constraint, ConstraintId, Domain, Model, ModelId, ModelMismatchError, Objective,
+    ObjectiveSense, Sense, SocConstraint, SocConstraintId, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
@@ -63,6 +63,7 @@ pub fn solve(
         &var_order,
         &con_order,
         &soc_bounds,
+        model.id(),
     ))
 }
 
@@ -234,8 +235,21 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
     write_options(&mut bar, opts, RES_NAME, TIM_NAME);
     let var_order = write_var_declarations(&mut bar, vars)?;
     write_bounds(&mut bar, vars);
-    let con_order =
-        write_equations(&mut bar, &prepared, constraints, socs, opts.convex_equation_ids())?;
+    let convex_equation_ids = opts
+        .convex_equation_handles()
+        .iter()
+        .map(|handle| {
+            if handle.model_id() == model.id() {
+                Ok(handle.id())
+            } else {
+                let mismatch = ModelMismatchError::new(model.id(), handle.model_id());
+                Err(SolverError::Backend(format!(
+                    "BARON convex-equation assertion has a {mismatch}"
+                )))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let con_order = write_equations(&mut bar, &prepared, constraints, socs, &convex_equation_ids)?;
     write_objective(&mut bar, &prepared, objective)?;
     write_starting_point(&mut bar, vars);
     let soc_bounds = socs
@@ -769,6 +783,7 @@ fn parse_solution(
     var_order: &[VarId],
     con_order: &[ConstraintId],
     soc_bounds: &[LinearTerms<'_>],
+    model_id: ModelId,
 ) -> SolverResult {
     let tokens: Vec<&str> = tim.split_whitespace().collect();
     let int_at = |i: usize| tokens.get(i).and_then(|s| s.parse::<i64>().ok());
@@ -804,7 +819,7 @@ fn parse_solution(
     // solution exists but no primal block was parsed do we fall back to the times
     // file so `result_count` still reflects that a solution exists.
     if has_sol && solutions.is_empty() {
-        solutions.push(SolutionPoint { primal: FxHashMap::default(), objective });
+        solutions.push(SolutionPoint { model_id, primal: FxHashMap::default(), objective });
     }
 
     let (dual, reduced_costs, soc_prices) = if has_sol {
@@ -843,6 +858,7 @@ fn parse_solution(
 
     normalize_result(
         SolverResult {
+            model_id,
             solutions,
             dual,
             soc_dual,
@@ -1078,7 +1094,11 @@ fn parse_solution_pool(res: &str, var_order: &[VarId]) -> Vec<SolutionPoint> {
                 }
             }
             if !primal.is_empty() {
-                out.push(SolutionPoint { primal, objective: last_obj });
+                out.push(SolutionPoint {
+                    model_id: ModelId::UNASSIGNED,
+                    primal,
+                    objective: last_obj,
+                });
             }
         }
     }
@@ -1183,7 +1203,11 @@ fn parse_best_table(res: &str) -> Option<SolutionPoint> {
             break;
         }
     }
-    (!primal.is_empty() || objective.is_some()).then_some(SolutionPoint { primal, objective })
+    (!primal.is_empty() || objective.is_some()).then_some(SolutionPoint {
+        model_id: ModelId::UNASSIGNED,
+        primal,
+        objective,
+    })
 }
 
 /// Parse BARON's IIS listing from the results file (`res.lst`).
@@ -1442,8 +1466,25 @@ mod tests {
         objective!(m, Min, x);
 
         let error =
-            build_bar(&m, &BaronOptions::default().convex_equation(ConstraintId(99))).unwrap_err();
+            convex_equation_names(m.constraints().algebraic(), &[ConstraintId(99)]).unwrap_err();
         assert!(error.to_string().contains("unknown algebraic constraint"), "{error}");
+    }
+
+    #[test]
+    fn convex_equation_hint_rejects_foreign_handle_with_colliding_id() {
+        let target = Model::new("target");
+        variable!(target, x);
+        constraint!(target, target_row, x <= 1.0);
+        objective!(target, Min, x);
+
+        let foreign = Model::new("foreign");
+        variable!(foreign, y);
+        let foreign_row = constraint!(foreign, foreign_row, y <= 2.0);
+
+        let error =
+            build_bar(&target, &BaronOptions::default().convex_equation(foreign_row)).unwrap_err();
+        assert!(error.to_string().contains("model mismatch"), "{error}");
+        assert_eq!(foreign_row.id(), ConstraintId(0));
     }
 
     #[test]
@@ -1453,6 +1494,9 @@ mod tests {
         let free = m.__add_constraint_interval("free", x, f64::NEG_INFINITY, f64::INFINITY);
         let range = m.__add_constraint_interval("range", x, -0.5, 0.5);
         objective!(m, Min, x);
+
+        let free = m.constraint_handle_from_id(free).unwrap();
+        let range = m.constraint_handle_from_id(range).unwrap();
 
         let free_error = build_bar(&m, &BaronOptions::default().convex_equation(free)).unwrap_err();
         assert!(free_error.to_string().contains("emits no equation"), "{free_error}");
@@ -1657,7 +1701,7 @@ mod tests {
     fn binary_fixed_to_one_emits_lower_bound() {
         let m = Model::new("fix1");
         variable!(m, b, Bin);
-        m.fix(b, 1.0);
+        m.fix(b, 1.0).unwrap();
         objective!(m, Min, b);
         let bar = render(&m);
         assert!(bar.contains("BINARY_VARIABLES x0;"), "{bar}");
@@ -1670,7 +1714,7 @@ mod tests {
     fn binary_fixed_to_zero_emits_upper_bound() {
         let m = Model::new("fix0");
         variable!(m, b, Bin);
-        m.fix(b, 0.0);
+        m.fix(b, 0.0).unwrap();
         objective!(m, Min, b);
         let bar = render(&m);
         // ub=0 differs from the binary default 1, so it must be emitted.
@@ -1682,7 +1726,7 @@ mod tests {
     fn starting_point_emitted_when_initial_set() {
         let m = Model::new("start");
         variable!(m, 0.0 <= x <= 10.0);
-        m.set_initial(x, 3.5);
+        m.set_initial(x, 3.5).unwrap();
         objective!(m, Min, x * x);
         let bar = render(&m);
         assert!(bar.contains("STARTING_POINT{"), "{bar}");
@@ -1766,6 +1810,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                ModelId::UNASSIGNED,
             );
             assert_eq!(result.termination, expected);
             assert_eq!(result.raw_status.as_deref(), Some(banner));
@@ -1785,6 +1830,7 @@ mod tests {
             &[],
             &[],
             &[],
+            ModelId::UNASSIGNED,
         );
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.objective(), Some(9.5)); // upper bound for minimize
@@ -1800,6 +1846,7 @@ mod tests {
             &[],
             &[],
             &[],
+            ModelId::UNASSIGNED,
         );
         assert_eq!(r.objective(), Some(1.5)); // lower bound for maximize
     }
@@ -2063,6 +2110,7 @@ The above solution has an objective value of:  0.0
             &[VarId(0), VarId(1)],
             &[ConstraintId(0)],
             &[],
+            ModelId::UNASSIGNED,
         );
         assert_eq!(r.result_count(), 2);
         assert_eq!(r.reduced_costs.get(&VarId(1)), Some(&1.5));
@@ -2149,6 +2197,7 @@ The above solution has an objective value of:  0.0
             &[VarId(0)],
             &[],
             &[],
+            ModelId::UNASSIGNED,
         );
         assert_eq!(r.result_count(), 0);
         assert_eq!(r.primal_status, PrimalStatus::NoSolution);

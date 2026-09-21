@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("F-4 performance", f4, ""),
     ];
     for (name, x, unit) in streams {
-        println!("  {name:<18} = {:>9.2} {unit}", result.value_of(x).unwrap_or(f64::NAN));
+        println!("  {name:<18} = {:>9.2} {unit}", result.value_of(x)?.unwrap_or(f64::NAN));
     }
 
     // Price sensitivity: sweep the alkylate price and re-solve.
@@ -145,8 +145,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "  price {price:.3} $/oct-bbl -> profit {:>8.2} $/day, olefin {:>8.2} bpd, octane {:.2}",
             res.objective().unwrap_or(f64::NAN),
-            res.value_of(olefin).unwrap_or(f64::NAN),
-            res.value_of(octane).unwrap_or(f64::NAN),
+            res.value_of(olefin)?.unwrap_or(f64::NAN),
+            res.value_of(octane)?.unwrap_or(f64::NAN),
         );
     }
 

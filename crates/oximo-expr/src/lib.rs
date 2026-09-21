@@ -15,8 +15,8 @@ mod visit;
 
 pub use arena::{
     Children, ExprArena, ExprArenaBatchGuard, ExprArenaCell, ExprArenaSnapshot,
-    ExprArenaWriteGuard, ExprId, ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ParamId,
-    UnaryOp, VarId,
+    ExprArenaWriteGuard, ExprId, ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ModelId,
+    ModelMismatchError, ParamId, UnaryOp, VarId,
 };
 pub use classify::{ExprClass, classify};
 pub use eval::{EvalContext, EvalError, evaluate};

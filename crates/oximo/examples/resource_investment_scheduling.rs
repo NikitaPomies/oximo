@@ -347,8 +347,8 @@ fn add_timing_and_sequencing_constraints(
     for (before, row) in technological_precedence.iter().enumerate() {
         for (after, &is_precedence) in row.iter().enumerate() {
             if is_precedence {
-                model.fix(variables.precedes[(before, after)], 1.0);
-                model.fix(variables.precedes[(after, before)], 0.0);
+                model.fix(variables.precedes[(before, after)], 1.0).unwrap();
+                model.fix(variables.precedes[(after, before)], 0.0).unwrap();
             }
         }
     }
@@ -380,7 +380,7 @@ fn add_resource_constraints(
     // (6) and (10): new units must be installed before an assigned test starts.
     for (unit, &resource) in NEW_RESOURCES.iter().enumerate() {
         if !case.allows_acquisition() {
-            model.fix(variables.installed[unit], 0.0);
+            model.fix(variables.installed[unit], 0.0).unwrap();
         }
         for test in 0..N_TESTS {
             constraint!(model, variables.uses_resource[test, resource] <= variables.installed[unit]);
@@ -518,7 +518,7 @@ fn summarize_solution(
     variables: &ModelVariables<'_>,
     discount_grid: &DiscountGrid,
 ) -> CaseSummary {
-    let value = |expr| result.value_of(expr).unwrap_or(0.0);
+    let value = |expr| result.value_of(expr).unwrap().unwrap_or(0.0);
     let completion = std::array::from_fn(|product| value(variables.completion_time[product]));
     let mut income_value = [MAX_INCOME; N_PRODUCTS];
     let mut fixed_cost_value = [0.0; N_PRODUCTS];

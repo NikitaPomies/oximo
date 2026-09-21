@@ -4,14 +4,17 @@ use std::marker::PhantomData;
 
 use oximo_expr::{
     EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot, ExprClass, ExprId, ExprIdRemap,
-    ParamId, VarId, classify,
+    ModelId, ModelMismatchError, ParamId, VarId, classify,
 };
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
+#[cfg(test)]
+use crate::constraint::RangeConstraintIds;
 use crate::constraint::{
-    Constraint, ConstraintExpr, ConstraintId, IntoRhs, RangeConstraintIds, Relate, Sense,
+    Constraint, ConstraintExpr, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
+    Relate, Sense,
 };
 use crate::domain::Domain;
 use crate::error::{Error, Result};
@@ -23,7 +26,7 @@ use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
 use crate::reformulation::SosReformulationArtifacts;
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
-use crate::soc::{SocConstraint, SocConstraintId, is_detected_soc};
+use crate::soc::{SocConstraint, SocConstraintHandle, SocConstraintId, is_detected_soc};
 use crate::sos::{
     SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType, validate_members,
 };
@@ -35,6 +38,15 @@ const PAR_INDEXED_ALGEBRAIC_THRESHOLD: usize = 512;
 const PAR_INDEXED_RANGE_THRESHOLD: usize = 512;
 const PAR_INDEXED_SOC_THRESHOLD: usize = 256;
 const PAR_INDEXED_SOS_THRESHOLD: usize = 512;
+
+#[cold]
+#[inline(never)]
+fn model_mismatch(
+    expected: ModelId,
+    actual: ModelId,
+) -> std::result::Result<(), ModelMismatchError> {
+    Err(ModelMismatchError::new(expected, actual))
+}
 
 fn indexed_parallel(len: usize, forced: Option<bool>, threshold: usize) -> bool {
     forced.unwrap_or(len >= threshold && rayon::current_num_threads() > 1)
@@ -331,6 +343,17 @@ impl Model {
         assert_expr_arena(expr, arena_key(&self.arena));
     }
 
+    #[inline]
+    fn ensure_model_id(&self, actual: ModelId) -> std::result::Result<(), ModelMismatchError> {
+        let expected = self.id();
+        if actual == expected { Ok(()) } else { model_mismatch(expected, actual) }
+    }
+
+    #[inline]
+    fn ensure_expr_model(&self, expr: Expr<'_>) -> std::result::Result<(), ModelMismatchError> {
+        self.ensure_model_id(expr.model_id())
+    }
+
     /// Deep-copy every registry while preserving stable IDs.
     pub(crate) fn clone_preserving_ids_with_capacity(
         &self,
@@ -427,6 +450,13 @@ impl Model {
             cached_kind: Cell::new(None),
             auto_seq: Cell::new(0),
         }
+    }
+
+    /// Stable identity carried by this model's expression handles and results.
+    #[inline]
+    #[must_use]
+    pub const fn id(&self) -> ModelId {
+        self.arena.model_id()
     }
 
     // Variables
@@ -543,6 +573,21 @@ impl Model {
         self.var_names.borrow().get(name).copied()
     }
 
+    /// Create a model-bound expression handle for an existing variable ID.
+    ///
+    /// This is useful after an ID-preserving model transformation, since source
+    /// and transformed models have distinct identities, so the source expression
+    /// handle is not accepted by the transformed model or its solver result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is not registered on this model.
+    #[must_use]
+    pub fn variable_handle(&self, id: VarId) -> Expr<'_> {
+        assert!(id.index() < self.variables.borrow().len(), "unknown variable ID {id:?}");
+        Expr::from_var(&self.arena, id)
+    }
+
     pub fn variables(&self) -> Ref<'_, Vec<Variable>> {
         self.variables.borrow()
     }
@@ -586,14 +631,24 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `e` is not a bare variable handle, or on anything
+    /// Panics if `e` is not a bare variable handle from this model lineage, or on anything
     /// [`Self::fix_var`] rejects.
-    pub fn fix(&self, e: Expr<'_>, value: f64) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `e` belongs to another model.
+    #[inline]
+    pub fn fix(&self, e: Expr<'_>, value: f64) -> std::result::Result<(), ModelMismatchError> {
+        self.ensure_expr_model(e)?;
         let id = e.var_id().expect("Model::fix expects a single-variable expression");
         self.fix_var(id, value);
+        Ok(())
     }
 
     /// Fix variable `id` to `value` by setting `lb = ub = value`.
+    ///
+    /// `VarId` is a raw numeric index and carries no model provenance. Prefer
+    /// [`Self::fix`] when an expression handle is available.
     ///
     /// # Panics
     ///
@@ -619,10 +674,21 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `e` is not a bare variable handle.
-    pub fn set_initial(&self, e: Expr<'_>, value: f64) {
+    /// Panics if `e` is not a bare variable handle from this model lineage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `e` belongs to another model.
+    #[inline]
+    pub fn set_initial(
+        &self,
+        e: Expr<'_>,
+        value: f64,
+    ) -> std::result::Result<(), ModelMismatchError> {
+        self.ensure_expr_model(e)?;
         let id = e.var_id().expect("Model::set_initial expects a single-variable expression");
         self.variables.borrow_mut()[id.index()].initial = Some(value);
+        Ok(())
     }
 
     /// Restore bounds on variable `id`. Pass `f64::NEG_INFINITY` / `f64::INFINITY`
@@ -747,7 +813,7 @@ impl Model {
                 })
                 .collect();
             let storage = build_storage(keys, axes, handles);
-            return IndexedFamily { storage, _marker: PhantomData };
+            return IndexedFamily { storage, model_id: self.id(), _marker: PhantomData };
         }
         let prepare = |key: &IndexKey| PendingParam {
             name: format_index_name(&base, key).into(),
@@ -757,7 +823,7 @@ impl Model {
         let handles = self.register_params_batch(&prepared);
         drop(prepared);
         let storage = build_storage(keys, axes, handles);
-        IndexedFamily { storage, _marker: PhantomData }
+        IndexedFamily { storage, model_id: self.id(), _marker: PhantomData }
     }
 
     fn register_params_batch<'a>(&'a self, items: &[PendingParam]) -> Vec<Expr<'a>> {
@@ -789,48 +855,68 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `key` is not present in the family, or if `params` was built on
-    /// a different `Model`.
+    /// Panics if `key` is not present in the family.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `params` belongs to another model.
     pub fn set_param_idx<K, Q: Into<IndexKey>>(
         &self,
         params: &IndexedParam<'_, K>,
         key: Q,
         value: f64,
-    ) {
+    ) -> std::result::Result<(), ModelMismatchError> {
+        self.ensure_model_id(params.model_id())?;
         let e = params.get(key).expect("set_param_idx: key not present in indexed parameter");
-        assert!(
-            std::ptr::eq(e.arena, std::ptr::from_ref(&self.arena)),
-            "set_param_idx: indexed parameter belongs to a different model"
-        );
         let id = e.param_id().expect("indexed parameter entry is not a parameter handle");
         self.set_param_id(id, value);
+        Ok(())
     }
 
-    /// Current value bound to the parameter at `key` of an indexed family, or
-    /// `None` if the key is absent.
+    /// Current value bound to the parameter at `key` of an indexed family.
+    /// Returns `Ok(None)` if the key is absent and [`ModelMismatchError`] if the
+    /// family belongs to another model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `params` belongs to another model.
     pub fn param_value_idx<K, Q: Into<IndexKey>>(
         &self,
         params: &IndexedParam<'_, K>,
         key: Q,
-    ) -> Option<f64> {
-        params.get(key).and_then(|e| self.param_value_of(e))
+    ) -> std::result::Result<Option<f64>, ModelMismatchError> {
+        self.ensure_model_id(params.model_id())?;
+        params.get(key).map_or(Ok(None), |e| self.param_value_of(e))
     }
 
     /// Re-bind the parameter referenced by handle `p` to `value`.
     ///
     /// # Panics
     ///
-    /// Panics if `p` is not a bare parameter handle (one returned by the `param!`
-    /// macro).
-    pub fn set_param(&self, p: Expr<'_>, value: f64) {
+    /// Panics if `p` is not a bare parameter handle from this model lineage
+    /// (one returned by the `param!` macro).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `p` belongs to another model.
+    #[inline]
+    pub fn set_param(
+        &self,
+        p: Expr<'_>,
+        value: f64,
+    ) -> std::result::Result<(), ModelMismatchError> {
+        self.ensure_expr_model(p)?;
         let id = p.param_id().expect("Model::set_param expects a single-parameter expression");
         self.set_param_id(id, value);
+        Ok(())
     }
 
     /// Re-bind parameter `id` to `value`. Takes effect on the next solve.
     ///
     /// The value is stored only in the expression arena (its single source of
     /// truth); extraction and evaluation read it from there.
+    /// `ParamId` is a raw numeric index and carries no model provenance; prefer
+    /// [`Self::set_param`] when an expression handle is available.
     pub fn set_param_id(&self, id: ParamId, value: f64) {
         self.arena.borrow_mut().set_param_value(id, value);
         self.cached_kind.set(None);
@@ -845,10 +931,19 @@ impl Model {
         self.arena.borrow().param_value(id)
     }
 
-    /// Current value of the parameter referenced by handle `p`, or `None` if
-    /// `p` is not a bare parameter handle.
-    pub fn param_value_of(&self, p: Expr<'_>) -> Option<f64> {
-        p.param_id().map(|id| self.param_value(id))
+    /// Current value of the parameter referenced by handle `p`. Returns
+    /// `Ok(None)` if `p` is not a bare parameter handle and
+    /// [`ModelMismatchError`] if it belongs to another model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `p` belongs to another model.
+    pub fn param_value_of(
+        &self,
+        p: Expr<'_>,
+    ) -> std::result::Result<Option<f64>, ModelMismatchError> {
+        self.ensure_expr_model(p)?;
+        Ok(p.param_id().map(|id| self.param_value(id)))
     }
 
     pub fn parameter_id(&self, name: &str) -> Option<ParamId> {
@@ -877,14 +972,17 @@ impl Model {
         &self,
         name: impl Into<SmolStr>,
         c: ConstraintExpr<'_>,
-    ) -> ConstraintId {
+    ) -> ConstraintHandle {
         self.assert_expr_belongs(c.lhs);
         let (lower, upper) = match c.sense {
             Sense::Le => (f64::NEG_INFINITY, c.rhs),
             Sense::Ge => (c.rhs, f64::INFINITY),
             Sense::Eq => (c.rhs, c.rhs),
         };
-        self.register_constraint(name.into(), c.lhs.id, lower, upper)
+        ConstraintHandle::new(
+            self.register_constraint(name.into(), c.lhs.id, lower, upper),
+            self.id(),
+        )
     }
 
     /// Push a constraint row `lower <= lhs <= upper` into the registry. Shared by
@@ -962,7 +1060,7 @@ impl Model {
     /// Register an anonymous constraint, deriving a unique name `_c{n}` from an
     /// internal counter. Backs the name-less form of the `constraint!` macro.
     #[doc(hidden)]
-    pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintId {
+    pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintHandle {
         self.__add_constraint(self.next_auto_name(), c)
     }
 
@@ -1072,7 +1170,11 @@ impl Model {
             pending.extend(fork.value);
         }
         drop(batch);
-        let ids = self.register_prevalidated_constraints_batch(pending);
+        let ids = self
+            .register_prevalidated_constraints_batch(pending)
+            .into_iter()
+            .map(|id| ConstraintHandle::new(id, self.id()))
+            .collect();
         IndexedConstraint::new(keys, set.axes(), ids)
     }
 
@@ -1088,23 +1190,21 @@ impl Model {
         mid: Expr<'a>,
         lo: B1,
         hi: B2,
-    ) -> RangeConstraintIds
+    ) -> RangeConstraintHandles
     where
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
     {
         self.assert_expr_belongs(mid);
         if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
-            RangeConstraintIds::Interval(self.register_constraint(
-                name.into(),
-                mid.id,
-                lower,
-                upper,
+            RangeConstraintHandles::Interval(ConstraintHandle::new(
+                self.register_constraint(name.into(), mid.id, lower, upper),
+                self.id(),
             ))
         } else {
             let lower = self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
             let upper = self.__add_constraint(format!("{name}_hi"), mid.le(hi));
-            RangeConstraintIds::Split { lower, upper }
+            RangeConstraintHandles::Split { lower, upper }
         }
     }
 
@@ -1115,23 +1215,21 @@ impl Model {
         mid: Expr<'a>,
         lo: B1,
         hi: B2,
-    ) -> RangeConstraintIds
+    ) -> RangeConstraintHandles
     where
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
     {
         self.assert_expr_belongs(mid);
         if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
-            RangeConstraintIds::Interval(self.register_constraint(
-                self.next_auto_name(),
-                mid.id,
-                lower,
-                upper,
+            RangeConstraintHandles::Interval(ConstraintHandle::new(
+                self.register_constraint(self.next_auto_name(), mid.id, lower, upper),
+                self.id(),
             ))
         } else {
             let lower = self.__add_constraint_auto(mid.ge(lo));
             let upper = self.__add_constraint_auto(mid.le(hi));
-            RangeConstraintIds::Split { lower, upper }
+            RangeConstraintHandles::Split { lower, upper }
         }
     }
 
@@ -1245,10 +1343,13 @@ impl Model {
             .map(|count| {
                 let first = ids.next().expect("range row ID missing");
                 match count {
-                    1 => RangeConstraintIds::Interval(first),
-                    2 => RangeConstraintIds::Split {
-                        lower: first,
-                        upper: ids.next().expect("upper range row ID missing"),
+                    1 => RangeConstraintHandles::Interval(ConstraintHandle::new(first, self.id())),
+                    2 => RangeConstraintHandles::Split {
+                        lower: ConstraintHandle::new(first, self.id()),
+                        upper: ConstraintHandle::new(
+                            ids.next().expect("upper range row ID missing"),
+                            self.id(),
+                        ),
                     },
                     _ => unreachable!("range must lower to one or two rows"),
                 }
@@ -1278,6 +1379,16 @@ impl Model {
         self.constraint_names.borrow().get(name).copied()
     }
 
+    /// Return a model-bound handle for a named algebraic constraint.
+    pub fn constraint_handle(&self, name: &str) -> Option<ConstraintHandle> {
+        self.constraint_id(name).map(|id| ConstraintHandle::new(id, self.id()))
+    }
+
+    /// Bind a raw algebraic constraint ID to this model.
+    pub fn constraint_handle_from_id(&self, id: ConstraintId) -> Option<ConstraintHandle> {
+        (id.index() < self.constraints.borrow().len()).then(|| ConstraintHandle::new(id, self.id()))
+    }
+
     // Second-order cone constraints
 
     /// Register the explicit second-order cone constraint
@@ -1297,7 +1408,7 @@ impl Model {
         name: impl Into<SmolStr>,
         terms: impl IntoIterator<Item = Expr<'a>>,
         bound: Expr<'a>,
-    ) -> SocConstraintId {
+    ) -> SocConstraintHandle {
         let name = name.into();
         let arena = self.arena.borrow();
         let terms: Vec<ExprId> = terms
@@ -1326,7 +1437,7 @@ impl Model {
         all.push(SocConstraint { name: name.clone(), terms, bound: bound.id, active: true });
         by_name.insert(name, id);
         self.cached_kind.set(None);
-        id
+        SocConstraintHandle::new(id, self.id())
     }
 
     // Call only after name preflight, with no intervening user callbacks.
@@ -1377,7 +1488,7 @@ impl Model {
         &'a self,
         terms: impl IntoIterator<Item = Expr<'a>>,
         bound: Expr<'a>,
-    ) -> SocConstraintId {
+    ) -> SocConstraintHandle {
         self.add_soc_constraint(self.next_auto_soc_name(), terms, bound)
     }
 
@@ -1487,6 +1598,20 @@ impl Model {
 
     pub fn soc_constraint_id(&self, name: &str) -> Option<SocConstraintId> {
         self.soc_names.borrow().get(name).copied()
+    }
+
+    /// Return a model-bound handle for a named explicit SOC constraint.
+    pub fn soc_constraint_handle(&self, name: &str) -> Option<SocConstraintHandle> {
+        self.soc_constraint_id(name).map(|id| SocConstraintHandle::new(id, self.id()))
+    }
+
+    /// Bind a raw explicit-SOC constraint ID to this model.
+    pub fn soc_constraint_handle_from_id(
+        &self,
+        id: SocConstraintId,
+    ) -> Option<SocConstraintHandle> {
+        (id.index() < self.soc_constraints.borrow().len())
+            .then(|| SocConstraintHandle::new(id, self.id()))
     }
 
     /// Whether the model carries any explicit second-order cone constraints.
@@ -2092,7 +2217,7 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
                 })
                 .collect();
             let storage = build_storage(keys, axes, handles);
-            return IndexedFamily { storage, _marker: PhantomData };
+            return IndexedFamily { storage, model_id: self.model.id(), _marker: PhantomData };
         }
 
         let prepare = |key: &IndexKey| PendingVar {
@@ -2104,7 +2229,7 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
         let handles = model.register_vars_batch(&prepared, domain);
         drop(prepared);
         let storage = build_storage(keys, axes, handles);
-        IndexedFamily { storage, _marker: PhantomData }
+        IndexedFamily { storage, model_id: self.model.id(), _marker: PhantomData }
     }
 
     #[cfg(any(test, feature = "benchmark-support"))]
@@ -2321,7 +2446,7 @@ mod tests {
         };
         assert!((coeff(&m) - 4.0).abs() < f64::EPSILON);
 
-        m.set_param(param, 9.0);
+        m.set_param(param, 9.0).unwrap();
         assert!((coeff(&m) - 9.0).abs() < f64::EPSILON);
         assert_eq!(m.parameter_id("param"), Some(param.param_id().unwrap()));
     }
@@ -2332,13 +2457,34 @@ mod tests {
         let param = m.__param("param", 4.0);
         let id = param.param_id().unwrap();
         assert!((m.param_value(id) - 4.0).abs() < f64::EPSILON);
-        assert!((m.param_value_of(param).unwrap() - 4.0).abs() < f64::EPSILON);
+        assert!((m.param_value_of(param).unwrap().unwrap() - 4.0).abs() < f64::EPSILON);
 
-        m.set_param(param, 7.5);
+        m.set_param(param, 7.5).unwrap();
         assert!((m.param_value(id) - 7.5).abs() < f64::EPSILON);
 
         let x = m.__var("x").build();
-        assert!(m.param_value_of(x).is_none());
+        assert!(m.param_value_of(x).unwrap().is_none());
+    }
+
+    #[test]
+    fn handle_mutations_reject_foreign_models_without_changing_colliding_slots() {
+        let source = Model::new("source");
+        let target = Model::new("target");
+        let source_x = source.__var("x").build();
+        let target_x = target.__var("x").lb(-1.0).ub(1.0).build();
+        let source_p = source.__param("p", 7.0);
+        let target_p = target.__param("p", 3.0);
+
+        let expected = ModelMismatchError::new(target.id(), source.id());
+        assert_eq!(target.fix(source_x, 0.5), Err(expected));
+        assert_eq!(target.set_initial(source_x, 0.5), Err(expected));
+        assert_eq!(target.set_param(source_p, 9.0), Err(expected));
+
+        let variable = &target.variables()[target_x.var_id().unwrap().index()];
+        assert_eq!((variable.lb, variable.ub, variable.initial), (-1.0, 1.0, None));
+        assert_eq!(target.param_value_of(target_p).unwrap(), Some(3.0));
+        assert_ne!(source.id(), target.id());
+        assert_eq!(source_x.model_id(), source.id());
     }
 
     #[test]
@@ -2347,7 +2493,7 @@ mod tests {
         let param = m.__param("p", 1.0);
         let id = param.param_id().unwrap();
         let snapshot = m.arena();
-        m.set_param(param, 2.0);
+        m.set_param(param, 2.0).unwrap();
         assert!((snapshot.param_value(id) - 1.0).abs() < f64::EPSILON);
         assert!((m.param_value(id) - 2.0).abs() < f64::EPSILON);
     }
@@ -2369,7 +2515,7 @@ mod tests {
         let x = m.__var("x").lb(0.0).build();
         m.__add_constraint("c", (p * x).le(10.0));
         assert_eq!(m.kind(), ModelKind::LP);
-        m.set_param(p, 2.0);
+        m.set_param(p, 2.0).unwrap();
         assert_eq!(m.kind(), ModelKind::LP);
     }
 
@@ -2432,7 +2578,7 @@ mod tests {
         assert_eq!(m.num_parameters(), 3);
         assert!(m.parameter_id("cost[0]").is_some());
         assert!(m.parameter_id("cost[2]").is_some());
-        assert!((m.param_value_idx(&cost, 1usize).unwrap() - 20.0).abs() < f64::EPSILON);
+        assert!((m.param_value_idx(&cost, 1usize).unwrap().unwrap() - 20.0).abs() < f64::EPSILON);
 
         let x = m.__var("x").lb(0.0).build();
         let obj = cost.at([1]) * x;
@@ -2442,20 +2588,21 @@ mod tests {
         };
         assert!((coeff(&m) - 20.0).abs() < f64::EPSILON);
 
-        m.set_param_idx(&cost, 1usize, 99.0);
+        m.set_param_idx(&cost, 1usize, 99.0).unwrap();
         assert!((coeff(&m) - 99.0).abs() < f64::EPSILON);
-        assert!((m.param_value_idx(&cost, 1usize).unwrap() - 99.0).abs() < f64::EPSILON);
-        assert!((m.param_value_idx(&cost, 0usize).unwrap() - 10.0).abs() < f64::EPSILON);
+        assert!((m.param_value_idx(&cost, 1usize).unwrap().unwrap() - 99.0).abs() < f64::EPSILON);
+        assert!((m.param_value_idx(&cost, 0usize).unwrap().unwrap() - 10.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    #[should_panic(expected = "different model")]
     fn set_param_idx_rejects_foreign_family() {
         let a = Model::new("a");
         let b = Model::new("b");
         let items = Set::range(0..2);
         let pa = a.__indexed_param("p", &items, |_i: usize| 1.0);
-        b.set_param_idx(&pa, 0usize, 5.0);
+        let pb = b.__indexed_param("p", &items, |_i: usize| 2.0);
+        assert_eq!(b.set_param_idx(&pa, 0usize, 5.0), Err(ModelMismatchError::new(b.id(), a.id())));
+        assert_eq!(b.param_value_idx(&pb, 0usize).unwrap(), Some(2.0));
     }
 
     #[test]
@@ -2466,9 +2613,9 @@ mod tests {
             m.__indexed_param("price", &plants, |p: String| if p == "a" { 1.5 } else { 2.5 });
         assert!(!price.is_dense());
         assert_eq!(price.len(), 2);
-        assert!((m.param_value_idx(&price, "a").unwrap() - 1.5).abs() < f64::EPSILON);
-        assert!((m.param_value_idx(&price, "b").unwrap() - 2.5).abs() < f64::EPSILON);
-        assert!(m.param_value_idx(&price, "z").is_none());
+        assert!((m.param_value_idx(&price, "a").unwrap().unwrap() - 1.5).abs() < f64::EPSILON);
+        assert!((m.param_value_idx(&price, "b").unwrap().unwrap() - 2.5).abs() < f64::EPSILON);
+        assert!(m.param_value_idx(&price, "z").unwrap().is_none());
     }
 
     #[test]
@@ -2540,20 +2687,20 @@ mod tests {
             );
             for (key, id) in ordinary.iter() {
                 assert_eq!(ordinary.get(key), Some(id));
-                assert_eq!(model.constraint_id(&format!("c[{key}]")), Some(id));
+                assert_eq!(model.constraint_handle(&format!("c[{key}]")), Some(id));
             }
             for (key, ids) in ranges.iter() {
                 assert_eq!(ranges.get(key), Some(ids));
                 match ids {
-                    RangeConstraintIds::Interval(id) => {
-                        assert_eq!(model.constraint_id(&format!("r[{key}]")), Some(id));
+                    RangeConstraintHandles::Interval(id) => {
+                        assert_eq!(model.constraint_handle(&format!("r[{key}]")), Some(id));
                         let row = &model.constraints.borrow()[id.index()];
                         assert_eq!((row.lower, row.upper), (0.0, 10.0));
                         assert_eq!(classify(&model.arena(), row.lhs), ExprClass::Linear);
                     }
-                    RangeConstraintIds::Split { lower, upper } => {
-                        assert_eq!(model.constraint_id(&format!("r[{key}]_lo")), Some(lower));
-                        assert_eq!(model.constraint_id(&format!("r[{key}]_hi")), Some(upper));
+                    RangeConstraintHandles::Split { lower, upper } => {
+                        assert_eq!(model.constraint_handle(&format!("r[{key}]_lo")), Some(lower));
+                        assert_eq!(model.constraint_handle(&format!("r[{key}]_hi")), Some(upper));
                         let rows = model.constraints.borrow();
                         assert_eq!(rows[lower.index()].lower.to_bits(), 0.0_f64.to_bits());
                         assert_eq!(rows[upper.index()].upper.to_bits(), 10.0_f64.to_bits());
@@ -2564,7 +2711,10 @@ mod tests {
                     }
                 }
             }
-            Handles { ordinary: ordinary.iter().collect(), ranges: ranges.iter().collect() }
+            Handles {
+                ordinary: ordinary.iter().map(|(key, handle)| (key, handle.id())).collect(),
+                ranges: ranges.iter().map(|(key, handles)| (key, handles.ids())).collect(),
+            }
         }
 
         rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(|| {
@@ -2718,7 +2868,7 @@ mod tests {
             }));
             assert!(result.is_err());
             assert_eq!(model.num_constraints(), 1);
-            assert_eq!(model.constraint_id("r[17]_hi"), Some(prior));
+            assert_eq!(model.constraint_handle("r[17]_hi"), Some(prior));
             assert_eq!(model.arena().len(), arena_len);
 
             // The failed batch must also release the arena for subsequent builds.
@@ -2728,7 +2878,7 @@ mod tests {
                 &|_| (x, 0.0, 1.0),
                 Some(true),
             );
-            assert_eq!(family.get(0), Some(RangeConstraintIds::Interval(ConstraintId(1))));
+            assert_eq!(family.get(0).unwrap().ids(), RangeConstraintIds::Interval(ConstraintId(1)));
             assert_eq!(model.num_constraints(), 129);
         }
     }

@@ -124,7 +124,7 @@ pub(crate) fn solve_nlp_since_prepared(
     let prep = setup_prepared(prepared, opts)?;
     let oracle = backend::build(model)?;
     let outcome = run_nlp_with_retries(model, &oracle, &prep, opts, None)?;
-    Ok(assemble(prep.sign, outcome, started.elapsed(), model.num_variables()))
+    Ok(assemble(prep.sign, outcome, started.elapsed(), model.id(), model.num_variables()))
 }
 
 /// Mirror POUNCE's two-rung second opinion for a local-infeasibility verdict.
@@ -428,6 +428,7 @@ pub(crate) fn assemble(
     sign: f64,
     o: Outcome,
     elapsed: Duration,
+    model_id: oximo_core::ModelId,
     num_variables: usize,
 ) -> SolverResult {
     let has_point = o.has_point;
@@ -459,6 +460,7 @@ pub(crate) fn assemble(
             );
         }
         solutions.push(SolutionPoint {
+            model_id,
             primal,
             objective: o
                 .objective
@@ -469,6 +471,7 @@ pub(crate) fn assemble(
     let primal_status = PrimalStatus::infer(&o.termination, has_point);
     normalize_result(
         SolverResult {
+            model_id,
             termination: o.termination,
             primal_status,
             dual_status: o.dual_status,
@@ -795,6 +798,7 @@ mod retry_tests {
                     raw_log: None,
                 },
                 Duration::ZERO,
+                oximo_core::ModelId::UNASSIGNED,
                 1,
             );
             assert_eq!(result.dual_status, DualStatus::Unknown, "{raw_status}");
@@ -817,6 +821,7 @@ mod retry_tests {
                 raw_log: None,
             },
             Duration::ZERO,
+            oximo_core::ModelId::UNASSIGNED,
             1,
         );
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);

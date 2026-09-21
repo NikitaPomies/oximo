@@ -27,7 +27,7 @@ fn range_and_offset<S: Solver>(mut solver: S, opts: &S::Options, require_dual: b
         let expected_x = if slope > 0.0 { 3.0 } else { -1.0 };
         assert_eq!(result.termination, TerminationStatus::Optimal);
         assert_eq!(result.primal_status, PrimalStatus::OptimalPoint);
-        close(result.value_of(x), expected_x);
+        close(result.value_of(x).unwrap(), expected_x);
         close(result.objective(), slope * expected_x + 7.0);
         close(result.best_bound, slope * expected_x + 7.0);
         assert!(result.gap.is_none());
@@ -35,7 +35,7 @@ fn range_and_offset<S: Solver>(mut solver: S, opts: &S::Options, require_dual: b
             assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
             // Both the native interval and split-row representations must
             // return sensitivity in the original row and objective units.
-            close(result.dual_of(model.constraint_id("band").unwrap()), slope / 2.0);
+            close(result.dual_of(model.constraint_handle("band").unwrap()).unwrap(), slope / 2.0);
         }
     }
 }
@@ -51,14 +51,14 @@ fn parameter_refresh<S: Solver>(mut solver: S, opts: &S::Options) {
     objective!(model, Max, price * x + offset);
     // Objective-only updates followed by row coefficient/constant updates.
     for (av, sv, pv, ov) in [(2.0, 3.0, 2.0, 7.0), (2.0, 3.0, 3.0, 11.0), (4.0, 1.0, 3.0, 11.0)] {
-        model.set_param(a, av);
-        model.set_param(shift, sv);
-        model.set_param(price, pv);
-        model.set_param(offset, ov);
+        model.set_param(a, av).unwrap();
+        model.set_param(shift, sv).unwrap();
+        model.set_param(price, pv).unwrap();
+        model.set_param(offset, ov).unwrap();
         let result = solver.solve(&model, opts).unwrap();
         let expected_x = (9.0 - sv) / av;
         assert_eq!(result.termination, TerminationStatus::Optimal);
-        close(result.value_of(x), expected_x);
+        close(result.value_of(x).unwrap(), expected_x);
         close(result.objective(), pv * expected_x + ov);
         close(result.best_bound, pv * expected_x + ov);
         assert!(result.gap.is_none());
@@ -104,8 +104,8 @@ fn quadratic_cross_terms<S: Solver>(mut solver: S, opts: &S::Options) {
         }
         let result = solver.solve(&model, opts).unwrap();
         assert!(result.has_solution());
-        close(result.value_of(x), 0.25);
-        close(result.value_of(y), 0.75);
+        close(result.value_of(x).unwrap(), 0.25);
+        close(result.value_of(y).unwrap(), 0.75);
         close(result.objective(), if maximize { 5.125 } else { 8.875 });
         assert!(matches!(
             result.termination,
@@ -139,10 +139,10 @@ fn cone_forms<S: Solver>(mut solver: S, opts: &S::Options) {
         }
         let result = result.unwrap();
         assert!(result.has_solution());
-        close(result.value_of(x), 3.0);
-        close(result.value_of(y), 4.0);
+        close(result.value_of(x).unwrap(), 3.0);
+        close(result.value_of(y).unwrap(), 4.0);
         // sqrt(7^2 + 24^2) = 25 for the explicit cone.
-        close(result.value_of(t), if explicit { 10.0 } else { 5.0 });
+        close(result.value_of(t).unwrap(), if explicit { 10.0 } else { 5.0 });
         close(result.objective(), if explicit { 17.0 } else { 12.0 });
     }
 }
