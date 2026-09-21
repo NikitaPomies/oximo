@@ -117,6 +117,7 @@ impl GurobiPersistent {
             let snap = snapshot(model)?;
             if snap.fingerprint == base.fingerprint {
                 push_deltas(&mut st.built, base, &snap, opts)?;
+                st.built.model_id = model.id();
                 st.snap = Some(snap);
                 updated = true;
             }
@@ -148,6 +149,7 @@ impl GurobiPersistent {
             let snap = snapshot(model)?;
             if snap.fingerprint == base.fingerprint {
                 push_deltas(&mut st.built, base, &snap, opts)?;
+                st.built.model_id = model.id();
                 st.snap = Some(snap);
                 updated = true;
             }
@@ -271,4 +273,32 @@ fn push_deltas(
     }
     apply_options(&mut built.model, opts).map_err(map_gurobi_err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use oximo_core::prelude::*;
+    use oximo_solver::{PersistentSolver, Solver};
+
+    use crate::{Gurobi, GurobiOptions};
+
+    #[test]
+    fn fast_path_retags_results_for_a_distinct_structurally_identical_model() {
+        let first = Model::new("first");
+        variable!(first, 0.0 <= x1 <= 1.0);
+        objective!(first, Max, x1);
+
+        let second = Model::new("second");
+        variable!(second, 0.0 <= x2 <= 1.0);
+        objective!(second, Max, x2);
+        assert_ne!(first.id(), second.id());
+
+        let mut solver = Gurobi.persistent();
+        solver.solve(&first, &GurobiOptions::default()).unwrap();
+        let result = solver.solve(&second, &GurobiOptions::default()).unwrap();
+
+        assert_eq!(result.model_id(), second.id());
+        assert_eq!(result.value_of(x2).unwrap(), Some(1.0));
+        assert_eq!(result.value_of(x1), Err(ModelMismatchError::new(second.id(), first.id())));
+    }
 }
