@@ -6,12 +6,12 @@ use oximo_core::prelude::*;
 fn scalar_relations_still_return_ids() {
     let m = Model::new("scalar_ids");
     variable!(m, x);
-    let named: ConstraintId = constraint!(m, capacity, x <= 10.0);
-    let anonymous: ConstraintId = constraint!(m, x >= 0.0);
-    let computed: ConstraintId = constraint!(m, name = format!("fixed_{}", 2), x == 2.0);
-    assert_eq!(m.constraint_id("capacity"), Some(named));
-    assert_eq!(m.constraint_id("_c0"), Some(anonymous));
-    assert_eq!(m.constraint_id("fixed_2"), Some(computed));
+    let named: ConstraintHandle = constraint!(m, capacity, x <= 10.0);
+    let anonymous: ConstraintHandle = constraint!(m, x >= 0.0);
+    let computed: ConstraintHandle = constraint!(m, name = format!("fixed_{}", 2), x == 2.0);
+    assert_eq!(m.constraint_handle("capacity"), Some(named));
+    assert_eq!(m.constraint_handle("_c0"), Some(anonymous));
+    assert_eq!(m.constraint_handle("fixed_2"), Some(computed));
 }
 
 #[test]
@@ -24,13 +24,13 @@ fn dense_family_returns_actual_ids_and_owns_its_entries() {
         assert_eq!(cover.len(), 3);
         assert!(!cover.is_empty());
         for (i, cid) in cover.iter() {
-            assert_eq!(m.constraint_id(&format!("cover[{i}]")), Some(cid));
+            assert_eq!(m.constraint_handle(&format!("cover[{i}]")), Some(cid));
             assert_eq!(cover.get(i), Some(cid));
         }
         cover
     };
     assert_eq!(
-        cover.iter().collect::<Vec<_>>(),
+        cover.iter().map(|(key, handle)| (key, handle.id())).collect::<Vec<_>>(),
         vec![(3, ConstraintId(1)), (4, ConstraintId(2)), (5, ConstraintId(3)),]
     );
     assert_eq!(cover.get(2), None);
@@ -52,7 +52,7 @@ fn dense_tuple_lookup_uses_each_axis_offset() {
     assert_eq!(grid.iter().map(|(key, _)| key).collect::<Vec<_>>(), expected);
     for (key, cid) in grid.iter() {
         assert_eq!(grid.get(key), Some(cid));
-        assert_eq!(m.constraint_id(&format!("grid[{},{}]", key.0, key.1)), Some(cid));
+        assert_eq!(m.constraint_handle(&format!("grid[{},{}]", key.0, key.1)), Some(cid));
     }
     assert_eq!(grid.get((2, 8)), None);
     assert_eq!(grid.get((1, 5)), None);
@@ -68,13 +68,13 @@ fn sparse_and_filtered_domains_preserve_order() {
     assert_eq!(sparse.iter().map(|(i, _)| i).collect::<Vec<_>>(), [7, 3, 20]);
     for (i, cid) in sparse.iter() {
         assert_eq!(sparse.get(i), Some(cid));
-        assert_eq!(m.constraint_id(&format!("sparse[{i}]")), Some(cid));
+        assert_eq!(m.constraint_handle(&format!("sparse[{i}]")), Some(cid));
     }
     assert_eq!(sparse.get(0), None);
     let filtered = constraint!(m, filtered[i in 0..6 if i % 2 == 0], x >= 0.0);
     assert_eq!(filtered.iter().map(|(i, _)| i).collect::<Vec<_>>(), [0, 2, 4]);
     assert_eq!(filtered.get(1), None);
-    assert_eq!(filtered.get(4), m.constraint_id("filtered[4]"));
+    assert_eq!(filtered.get(4), m.constraint_handle("filtered[4]"));
 }
 
 #[test]
@@ -86,13 +86,13 @@ fn string_and_filtered_tuple_domains_support_lookup() {
         constraint!(m, supply[p in plants if p != "skip"], x <= 5.0);
     assert_eq!(supply.iter().map(|(p, _)| p).collect::<Vec<_>>(), ["west", "east"]);
     assert_eq!(supply.get("skip"), None);
-    assert_eq!(supply.get("east"), m.constraint_id("supply[east]"));
+    assert_eq!(supply.get("east"), m.constraint_handle("supply[east]"));
     let grid: IndexedConstraint<(String, usize)> =
         constraint!(m, grid[p in plants, i in 1..3 if p != "skip" && i == 2], x >= 0.0);
     assert_eq!(grid.len(), 2);
     for ((p, i), cid) in grid.iter() {
         assert_eq!(grid.get((p.as_str(), i)), Some(cid));
-        assert_eq!(m.constraint_id(&format!("grid[{p},{i}]")), Some(cid));
+        assert_eq!(m.constraint_handle(&format!("grid[{p},{i}]")), Some(cid));
     }
     assert_eq!(grid.get(("west", 1)), None);
 }
@@ -121,34 +121,34 @@ fn scalar_ranges_return_named_and_anonymous_groups() {
     let m = Model::new("range_ids");
     variable!(m, x);
     param!(m, lo = 0.0);
-    let band: RangeConstraintIds = constraint!(m, band, 0.0 <= x <= 4.0);
-    assert_eq!(band, RangeConstraintIds::Interval(m.constraint_id("band").unwrap()));
+    let band: RangeConstraintHandles = constraint!(m, band, 0.0 <= x <= 4.0);
+    assert_eq!(band, RangeConstraintHandles::Interval(m.constraint_handle("band").unwrap()));
     let reversed = constraint!(m, name = format!("band_{}", 2), 4.0 >= x >= 0.0);
-    assert_eq!(reversed, RangeConstraintIds::Interval(m.constraint_id("band_2").unwrap()));
+    assert_eq!(reversed, RangeConstraintHandles::Interval(m.constraint_handle("band_2").unwrap()));
     let auto = constraint!(m, 0.0 <= x <= 4.0);
-    assert_eq!(auto, RangeConstraintIds::Interval(m.constraint_id("_c0").unwrap()));
+    assert_eq!(auto, RangeConstraintHandles::Interval(m.constraint_handle("_c0").unwrap()));
     let split = constraint!(m, symbolic, lo <= x <= 4.0);
     assert_eq!(
         split,
-        RangeConstraintIds::Split {
-            lower: m.constraint_id("symbolic_lo").unwrap(),
-            upper: m.constraint_id("symbolic_hi").unwrap(),
+        RangeConstraintHandles::Split {
+            lower: m.constraint_handle("symbolic_lo").unwrap(),
+            upper: m.constraint_handle("symbolic_hi").unwrap(),
         }
     );
     let nonlinear = constraint!(m, name = "nonlinear".to_owned(), 4.0 >= x.powi(2) >= 0.0);
     assert_eq!(
         nonlinear,
-        RangeConstraintIds::Split {
-            lower: m.constraint_id("nonlinear_lo").unwrap(),
-            upper: m.constraint_id("nonlinear_hi").unwrap(),
+        RangeConstraintHandles::Split {
+            lower: m.constraint_handle("nonlinear_lo").unwrap(),
+            upper: m.constraint_handle("nonlinear_hi").unwrap(),
         }
     );
     let auto_split = constraint!(m, lo <= x <= 4.0);
     assert_eq!(
         auto_split,
-        RangeConstraintIds::Split {
-            lower: m.constraint_id("_c1").unwrap(),
-            upper: m.constraint_id("_c2").unwrap(),
+        RangeConstraintHandles::Split {
+            lower: m.constraint_handle("_c1").unwrap(),
+            upper: m.constraint_handle("_c2").unwrap(),
         }
     );
 }
@@ -164,7 +164,7 @@ fn range_family_can_mix_interval_and_split_entries() {
     assert_eq!(ranges.len(), 3);
     assert_eq!(m.num_constraints(), 5);
     assert_eq!(
-        ranges.iter().collect::<Vec<_>>(),
+        ranges.iter().map(|(key, handles)| (key, handles.ids())).collect::<Vec<_>>(),
         vec![
             (0, RangeConstraintIds::Interval(ConstraintId(1))),
             (1, RangeConstraintIds::Split { lower: ConstraintId(2), upper: ConstraintId(3) }),
@@ -184,7 +184,7 @@ fn range_family_can_mix_interval_and_split_entries() {
     assert_eq!(sparse.get("skip"), None);
     assert_eq!(
         sparse.get("first"),
-        Some(RangeConstraintIds::Interval(m.constraint_id("sparse[first]").unwrap()))
+        Some(RangeConstraintHandles::Interval(m.constraint_handle("sparse[first]").unwrap()))
     );
 }
 

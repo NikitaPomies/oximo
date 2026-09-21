@@ -434,7 +434,7 @@ fn param_handle_keeps_model_linear() {
     constraint!(m, c, rate * x <= 1.0);
     objective!(m, Max, rate * x);
     assert_eq!(m.kind(), ModelKind::LP);
-    assert!((m.param_value_of(rate).unwrap() - 0.05).abs() < f64::EPSILON);
+    assert!((m.param_value_of(rate).unwrap().unwrap() - 0.05).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -691,7 +691,7 @@ fn soc_named_scalar() {
     variable!(m, y);
     variable!(m, t >= 0.0);
     let id = soc_constraint!(m, cone, [x, y] <= t);
-    assert_eq!(m.soc_constraint_id("cone"), Some(id));
+    assert_eq!(m.soc_constraint_handle("cone"), Some(id));
     assert_eq!(m.num_soc_constraints(), 1);
     objective!(m, Min, t);
     assert_eq!(m.kind(), ModelKind::SOCP);

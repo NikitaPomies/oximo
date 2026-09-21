@@ -62,7 +62,7 @@ fn params_render_current_binding() {
     assert!(out.contains("minimize 4 x\n"), "{out}");
     assert!(out.contains("params\n  price = 4\n"), "{out}");
 
-    m.set_param(price, 7.5);
+    m.set_param(price, 7.5).unwrap();
     let out = m.to_string();
     assert!(out.contains("minimize 7.5 x\n"), "{out}");
     assert!(out.contains("params\n  price = 7.5\n"), "{out}");

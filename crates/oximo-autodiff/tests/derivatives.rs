@@ -229,7 +229,7 @@ fn params_refresh_without_retaping() {
     ev.eval_objective_gradient(&point, &mut grad);
     assert_close(grad[0], 2.0 * point[0].cos(), 1e-12, "grad with p=2");
 
-    m.set_param(p, 3.0);
+    m.set_param(p, 3.0).unwrap();
     ev.refresh_params(&m);
     ev.eval_objective_gradient(&point, &mut grad);
     assert_close(grad[0], 3.0 * point[0].cos(), 1e-12, "grad with p=3");
@@ -328,7 +328,7 @@ fn try_refresh_reuses_tapes_when_structure_preserved() {
     ev.eval_objective_gradient(&point, &mut grad);
     assert_close(grad[0], 2.0 * point[0].cos(), 1e-12, "grad with p=2");
 
-    m.set_param(p, 3.0);
+    m.set_param(p, 3.0).unwrap();
     assert!(ev.try_refresh(&m), "structure preserved -> refreshed in place");
     ev.eval_objective_gradient(&point, &mut grad);
     assert_close(grad[0], 3.0 * point[0].cos(), 1e-12, "grad after try_refresh with p=3");

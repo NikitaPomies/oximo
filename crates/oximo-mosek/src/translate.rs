@@ -358,7 +358,7 @@ fn extract_result(
         let primal = oximo_solver::reconstruct::project_dense_primal(&values, variables.len())
             .unwrap_or_default();
         let objective = task.get_primal_obj(solution_type).ok().filter(|value| value.is_finite());
-        solutions.push(SolutionPoint { primal, objective });
+        solutions.push(SolutionPoint { model_id: model.id(), primal, objective });
     }
     if has_dual {
         collect_continuous_duals(
@@ -392,6 +392,7 @@ fn extract_result(
         .map(|()| format!("{major}.{minor}.{revision}").into());
     Ok(normalize_result(
         SolverResult {
+            model_id: model.id(),
             termination,
             primal_status: PrimalStatus::NoSolution,
             dual_status,

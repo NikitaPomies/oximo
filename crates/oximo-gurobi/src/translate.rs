@@ -6,8 +6,9 @@ use gurobi_rs::constr::RangeExpr;
 use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraint,
-    SocConstraintId, SosConstraint, SosConstraintId, SosType, VarId, Variable, var_name,
+    Constraint, ConstraintId, Domain, Model, ModelId, ModelKind, ObjectiveSense, Sense,
+    SocConstraint, SocConstraintId, SosConstraint, SosConstraintId, SosType, VarId, Variable,
+    var_name,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
@@ -52,6 +53,7 @@ pub(crate) fn default_env() -> Result<Env, SolverError> {
 /// A built Gurobi model plus the handles needed to read its solution and to drive
 /// incremental re-solves.
 pub(crate) struct Built {
+    pub model_id: ModelId,
     pub model: gurobi_rs::Model,
     pub vars: Vec<gurobi_rs::Var>,
     pub constrs: Vec<ConstraintHandle>,
@@ -127,6 +129,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     }
 
     Ok(Built {
+        model_id: model.id(),
         model: gurobi_model,
         vars: gurobi_vars,
         constrs: gurobi_constrs,
@@ -222,6 +225,7 @@ fn collect_after_optimize(
 
     Ok(normalize_result(
         SolverResult {
+            model_id: built.model_id,
             termination,
             primal_status: PrimalStatus::NoSolution,
             dual_status: collected_dual_status(kind, dual_available, !solutions.is_empty()),
@@ -956,7 +960,11 @@ fn collect_pool(
             .get_attr(attr::PoolObjVal)
             .ok()
             .and_then(|v| ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(v));
-        out.push(SolutionPoint { primal: index_map(&vals), objective });
+        out.push(SolutionPoint {
+            model_id: ModelId::UNASSIGNED,
+            primal: index_map(&vals),
+            objective,
+        });
     }
     if out.is_empty() {
         out.push(collect_incumbent(model, vars, obj_constant));
@@ -977,7 +985,7 @@ fn collect_incumbent(
         .get_attr(attr::ObjVal)
         .ok()
         .and_then(|v| ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(v));
-    SolutionPoint { primal, objective }
+    SolutionPoint { model_id: ModelId::UNASSIGNED, primal, objective }
 }
 
 /// Map a dense per-variable value array (in `VarId` order) to a sparse map.

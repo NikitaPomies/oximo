@@ -175,7 +175,7 @@ mod tests {
         };
 
         let iis = Iis {
-            constraints: vec![lo, hi],
+            constraints: vec![lo.id(), hi.id()],
             soc_constraints: Vec::new(),
             sos_constraints: vec![sos],
             var_bounds: vec![(x.var_id().unwrap(), VarBoundKind::Lower)],

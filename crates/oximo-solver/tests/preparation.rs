@@ -21,7 +21,7 @@ fn preparation_freezes_parameters_and_shares_compound_decompositions() {
     let Extracted::Shared(second) = prepared.quadratic(expr).unwrap() else { panic!("cache miss") };
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(prepared.sense(), ObjectiveSense::Maximize);
-    model.set_param(p, 7.0);
+    model.set_param(p, 7.0).unwrap();
     assert_eq!(prepared.quadratic(expr).unwrap().linear[0].1, 2.0);
     assert_eq!(LoweringContext::new(&model).unwrap().quadratic(expr).unwrap().linear[0].1, 7.0);
 }
@@ -133,7 +133,7 @@ fn explicit_cones_use_the_same_parameter_snapshot_as_polynomials() {
     let AffineTerms::Shared(first) = prepared.linear(soc.terms[0]).unwrap() else {
         panic!("parameterized member should use shared extraction");
     };
-    model.set_param(p, 5.0);
+    model.set_param(p, 5.0).unwrap();
     let form = prepared.explicit_soc(soc).unwrap();
     assert_eq!(form.terms[0].coeffs[0].1, 2.0);
     assert_eq!(form.bound.constant, 2.0);

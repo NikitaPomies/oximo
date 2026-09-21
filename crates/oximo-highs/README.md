@@ -29,18 +29,22 @@ use oximo_core::prelude::*;
 use oximo_highs::{Highs, HighsOptions};
 use oximo_solver::{Solver, TerminationStatus};
 
-let m = Model::new("toy");
-variable!(m, x >= 0.0);
-variable!(m, 0.0 <= y <= 4.0);
-constraint!(m, c1, x + 2.0 * y <= 14.0);
-constraint!(m, c2, 3.0 * x - y >= 0.0);
-objective!(m, Max, 3.0 * x + 4.0 * y);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let m = Model::new("toy");
+    variable!(m, x >= 0.0);
+    variable!(m, 0.0 <= y <= 4.0);
+    constraint!(m, c1, x + 2.0 * y <= 14.0);
+    constraint!(m, c2, 3.0 * x - y >= 0.0);
+    objective!(m, Max, 3.0 * x + 4.0 * y);
 
-let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
-assert_eq!(result.termination, TerminationStatus::Optimal);
-println!("obj = {}", result.objective().unwrap()); // 34.0
-println!("x   = {}", result.value_of(x).unwrap()); // 6.0
-println!("y   = {}", result.value_of(y).unwrap()); // 4.0
+    let result = Highs.solve(&m, &HighsOptions::default())?;
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+    println!("obj = {}", result.objective().unwrap()); // 34.0
+    println!("x   = {}", result.value_of(x)?.unwrap()); // 6.0
+    println!("y   = {}", result.value_of(y)?.unwrap()); // 4.0
+
+    Ok(())
+}
 ```
 
 ## Persistent handle (repeated solves)

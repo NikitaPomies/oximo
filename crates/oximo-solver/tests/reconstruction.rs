@@ -7,6 +7,7 @@ use oximo_solver::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, Termin
 
 fn point(values: &[(u32, f64)], objective: f64) -> SolutionPoint {
     SolutionPoint {
+        model_id: oximo_core::ModelId::UNASSIGNED,
         primal: values.iter().map(|&(id, value)| (VarId(id), value)).collect(),
         objective: Some(objective),
     }

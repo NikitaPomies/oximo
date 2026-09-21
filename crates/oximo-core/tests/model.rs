@@ -170,7 +170,7 @@ fn bound_change_invalidates_kind_cache() {
     assert_eq!(m.kind(), ModelKind::QCP);
 
     // Fixing t to a nonnegative value makes the row a cone.
-    m.fix(t, 1.0);
+    m.fix(t, 1.0).unwrap();
     assert_eq!(m.kind(), ModelKind::SOCP);
 
     // Unfixing back to a free variable demotes it again.
@@ -253,7 +253,7 @@ fn kind_caches_and_invalidates() {
 fn fix_sets_equal_bounds() {
     let m = Model::new("fix_builder");
     variable!(m, 0.0 <= x <= 10.0);
-    m.fix(x, 3.5);
+    m.fix(x, 3.5).unwrap();
     let vars = m.variables();
     assert_eq!(vars[0].lb, 3.5);
     assert_eq!(vars[0].ub, 3.5);
@@ -276,7 +276,7 @@ fn fix_var_mutates_bounds_post_build() {
 fn fix_rejects_a_fractional_value_on_an_integer_variable() {
     let m = Model::new("fix_fractional");
     variable!(m, 0.0 <= y <= 1, Int);
-    m.fix(y, 0.3);
+    m.fix(y, 0.3).unwrap();
 }
 
 #[test]
@@ -284,14 +284,14 @@ fn fix_rejects_a_fractional_value_on_an_integer_variable() {
 fn fix_rejects_a_fractional_value_on_a_binary_variable() {
     let m = Model::new("fix_fractional_binary");
     variable!(m, z, Bin);
-    m.fix(z, 0.3);
+    m.fix(z, 0.3).unwrap();
 }
 
 #[test]
 fn fix_accepts_an_int_value_on_an_int_variable() {
     let m = Model::new("fix_integral");
     variable!(m, 0.0 <= y <= 20.0, Int);
-    m.fix(y, 1.0);
+    m.fix(y, 1.0).unwrap();
     let vars = m.variables();
     assert_eq!(vars[0].lb, 1.0);
     assert_eq!(vars[0].ub, 1.0);
@@ -302,7 +302,7 @@ fn fix_accepts_an_int_value_on_an_int_variable() {
 fn fix_rejects_a_value_outside_the_declared_bounds() {
     let m = Model::new("fix_outside_bounds");
     variable!(m, 0.0 <= x <= 5.0);
-    m.fix(x, 7.0);
+    m.fix(x, 7.0).unwrap();
 }
 
 #[test]
@@ -310,14 +310,14 @@ fn fix_rejects_a_value_outside_the_declared_bounds() {
 fn fix_rejects_a_non_finite_value() {
     let m = Model::new("fix_non_finite");
     variable!(m, x);
-    m.fix(x, f64::NAN);
+    m.fix(x, f64::NAN).unwrap();
 }
 
 #[test]
 fn fix_accepts_zero_on_a_semicontinuous_variable() {
     let m = Model::new("fix_semi_zero");
     variable!(m, 2.0 <= s <= 8.0, SemiCont(2.0));
-    m.fix(s, 0.0);
+    m.fix(s, 0.0).unwrap();
     let vars = m.variables();
     assert_eq!(vars[0].lb, 0.0);
     assert_eq!(vars[0].ub, 0.0);
@@ -330,7 +330,7 @@ fn fix_accepts_zero_on_a_semicontinuous_variable() {
 fn fix_rejects_a_value_inside_the_semicontinuity_gap() {
     let m = Model::new("fix_semi_gap");
     variable!(m, s, SemiCont(2.0));
-    m.fix(s, 1.0);
+    m.fix(s, 1.0).unwrap();
 }
 
 #[test]
@@ -340,14 +340,14 @@ fn fix_rejects_a_value_inside_the_semicontinuity_gap() {
 fn fix_rejects_a_value_inside_the_semiinteger_gap() {
     let m = Model::new("fix_semi_gap");
     variable!(m, s, SemiInt(2.0));
-    m.fix(s, 1.0);
+    m.fix(s, 1.0).unwrap();
 }
 
 #[test]
 fn fix_pins_var_expr_and_indexed_entry() {
     let m = Model::new("fix_expr");
     variable!(m, 0.0 <= x <= 10.0);
-    m.fix(x, 3.0);
+    m.fix(x, 3.0).unwrap();
     let xid = m.variable_id("x").unwrap();
     let vars = m.variables();
     assert_eq!(vars[xid.index()].lb, 3.0);
@@ -356,7 +356,7 @@ fn fix_pins_var_expr_and_indexed_entry() {
 
     let keys = Set::strings(["a", "b"]);
     variable!(m, w[k in keys], Bin);
-    m.fix(w["a"], 1.0);
+    m.fix(w["a"], 1.0).unwrap();
     let aid = m.variable_id("w[a]").unwrap();
     let vars = m.variables();
     assert_eq!(vars[aid.index()].lb, 1.0);
@@ -391,7 +391,7 @@ fn unfix_var_restores_bounds() {
 fn initial_value_stored_on_variable() {
     let m = Model::new("init");
     variable!(m, x >= 0.0);
-    m.set_initial(x, 3.5);
+    m.set_initial(x, 3.5).unwrap();
     variable!(m, y >= 0.0);
     let _ = y;
     let vars = m.variables();
@@ -437,7 +437,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
     assert_eq!(m.num_soc_constraints(), 1);
     assert_eq!(m.num_sos_constraints(), 1);
     assert_eq!(m.constraint_id("shared"), Some(ConstraintId(0)));
-    assert_eq!(m.soc_constraint_id("shared"), Some(soc_id));
+    assert_eq!(m.soc_constraint_handle("shared"), Some(soc_id));
     assert_eq!(m.sos_constraint_id("sos"), Some(sos_id));
 
     let constraints = m.constraints();
@@ -458,7 +458,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
     }
     match iter.next().expect("SOC constraint") {
         ConstraintRef::SecondOrderCone { id, constraint } => {
-            assert_eq!(id, soc_id);
+            assert_eq!(id, soc_id.id());
             assert_eq!(constraint.name, "shared");
         }
         ConstraintRef::Algebraic { .. } => panic!("explicit cones come second"),

@@ -73,19 +73,19 @@ pool point.
 
 ```rust,ignore
 result.objective()    // Option<f64>, best solution's objective
-result.value_of(expr) // Option<f64>, primal value for a Var expr (best solution)
+result.value_of(expr) // Result<Option<f64>, ModelMismatchError>
 result.value(var_id)  // Option<f64>, primal value by VarId (best solution)
-result.dual_of(c_id)  // Option<f64>, dual for a constraint
+result.dual_of(handle) // Result<Option<f64>, ModelMismatchError>
 result.best()         // Option<&SolutionPoint>, same as .solution(0)
 result.solution(i)    // Option<&SolutionPoint>, i-th pooled point
 result.result_count() // usize, number of returned points
 result.has_solution() // true when a usable primal point is available
-result.report(&model) // Display: model-aware summary (status, vars, duals)
+result.report(&model) // Result<ModelReport, ModelMismatchError>
 
 // Indexed variables
-result.value_of_idx(&flow, "nyc")                  // Option<f64>, value at a specific index
-result.values_of(&flow)                            // Iterator<(&IndexKey, f64)>, all entries with a primal value
-result.values_of(&flow).filter(|(_, v)| *v != 0.0) // nonzero only (sparse solutions)
+result.value_of_idx(&flow, "nyc")                           // Result<Option<f64>, ModelMismatchError>
+result.values_of(&flow)?                                    // Iterator<(&IndexKey, f64)>
+result.values_of(&flow)?.filter(|(_, v)| *v != 0.0)         // nonzero only
 ```
 
 ## `TerminationStatus`

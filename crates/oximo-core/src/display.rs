@@ -300,7 +300,7 @@ mod tests {
         let m = Model::new("t");
         let x = m.__var("x").build();
         let eq = m.__add_constraint("e", x.eq(5.0));
-        assert_eq!(m.display_constraint(eq).to_string(), "e: x = 5");
+        assert_eq!(m.display_constraint(eq.id()).to_string(), "e: x = 5");
 
         m.__add_range("r", x, 2.0, 10.0);
         let r = m.constraint_id("r").unwrap();
@@ -308,7 +308,7 @@ mod tests {
 
         let ge = m.__add_constraint("g", x.ge(1.0));
         m.constraints.borrow_mut()[ge.index()].active = false;
-        assert_eq!(m.display_constraint(ge).to_string(), "g: x >= 1 (inactive)");
+        assert_eq!(m.display_constraint(ge.id()).to_string(), "g: x >= 1 (inactive)");
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
         let y = m.__var("y").build();
         let t = m.__var("t").lb(0.0).build();
         let id = m.add_soc_constraint("q1", [x, y], t);
-        assert_eq!(m.display_soc(id).to_string(), "q1: ||x, y|| <= t");
+        assert_eq!(m.display_soc(id.id()).to_string(), "q1: ||x, y|| <= t");
         assert!(format!("{m}").contains("  q1: ||x, y|| <= t\n"));
     }
 

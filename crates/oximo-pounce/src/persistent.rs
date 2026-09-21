@@ -157,7 +157,7 @@ impl PouncePersistent {
             run_nlp_retries_after(model, &state.oracle, &prep, opts, primary_started, primary)?;
         let elapsed = started.elapsed();
         state.warm = outcome.warm.take();
-        Ok(assemble(prep.sign, outcome, elapsed, model.num_variables()))
+        Ok(assemble(prep.sign, outcome, elapsed, model.id(), model.num_variables()))
     }
 
     fn solve_convex(
@@ -214,7 +214,7 @@ impl PouncePersistent {
             .then(|| convex::warm_from_solution(route, &state.problem, &solution));
         let sign = state.problem.sign();
         outcome.warm = None;
-        Ok(assemble(sign, outcome, elapsed, model.num_variables()))
+        Ok(assemble(sign, outcome, elapsed, model.id(), model.num_variables()))
     }
 
     fn validate_convex_options(&mut self, opts: &PounceOptions) -> Result<(), SolverError> {

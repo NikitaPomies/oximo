@@ -11,7 +11,7 @@ use std::{fs, io};
 static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense,
+    Constraint, ConstraintId, Domain, Model, ModelId, ModelKind, Objective, ObjectiveSense, Sense,
     SocConstraint, SocConstraintId, SosConstraint, SosMember, SosType, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
@@ -228,6 +228,7 @@ pub fn solve(
 
     let _ = fs::remove_dir_all(&tmp_dir);
     result.solver_name = Some(gams_solver_label(opts));
+    result.model_id = model.id();
     Ok(normalize_result(result, vars.len()))
 }
 
@@ -400,10 +401,14 @@ fn parseoximo_solution(
 
     // The PUT solution file holds only the incumbent. `solve` augments this with
     // a sub-solver solution pool (if one was written) read from the run dir's GDX.
-    let solutions =
-        if has_sol { vec![SolutionPoint { primal, objective: obj_val }] } else { Vec::new() };
+    let solutions = if has_sol {
+        vec![SolutionPoint { model_id: ModelId::UNASSIGNED, primal, objective: obj_val }]
+    } else {
+        Vec::new()
+    };
     normalize_result(
         SolverResult {
+            model_id: ModelId::UNASSIGNED,
             solutions,
             dual: if has_sol { dual } else { FxHashMap::default() },
             soc_dual,
@@ -512,7 +517,11 @@ fn parse_pool_member(dump: &str) -> Option<SolutionPoint> {
             primal.insert(VarId(idx), parse_gdx_level(line));
         }
     }
-    if primal.is_empty() { None } else { Some(SolutionPoint { primal, objective }) }
+    if primal.is_empty() {
+        None
+    } else {
+        Some(SolutionPoint { model_id: ModelId::UNASSIGNED, primal, objective })
+    }
 }
 
 /// Extract the `L` (level) field from a `gdxdump` variable record line, e.g.
@@ -1582,7 +1591,7 @@ mod tests {
         let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\nMARGINALS=1\n0=-1.0\n1=1.5\nZ0=-0.75\n";
         let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)].into(), constant: 0.5 }];
         let r = parseoximo_solution(content, &bounds, false, 2, std::time::Duration::ZERO, None);
-        let z0 = r.soc_dual_of(SocConstraintId(0)).expect("SOC dual missing");
+        let z0 = r.soc_dual.get(&SocConstraintId(0)).copied().expect("SOC dual missing");
         assert!((z0 - 3.0).abs() < 1e-9, "z0 = {z0}");
     }
 

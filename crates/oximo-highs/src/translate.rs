@@ -6,7 +6,9 @@ use highs::{
     HessianFormat, HighsModelStatus, HighsSolutionStatus, Model as HighsModel, RowProblem,
     Sense as HighsSense,
 };
-use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable};
+use oximo_core::{
+    ConstraintId, Domain, Model, ModelId, ModelKind, ObjectiveSense, VarId, Variable,
+};
 use oximo_expr::{ExprId, QuadraticTerms};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
@@ -54,6 +56,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         meta.obj_constant,
         meta.num_constraints,
         meta.cols.len(),
+        model.id(),
         elapsed,
     ))
 }
@@ -193,6 +196,7 @@ pub(crate) fn extract_result(
     obj_constant: f64,
     num_constraints: usize,
     num_variables: usize,
+    model_id: ModelId,
     elapsed: Duration,
 ) -> SolverResult {
     let native_status = solved.status();
@@ -214,7 +218,7 @@ pub(crate) fn extract_result(
     };
 
     let solutions = if has_point {
-        vec![SolutionPoint { primal, objective: objective_value }]
+        vec![SolutionPoint { model_id, primal, objective: objective_value }]
     } else {
         Vec::new()
     };
@@ -235,6 +239,7 @@ pub(crate) fn extract_result(
         .and_then(|count| u64::try_from(count).ok());
     normalize_result(
         SolverResult {
+            model_id,
             termination,
             primal_status: PrimalStatus::NoSolution,
             dual_status,
@@ -485,8 +490,8 @@ mod tests {
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!((res.value_of(x).unwrap() - 0.5).abs() < 1e-6);
-        assert!((res.value_of(y).unwrap() - 0.5).abs() < 1e-6);
+        assert!((res.value_of(x).unwrap().unwrap() - 0.5).abs() < 1e-6);
+        assert!((res.value_of(y).unwrap().unwrap() - 0.5).abs() < 1e-6);
         assert!((res.objective().unwrap() - 0.5).abs() < 1e-6);
     }
 
@@ -502,8 +507,8 @@ mod tests {
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!((res.value_of(x0).unwrap() - 0.25).abs() < 1e-6);
-        assert!((res.value_of(x1).unwrap() - 0.75).abs() < 1e-6);
+        assert!((res.value_of(x0).unwrap().unwrap() - 0.25).abs() < 1e-6);
+        assert!((res.value_of(x1).unwrap().unwrap() - 0.75).abs() < 1e-6);
         assert!((res.objective().unwrap() - 1.875).abs() < 1e-6);
     }
 
@@ -517,7 +522,7 @@ mod tests {
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!((res.value_of(x).unwrap() - 1.0).abs() < 1e-6);
+        assert!((res.value_of(x).unwrap().unwrap() - 1.0).abs() < 1e-6);
         assert!(res.objective().unwrap().abs() < 1e-6);
     }
 
@@ -569,6 +574,7 @@ mod tests {
             meta.obj_constant,
             meta.num_constraints,
             meta.cols.len(),
+            model.id(),
             Duration::ZERO,
         );
         assert_eq!(result.gap, Some(native_gap));
@@ -615,7 +621,11 @@ mod tests {
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!((res.value_of(x).unwrap() - 5.0).abs() < 1e-6, "x = {:?}", res.value_of(x));
+        assert!(
+            (res.value_of(x).unwrap().unwrap() - 5.0).abs() < 1e-6,
+            "x = {:?}",
+            res.value_of(x)
+        );
         assert_eq!(res.best_bound, Some(5.0));
         assert_eq!(res.gap, Some(0.0));
         assert_eq!(res.node_count, None);
@@ -630,7 +640,7 @@ mod tests {
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!(res.value_of(x).unwrap().abs() < 1e-9, "x = {:?}", res.value_of(x));
+        assert!(res.value_of(x).unwrap().unwrap().abs() < 1e-9, "x = {:?}", res.value_of(x));
         assert_eq!(res.best_bound, Some(0.0));
         assert_eq!(res.gap, Some(0.0));
         assert_eq!(res.node_count, None);
@@ -647,7 +657,11 @@ mod tests {
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!((res.value_of(x).unwrap() - 7.0).abs() < 1e-6, "x = {:?}", res.value_of(x));
+        assert!(
+            (res.value_of(x).unwrap().unwrap() - 7.0).abs() < 1e-6,
+            "x = {:?}",
+            res.value_of(x)
+        );
     }
 
     #[test]

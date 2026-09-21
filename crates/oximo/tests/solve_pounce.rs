@@ -35,9 +35,9 @@ fn hs071() {
 
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution(), "hs071 should solve");
-    assert_close(res.value_of(x1).unwrap(), 1.0, 1e-3, "x1");
-    assert_close(res.value_of(x2).unwrap(), 4.743, 1e-3, "x2");
-    assert_close(res.value_of(x4).unwrap(), 1.379_408, 1e-3, "x4");
+    assert_close(res.value_of(x1).unwrap().unwrap(), 1.0, 1e-3, "x1");
+    assert_close(res.value_of(x2).unwrap().unwrap(), 4.743, 1e-3, "x2");
+    assert_close(res.value_of(x4).unwrap().unwrap(), 1.379_408, 1e-3, "x4");
     assert_close(res.objective().unwrap(), 17.014, 1e-2, "objective");
 }
 
@@ -50,8 +50,8 @@ fn rosenbrock_unconstrained() {
 
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert_eq!(res.termination, TerminationStatus::LocallyOptimal);
-    assert_close(res.value_of(x).unwrap(), 1.0, 1e-4, "x");
-    assert_close(res.value_of(y).unwrap(), 1.0, 1e-4, "y");
+    assert_close(res.value_of(x).unwrap().unwrap(), 1.0, 1e-4, "x");
+    assert_close(res.value_of(y).unwrap().unwrap(), 1.0, 1e-4, "y");
     assert!(res.objective().unwrap().abs() < 1e-6, "objective");
 }
 
@@ -73,7 +73,7 @@ fn maximize_flips_sign_back() {
     ] {
         let res = Pounce.solve(&m, &opts).unwrap();
         assert_eq!(res.termination, expected);
-        assert_close(res.value_of(x).unwrap(), 2.0, 1e-4, "x");
+        assert_close(res.value_of(x).unwrap().unwrap(), 2.0, 1e-4, "x");
         assert_close(res.objective().unwrap(), 4.0, 1e-5, "objective");
     }
 }
@@ -90,8 +90,8 @@ fn quadratic_constraint_qcp() {
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution());
     let r = -1.0 / 2.0_f64.sqrt();
-    assert_close(res.value_of(x).unwrap(), r, 1e-4, "x");
-    assert_close(res.value_of(y).unwrap(), r, 1e-4, "y");
+    assert_close(res.value_of(x).unwrap().unwrap(), r, 1e-4, "x");
+    assert_close(res.value_of(y).unwrap().unwrap(), r, 1e-4, "y");
 }
 
 #[test]
@@ -107,10 +107,10 @@ fn lp_duals_match_lp_convention() {
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution());
     assert_close(res.objective().unwrap(), 400.0, 1e-3, "objective");
-    assert_close(res.value_of(x).unwrap(), 4.0, 1e-3, "x");
-    assert_close(res.value_of(y).unwrap(), 8.0, 1e-3, "y");
-    assert_close(res.dual_of(labor).unwrap(), 20.0, 1e-3, "labor dual");
-    assert_close(res.dual_of(material).unwrap(), 10.0, 1e-3, "material dual");
+    assert_close(res.value_of(x).unwrap().unwrap(), 4.0, 1e-3, "x");
+    assert_close(res.value_of(y).unwrap().unwrap(), 8.0, 1e-3, "y");
+    assert_close(res.dual_of(labor).unwrap().unwrap(), 20.0, 1e-3, "labor dual");
+    assert_close(res.dual_of(material).unwrap().unwrap(), 10.0, 1e-3, "material dual");
 
     let z_id = m.variable_id("z").unwrap();
     assert_close(res.reduced_costs[&z_id], -30.0, 1e-3, "z reduced cost");
@@ -134,7 +134,7 @@ fn indexed_least_squares_qp() {
     assert!(res.has_solution());
     assert_close(res.objective().unwrap(), 1.0, 1e-4, "objective");
     for i in 0..n {
-        assert_close(res.value_of(x[i]).unwrap(), t[i] - 0.5, 1e-4, &format!("x[{i}]"));
+        assert_close(res.value_of(x[i]).unwrap().unwrap(), t[i] - 0.5, 1e-4, &format!("x[{i}]"));
     }
 }
 
@@ -149,7 +149,7 @@ fn feasibility_problem_returns_feasible_point() {
 
     let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
     assert!(res.has_solution(), "feasibility solve should return a point");
-    let (xv, yv) = (res.value_of(x).unwrap(), res.value_of(y).unwrap());
+    let (xv, yv) = (res.value_of(x).unwrap().unwrap(), res.value_of(y).unwrap().unwrap());
     assert!(xv * xv + yv * yv <= 1.0 + 1e-5, "inside disk: ({xv}, {yv})");
     assert!(xv + yv >= 1.0 - 1e-5, "above line: ({xv}, {yv})");
 }
@@ -180,8 +180,14 @@ fn persistent_matches_cold_on_parameter_sweep() {
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "w {wv}: no solution");
         assert!(close(warm.objective().unwrap(), cold.objective().unwrap()), "w {wv}: objective");
-        assert!(close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap()), "w {wv}: x");
-        assert!(close(warm.value_of(y).unwrap(), cold.value_of(y).unwrap()), "w {wv}: y");
+        assert!(
+            close(warm.value_of(x).unwrap().unwrap(), cold.value_of(x).unwrap().unwrap()),
+            "w {wv}: x"
+        );
+        assert!(
+            close(warm.value_of(y).unwrap().unwrap(), cold.value_of(y).unwrap().unwrap()),
+            "w {wv}: y"
+        );
     }
 }
 

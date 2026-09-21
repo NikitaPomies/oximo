@@ -37,12 +37,12 @@ fn sample(case: &str, size: usize) -> u128 {
     assert_eq!(model.num_constraints(), expected_rows);
     for key in [0, size - 1] {
         match family.get(key).unwrap() {
-            RangeConstraintIds::Interval(id) => {
-                assert_eq!(model.constraint_id(&format!("r[{key}]")), Some(id));
+            RangeConstraintHandles::Interval(id) => {
+                assert_eq!(model.constraint_handle(&format!("r[{key}]")), Some(id));
             }
-            RangeConstraintIds::Split { lower, upper } => {
-                assert_eq!(model.constraint_id(&format!("r[{key}]_lo")), Some(lower));
-                assert_eq!(model.constraint_id(&format!("r[{key}]_hi")), Some(upper));
+            RangeConstraintHandles::Split { lower, upper } => {
+                assert_eq!(model.constraint_handle(&format!("r[{key}]_lo")), Some(lower));
+                assert_eq!(model.constraint_handle(&format!("r[{key}]_hi")), Some(upper));
             }
         }
     }

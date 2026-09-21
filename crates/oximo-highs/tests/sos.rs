@@ -41,8 +41,12 @@ fn highs_solves_explicit_sos1_reformulation() {
 
     let mut solver = Highs;
     let result = solver.solve(&transformed, &HighsOptions::default()).unwrap();
+    let tx = transformed.variable_handle(x.var_id().unwrap());
+    let ty = transformed.variable_handle(y.var_id().unwrap());
     assert!((result.objective().unwrap() - 1.0).abs() < 1e-7);
-    assert!(result.value_of(x).unwrap() + result.value_of(y).unwrap() <= 1.0 + 1e-7);
+    assert!(
+        result.value_of(tx).unwrap().unwrap() + result.value_of(ty).unwrap().unwrap() <= 1.0 + 1e-7
+    );
 }
 
 #[test]
@@ -57,6 +61,10 @@ fn highs_solves_weight_ordered_sos2_reformulation() {
 
     let mut solver = Highs;
     let result = solver.solve(&transformed, &HighsOptions::default()).unwrap();
+    let tx = transformed.variable_handle(x.var_id().unwrap());
+    let tz = transformed.variable_handle(z.var_id().unwrap());
     assert!((result.objective().unwrap() - 1.0).abs() < 1e-7);
-    assert!(result.value_of(x).unwrap() + result.value_of(z).unwrap() <= 1.0 + 1e-7);
+    assert!(
+        result.value_of(tx).unwrap().unwrap() + result.value_of(tz).unwrap().unwrap() <= 1.0 + 1e-7
+    );
 }

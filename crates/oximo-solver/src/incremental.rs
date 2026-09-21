@@ -202,7 +202,7 @@ mod tests {
         objective!(m, Max, x);
 
         let s1 = snapshot(&m).unwrap();
-        m.fix(x, 3.0);
+        m.fix(x, 3.0).unwrap();
         let s2 = snapshot(&m).unwrap();
         assert_eq!(s1.fingerprint, s2.fingerprint, "structure unchanged");
         assert_ne!(s1.ub, s2.ub, "bound moved");

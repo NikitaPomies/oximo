@@ -197,7 +197,7 @@ use oximo_core::prelude::*;
 
 let m = Model::new("constraint_handles");
 variable!(m, x[i in 0..4] >= 0.0);
-let capacity: ConstraintId = constraint!(m, capacity, x[0] <= 10.0);
+let capacity: ConstraintHandle = constraint!(m, capacity, x[0] <= 10.0);
 let cover: IndexedConstraint<usize> =
     constraint!(m, cover[i in 0..4 if i % 2 == 0], x[i] >= 1.0);
 assert!(cover.get(1).is_none()); // filtered out
@@ -207,16 +207,17 @@ for (i, cid) in cover.iter() {
 
 let bands: IndexedRangeConstraint<usize> =
     constraint!(m, bands[i in 0..4], 1.0 <= x[i] <= 4.0);
-let RangeConstraintIds::Interval(cid) = bands.get(0).unwrap() else {
+let RangeConstraintHandles::Interval(cid) = bands.get(0).unwrap() else {
     panic!("constant bounds and a linear body produce an interval row");
 };
 ```
 
-`get(key)` returns copied IDs; `iter()` yields typed `(K, ID)` pairs in domain
+`get(key)` returns copied model-bound handles; `iter()` yields typed `(K, handle)` pairs in domain
 order for dense, sparse, string, tuple, and filtered domains.
 
-Two-sided ranges return `RangeConstraintIds::Interval(cid)` or
-`RangeConstraintIds::Split { lower, upper }`.
+Two-sided ranges return `RangeConstraintHandles::Interval(handle)` or
+`RangeConstraintHandles::Split { lower, upper }`. Call `.id()` on an individual
+handle when a backend-facing raw `ConstraintId` is required.
 
 ### Summation
 
@@ -309,7 +310,7 @@ produce a fresh reformulated copy after changing the source model.
 must be affine. The model classifies as `SOCP`/`MISOCP`.
 
 ```rust,ignore
-soc_constraint!(m, cone, [x, y] <= t);                       // named -> SocConstraintId
+soc_constraint!(m, cone, [x, y] <= t);                       // named -> SocConstraintHandle
 soc_constraint!(m, [x - y, 2.0 * y] <= t + 1.0);             // anonymous (auto-named _soc0, ...)
 soc_constraint!(m, name = format!("c_{k}"), [x] <= t);       // computed run-time name
 soc_constraint!(m, risk[i in assets], [s[i] * w[i]] <= cap); // family: risk[key] per key
@@ -349,7 +350,7 @@ param!(m, c[p in plants] = price[p]);       // string-keyed (sparse)
 
 let unit = cost[1];             // index for a param `Expr`
 cost[1].set_param_value(9.0);   // re-bind one entry via its handle
-m.set_param_idx(&cost, 1, 9.0); // ...or by key on the model
+m.set_param_idx(&cost, 1, 9.0)?; // ...or by key on the model
 m.param_value_idx(&cost, 1);    // -> Some(9.0)
 ```
 

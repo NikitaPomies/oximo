@@ -2,9 +2,10 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use oximo_core::{
-    ConstraintId, ConstraintRef, Expr, IndexKey, IndexedVar, Model, SocConstraintId, VarId,
+    ConstraintHandle, ConstraintId, ConstraintRef, Expr, IndexKey, IndexedVar, Model, ModelId,
+    ModelMismatchError, SocConstraintHandle, SocConstraintId, VarId,
 };
-use oximo_expr::{EvalContext, ExprArena, ExprId, ParamId, evaluate};
+use oximo_expr::{EvalContext, ExprArena, ExprId, ExprNode, ParamId, evaluate};
 use rustc_hash::FxHashMap;
 
 use crate::status::{PrimalStatus, TerminationStatus};
@@ -14,10 +15,17 @@ use crate::status::{PrimalStatus, TerminationStatus};
 /// Most solves yield one point, but a global solver asked to enumerate solutions
 /// may returns several. In a [`SolverResult`] the points live in [`SolverResult::solutions`].
 /// Index `0` is always the best/incumbent.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SolutionPoint {
+    pub model_id: ModelId,
     pub primal: FxHashMap<VarId, f64>,
     pub objective: Option<f64>,
+}
+
+impl Default for SolutionPoint {
+    fn default() -> Self {
+        Self { model_id: ModelId::UNASSIGNED, primal: FxHashMap::default(), objective: None }
+    }
 }
 
 struct PointContext<'a>(&'a FxHashMap<VarId, f64>);
@@ -33,43 +41,82 @@ impl EvalContext for PointContext<'_> {
 }
 
 impl SolutionPoint {
-    /// Look up a primal value by `VarId`.
+    /// Model that produced this point.
+    #[must_use]
+    pub const fn model_id(&self) -> ModelId {
+        self.model_id
+    }
+
+    /// Look up a primal value by raw `VarId`. Raw IDs carry no model provenance;
+    /// prefer [`Self::value_of`] when an expression handle is available.
     pub fn value(&self, id: VarId) -> Option<f64> {
         self.primal.get(&id).copied()
     }
 
     /// Evaluate an expression at this primal point.
     ///
-    /// Returns `None` when any variable needed by the expression is absent.
+    /// Returns `Ok(None)` when any variable needed by the expression is absent
+    /// and [`ModelMismatchError`] when the expression belongs to another model.
     /// Parameter values are read from the expression's model arena at query
     /// time.
-    pub fn value_of(&self, expr: Expr<'_>) -> Option<f64> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
+    #[inline]
+    pub fn value_of(&self, expr: Expr<'_>) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, expr.model_id())?;
         let arena = expr.arena.borrow();
-        evaluate(&arena, expr.id, &PointContext(&self.primal)).ok()
+        if let ExprNode::Var(id) = arena.get(expr.id) {
+            return Ok(self.value(*id));
+        }
+        Ok(evaluate(&arena, expr.id, &PointContext(&self.primal)).ok())
     }
 
     /// Look up the primal value for a specific index of an [`IndexedVar`].
     ///
-    /// Returns `None` if `key` is not in the variable's set or the solver did
-    /// not return a primal value for that scalar.
+    /// Returns `Ok(None)` if `key` is not in the variable's set or the solver did
+    /// not return a primal value for that scalar. Returns [`ModelMismatchError`]
+    /// when the indexed variable belongs to another model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `var` belongs to another model.
     pub fn value_of_idx<V, K: Into<IndexKey>>(
         &self,
         var: &IndexedVar<'_, V>,
         key: K,
-    ) -> Option<f64> {
-        var.get(key).and_then(|e| self.value_of(e))
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, var.model_id())?;
+        var.get(key).map_or(Ok(None), |e| self.value_of(e))
     }
 
     /// Iterate over primal values for all entries of an [`IndexedVar`].
     ///
     /// Yields `(&IndexKey, f64)` for every index whose primal value is present
     /// in the solution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `var` belongs to another model.
     pub fn values_of<'iv, 'a, V>(
         &'iv self,
         var: &'iv IndexedVar<'a, V>,
-    ) -> impl Iterator<Item = (&'iv IndexKey, f64)> + 'iv {
-        var.iter().filter_map(|(k, e)| self.value_of(*e).map(|v| (k, v)))
+    ) -> Result<impl Iterator<Item = (&'iv IndexKey, f64)> + 'iv, ModelMismatchError> {
+        ensure_model_id(self.model_id, var.model_id())?;
+        Ok(var.iter().filter_map(|(k, e)| e.var_id().and_then(|id| self.value(id)).map(|v| (k, v))))
     }
+}
+
+#[inline]
+fn ensure_model_id(expected: ModelId, actual: ModelId) -> Result<(), ModelMismatchError> {
+    if actual == expected { Ok(()) } else { model_mismatch(expected, actual) }
+}
+
+#[cold]
+#[inline(never)]
+fn model_mismatch(expected: ModelId, actual: ModelId) -> Result<(), ModelMismatchError> {
+    Err(ModelMismatchError::new(expected, actual))
 }
 
 /// Availability and quality of the dual solution returned by a solver.
@@ -154,6 +201,7 @@ fn evaluate_soc_at(
 /// `gap` is the solver-reported gap, whose convention is backend-specific.
 #[derive(Clone, Debug)]
 pub struct SolverResult {
+    pub model_id: ModelId,
     pub termination: TerminationStatus,
     pub primal_status: PrimalStatus,
     pub dual_status: DualStatus,
@@ -179,6 +227,7 @@ pub struct SolverResult {
 impl Default for SolverResult {
     fn default() -> Self {
         Self {
+            model_id: ModelId::UNASSIGNED,
             termination: TerminationStatus::NotSolved,
             primal_status: PrimalStatus::NoSolution,
             dual_status: DualStatus::NoSolution,
@@ -200,6 +249,12 @@ impl Default for SolverResult {
 }
 
 impl SolverResult {
+    /// Model that produced this result.
+    #[must_use]
+    pub const fn model_id(&self) -> ModelId {
+        self.model_id
+    }
+
     /// The number of primal points the solver returned (`0` when infeasible or
     /// unsolved).
     pub fn result_count(&self) -> usize {
@@ -233,14 +288,22 @@ impl SolverResult {
         self.solutions.first().map(|s| &s.primal)
     }
 
-    /// Look up a primal value by `VarId` in the best solution.
+    /// Look up a primal value by raw `VarId` in the best solution. Raw IDs carry
+    /// no model provenance; prefer [`Self::value_of`] when possible.
     pub fn value(&self, id: VarId) -> Option<f64> {
         self.solutions.first().and_then(|s| s.value(id))
     }
 
-    /// Evaluate an expression at the best solution.
-    pub fn value_of(&self, expr: Expr<'_>) -> Option<f64> {
-        self.solutions.first().and_then(|s| s.value_of(expr))
+    /// Evaluate an expression at the best solution, rejecting expressions from
+    /// another model with [`ModelMismatchError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
+    #[inline]
+    pub fn value_of(&self, expr: Expr<'_>) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, expr.model_id())?;
+        self.solutions.first().map_or(Ok(None), |s| s.value_of(expr))
     }
 
     /// Evaluate an algebraic constraint at the best solution.
@@ -248,67 +311,131 @@ impl SolverResult {
     /// The result and model must describe the same solve. Parameter values are
     /// read from `model` at query time, so do not combine an old result with a
     /// subsequently modified model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `model` or the selected solution point
+    /// does not belong to this result's model.
     pub fn constraint_evaluation(
         &self,
         model: &Model,
-        id: ConstraintId,
-    ) -> Option<ConstraintEvaluation> {
-        self.constraint_evaluation_at(model, id, 0)
+        constraint: ConstraintHandle,
+    ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
+        self.constraint_evaluation_at(model, constraint, 0)
     }
 
     /// Evaluate an algebraic constraint at solution `solution_index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `model` or the selected solution point
+    /// does not belong to this result's model.
     pub fn constraint_evaluation_at(
         &self,
         model: &Model,
-        id: ConstraintId,
+        constraint: ConstraintHandle,
         solution_index: usize,
-    ) -> Option<ConstraintEvaluation> {
-        evaluate_constraint_at(self.solution(solution_index)?, model, id)
+    ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
+        ensure_model_id(self.model_id, model.id())?;
+        ensure_model_id(self.model_id, constraint.model_id())?;
+        let Some(point) = self.solution(solution_index) else { return Ok(None) };
+        ensure_model_id(self.model_id, point.model_id)?;
+        Ok(evaluate_constraint_at(point, model, constraint.id()))
     }
 
     /// Evaluate an explicit second-order-cone constraint at the best solution.
-    pub fn soc_evaluation(&self, model: &Model, id: SocConstraintId) -> Option<SocEvaluation> {
-        self.soc_evaluation_at(model, id, 0)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `model` or the best solution point
+    /// does not belong to this result's model.
+    pub fn soc_evaluation(
+        &self,
+        model: &Model,
+        constraint: SocConstraintHandle,
+    ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
+        self.soc_evaluation_at(model, constraint, 0)
     }
 
     /// Evaluate an explicit second-order-cone constraint at solution
     /// `solution_index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `model` or the selected solution point
+    /// does not belong to this result's model.
     pub fn soc_evaluation_at(
         &self,
         model: &Model,
-        id: SocConstraintId,
+        constraint: SocConstraintHandle,
         solution_index: usize,
-    ) -> Option<SocEvaluation> {
-        evaluate_soc_at(self.solution(solution_index)?, model, id)
+    ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
+        ensure_model_id(self.model_id, model.id())?;
+        ensure_model_id(self.model_id, constraint.model_id())?;
+        let Some(point) = self.solution(solution_index) else { return Ok(None) };
+        ensure_model_id(self.model_id, point.model_id)?;
+        Ok(evaluate_soc_at(point, model, constraint.id()))
     }
 
-    pub fn dual_of(&self, c: ConstraintId) -> Option<f64> {
-        self.dual.get(&c).copied()
+    /// Look up an algebraic constraint multiplier, rejecting a handle from a
+    /// different model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `constraint` belongs to another model.
+    pub fn dual_of(&self, constraint: ConstraintHandle) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, constraint.model_id())?;
+        Ok(self.dual.get(&constraint.id()).copied())
     }
 
     /// The norm-form bound multiplier of an explicit SOC constraint,
     /// or `None` when the backend did not compute it.
-    pub fn soc_dual_of(&self, c: SocConstraintId) -> Option<f64> {
-        self.soc_dual.get(&c).copied()
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `constraint` belongs to another model.
+    pub fn soc_dual_of(
+        &self,
+        constraint: SocConstraintHandle,
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, constraint.model_id())?;
+        Ok(self.soc_dual.get(&constraint.id()).copied())
     }
 
     /// Look up the best solution's primal value for a specific index of an
     /// [`IndexedVar`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `var` belongs to another model.
     pub fn value_of_idx<V, K: Into<IndexKey>>(
         &self,
         var: &IndexedVar<'_, V>,
         key: K,
-    ) -> Option<f64> {
-        var.get(key).and_then(|e| self.value_of(e))
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, var.model_id())?;
+        var.get(key).map_or(Ok(None), |e| self.value_of(e))
     }
 
     /// Iterate over the best solution's primal values for all entries of an
     /// [`IndexedVar`]. Yields nothing when no solution was found.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `var` or the best solution point does
+    /// not belong to this result's model.
     pub fn values_of<'iv, 'a, V>(
         &'iv self,
         var: &'iv IndexedVar<'a, V>,
-    ) -> impl Iterator<Item = (&'iv IndexKey, f64)> + 'iv {
-        var.iter().filter_map(|(k, e)| self.value_of(*e).map(|v| (k, v)))
+    ) -> Result<impl Iterator<Item = (&'iv IndexKey, f64)> + 'iv, ModelMismatchError> {
+        ensure_model_id(self.model_id, var.model_id())?;
+        if let Some(point) = self.best() {
+            ensure_model_id(self.model_id, point.model_id)?;
+        }
+        let point = self.best();
+        Ok(var.iter().filter_map(move |(k, e)| {
+            e.var_id().and_then(|id| point.and_then(|solution| solution.value(id))).map(|v| (k, v))
+        }))
     }
 
     /// A human-readable, model-aware summary of this result.
@@ -317,8 +444,17 @@ impl SolverResult {
     /// objective and work counters, then every variable's value
     /// (with its reduced cost when the solver returned duals) and every
     /// constraint's dual.
-    pub fn report<'a>(&'a self, model: &'a Model) -> ModelReport<'a> {
-        ModelReport { result: self, model }
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelMismatchError`] if `model` or the best solution point
+    /// does not belong to this result's model.
+    pub fn report<'a>(&'a self, model: &'a Model) -> Result<ModelReport<'a>, ModelMismatchError> {
+        ensure_model_id(self.model_id, model.id())?;
+        if let Some(point) = self.best() {
+            ensure_model_id(self.model_id, point.model_id)?;
+        }
+        Ok(ModelReport { result: self, model })
     }
 }
 
@@ -412,7 +548,7 @@ impl std::fmt::Display for ModelReport<'_> {
             writeln!(f, "\nconstraints ({})", cons.len())?;
             let width = cons.iter().map(|(_, c)| c.name.len()).max().unwrap_or(0);
             for (id, c) in cons {
-                let d = r.dual_of(id).map_or_else(|| "n/a".to_owned(), num);
+                let d = r.dual.get(&id).copied().map_or_else(|| "n/a".to_owned(), num);
                 writeln!(f, "  {:<width$}  dual = {d}", c.name)?;
             }
         }
@@ -424,7 +560,7 @@ impl std::fmt::Display for ModelReport<'_> {
             let width = socs.iter().map(|s| s.name.len()).max().unwrap_or(0);
             for (i, s) in socs.iter().enumerate() {
                 let id = SocConstraintId(u32::try_from(i).expect("soc index fits u32"));
-                let d = r.soc_dual_of(id).map_or_else(|| "n/a".to_owned(), num);
+                let d = r.soc_dual.get(&id).copied().map_or_else(|| "n/a".to_owned(), num);
                 writeln!(f, "  {:<width$}  dual = {d}", s.name)?;
             }
         }
@@ -463,16 +599,79 @@ mod tests {
         let mut primal = FxHashMap::default();
         primal.insert(x.var_id().unwrap(), 3.0);
         primal.insert(y.var_id().unwrap(), 4.0);
-        let point = SolutionPoint { primal, objective: None };
+        let point = SolutionPoint { model_id: m.id(), primal, objective: None };
 
-        assert_eq!(point.value_of(x), Some(3.0));
-        assert_eq!(point.value_of(2.0 * x + y - 1.0), Some(9.0));
-        assert_eq!(point.value_of(x.powi(2) + x * y), Some(21.0));
-        assert_eq!(point.value_of(x.sin()), Some(3.0_f64.sin()));
-        assert_eq!(point.value_of(p * x + y), Some(10.0));
+        assert_eq!(point.value_of(x), Ok(Some(3.0)));
+        assert_eq!(point.value_of(2.0 * x + y - 1.0), Ok(Some(9.0)));
+        assert_eq!(point.value_of(x.powi(2) + x * y), Ok(Some(21.0)));
+        assert_eq!(point.value_of(x.sin()), Ok(Some(3.0_f64.sin())));
+        assert_eq!(point.value_of(p * x + y), Ok(Some(10.0)));
 
-        let incomplete = SolutionPoint::default();
-        assert!(incomplete.value_of(x + y).is_none());
+        let incomplete = SolutionPoint { model_id: m.id(), ..Default::default() };
+        assert!(incomplete.value_of(x + y).unwrap().is_none());
+    }
+
+    #[test]
+    fn expression_queries_reject_foreign_models_with_colliding_variable_ids() {
+        use oximo_core::variable;
+
+        let source = Model::new("source");
+        variable!(source, x);
+        let foreign = Model::new("foreign");
+        variable!(foreign, y);
+        assert_eq!(x.var_id(), y.var_id());
+
+        let point = SolutionPoint {
+            model_id: source.id(),
+            primal: [(x.var_id().unwrap(), 4.0)].into_iter().collect(),
+            objective: None,
+        };
+        let result = SolverResult {
+            model_id: source.id(),
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![point.clone()],
+            ..Default::default()
+        };
+        let mismatch = ModelMismatchError::new(source.id(), foreign.id());
+
+        assert_eq!(point.value_of(y), Err(mismatch));
+        assert_eq!(result.value_of(y), Err(mismatch));
+        assert!(matches!(result.report(&foreign), Err(error) if error == mismatch));
+        assert_eq!(point.value_of(x), Ok(Some(4.0)));
+    }
+
+    #[test]
+    fn constraint_queries_reject_foreign_handles_with_colliding_ids() {
+        use oximo_core::{constraint, soc_constraint, variable};
+
+        let source = Model::new("source");
+        variable!(source, x);
+        variable!(source, t);
+        let source_row = constraint!(source, row, x <= 1.0);
+        let source_cone = soc_constraint!(source, cone, [x] <= t);
+
+        let foreign = Model::new("foreign");
+        variable!(foreign, y);
+        variable!(foreign, u);
+        let foreign_row = constraint!(foreign, row, y <= 2.0);
+        let foreign_cone = soc_constraint!(foreign, cone, [y] <= u);
+        assert_eq!(source_row.id(), foreign_row.id());
+        assert_eq!(source_cone.id(), foreign_cone.id());
+
+        let result = SolverResult {
+            model_id: source.id(),
+            dual: [(source_row.id(), 3.0)].into_iter().collect(),
+            soc_dual: [(source_cone.id(), 4.0)].into_iter().collect(),
+            ..Default::default()
+        };
+        let mismatch = ModelMismatchError::new(source.id(), foreign.id());
+
+        assert_eq!(result.dual_of(foreign_row), Err(mismatch));
+        assert_eq!(result.soc_dual_of(foreign_cone), Err(mismatch));
+        assert_eq!(result.constraint_evaluation(&source, foreign_row), Err(mismatch));
+        assert_eq!(result.soc_evaluation(&source, foreign_cone), Err(mismatch));
+        assert_eq!(result.dual_of(source_row), Ok(Some(3.0)));
+        assert_eq!(result.soc_dual_of(source_cone), Ok(Some(4.0)));
     }
 
     #[test]
@@ -485,14 +684,15 @@ mod tests {
         let lower = constraint!(m, lower, x >= 1.0);
         let upper = constraint!(m, upper, x <= 3.0);
         constraint!(m, ranged, 1.5 <= x <= 2.5);
-        let ranged = m.constraint_id("ranged").unwrap();
+        let ranged = m.constraint_handle("ranged").unwrap();
 
         let point = |value| {
             let mut primal = FxHashMap::default();
             primal.insert(x.var_id().unwrap(), value);
-            SolutionPoint { primal, objective: None }
+            SolutionPoint { model_id: m.id(), primal, objective: None }
         };
         let result = SolverResult {
+            model_id: m.id(),
             primal_status: PrimalStatus::FeasiblePoint,
             solutions: vec![point(2.0), point(4.0)],
             ..Default::default()
@@ -500,24 +700,34 @@ mod tests {
 
         assert_eq!(
             result.constraint_evaluation(&m, equality),
-            Some(ConstraintEvaluation {
+            Ok(Some(ConstraintEvaluation {
                 activity: 2.0,
                 lower_slack: Some(0.0),
                 upper_slack: Some(0.0),
                 violation: 0.0,
-            })
+            }))
         );
-        assert_eq!(result.constraint_evaluation(&m, lower).unwrap().lower_slack, Some(1.0));
-        assert_eq!(result.constraint_evaluation(&m, lower).unwrap().upper_slack, None);
-        assert_eq!(result.constraint_evaluation(&m, upper).unwrap().lower_slack, None);
-        assert_eq!(result.constraint_evaluation(&m, upper).unwrap().upper_slack, Some(1.0));
-        assert!(result.constraint_evaluation(&m, ranged).unwrap().violation.abs() < f64::EPSILON);
+        assert_eq!(
+            result.constraint_evaluation(&m, lower).unwrap().unwrap().lower_slack,
+            Some(1.0)
+        );
+        assert_eq!(result.constraint_evaluation(&m, lower).unwrap().unwrap().upper_slack, None);
+        assert_eq!(result.constraint_evaluation(&m, upper).unwrap().unwrap().lower_slack, None);
+        assert_eq!(
+            result.constraint_evaluation(&m, upper).unwrap().unwrap().upper_slack,
+            Some(1.0)
+        );
         assert!(
-            (result.constraint_evaluation_at(&m, ranged, 1).unwrap().violation - 1.5).abs()
+            result.constraint_evaluation(&m, ranged).unwrap().unwrap().violation.abs()
                 < f64::EPSILON
         );
-        assert!(result.constraint_evaluation_at(&m, ranged, 2).is_none());
-        assert!(result.constraint_evaluation(&m, ConstraintId(u32::MAX)).is_none());
+        assert!(
+            (result.constraint_evaluation_at(&m, ranged, 1).unwrap().unwrap().violation - 1.5)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(result.constraint_evaluation_at(&m, ranged, 2).unwrap().is_none());
+        assert!(m.constraint_handle_from_id(ConstraintId(u32::MAX)).is_none());
     }
 
     #[test]
@@ -534,9 +744,10 @@ mod tests {
             primal.insert(x.var_id().unwrap(), x_value);
             primal.insert(y.var_id().unwrap(), y_value);
             primal.insert(t.var_id().unwrap(), t_value);
-            SolutionPoint { primal, objective: None }
+            SolutionPoint { model_id: m.id(), primal, objective: None }
         };
         let result = SolverResult {
+            model_id: m.id(),
             primal_status: PrimalStatus::FeasiblePoint,
             solutions: vec![point(3.0, 4.0, 6.0), point(3.0, 4.0, 4.0)],
             ..Default::default()
@@ -544,12 +755,13 @@ mod tests {
 
         assert_eq!(
             result.soc_evaluation(&m, cone),
-            Some(SocEvaluation { norm: 5.0, bound: 6.0, slack: 1.0, violation: 0.0 })
+            Ok(Some(SocEvaluation { norm: 5.0, bound: 6.0, slack: 1.0, violation: 0.0 }))
         );
         assert!(
-            (result.soc_evaluation_at(&m, cone, 1).unwrap().violation - 1.0).abs() < f64::EPSILON
+            (result.soc_evaluation_at(&m, cone, 1).unwrap().unwrap().violation - 1.0).abs()
+                < f64::EPSILON
         );
-        assert!(result.soc_evaluation_at(&m, cone, 2).is_none());
+        assert!(result.soc_evaluation_at(&m, cone, 2).unwrap().is_none());
     }
 
     #[test]
@@ -562,8 +774,8 @@ mod tests {
             termination: TerminationStatus::Optimal,
             primal_status: PrimalStatus::OptimalPoint,
             solutions: vec![
-                SolutionPoint { primal: p0, objective: Some(10.0) },
-                SolutionPoint { primal: p1, objective: Some(9.0) },
+                SolutionPoint { primal: p0, objective: Some(10.0), ..Default::default() },
+                SolutionPoint { primal: p1, objective: Some(9.0), ..Default::default() },
             ],
             ..Default::default()
         };
@@ -585,12 +797,13 @@ mod tests {
         let mut primal = FxHashMap::default();
         primal.insert(x.var_id().unwrap(), 5.0);
         let mut dual = FxHashMap::default();
-        dual.insert(c, 1.0);
+        dual.insert(c.id(), 1.0);
 
         let r = SolverResult {
+            model_id: m.id(),
             termination: TerminationStatus::Optimal,
             primal_status: PrimalStatus::OptimalPoint,
-            solutions: vec![SolutionPoint { primal, objective: Some(5.0) }],
+            solutions: vec![SolutionPoint { model_id: m.id(), primal, objective: Some(5.0) }],
             dual,
             solver_name: Some("TestSolver".into()),
             solver_version: Some("1.2.3".into()),
@@ -600,7 +813,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = r.report(&m).to_string();
+        let out = r.report(&m).unwrap().to_string();
         assert!(out.contains("solver     : TestSolver 1.2.3"), "{out}");
         assert!(out.contains("termination: Optimal"), "{out}");
         assert!(out.contains("primal     : OptimalPoint"), "{out}");
@@ -626,11 +839,11 @@ mod tests {
         objective!(m, Min, x);
 
         let mut dual = FxHashMap::default();
-        dual.insert(first, 1.0);
-        dual.insert(second, 2.0);
-        let r = SolverResult { dual, ..Default::default() };
+        dual.insert(first.id(), 1.0);
+        dual.insert(second.id(), 2.0);
+        let r = SolverResult { model_id: m.id(), dual, ..Default::default() };
 
-        let out = r.report(&m).to_string();
+        let out = r.report(&m).unwrap().to_string();
         assert!(out.contains("first   dual = 1"), "{out}");
         assert!(out.contains("second  dual = 2"), "{out}");
     }

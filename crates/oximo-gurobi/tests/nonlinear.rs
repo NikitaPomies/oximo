@@ -34,7 +34,7 @@ fn nlp_with_sin_objective() {
     // Local minimum near x = 1, objective near 0.
     let m = Model::new("nlp_sin");
     variable!(m, -3.0 <= x <= 3.0);
-    m.set_initial(x, 0.5);
+    m.set_initial(x, 0.5).unwrap();
     objective!(m, Min, (x - 1.0).powi(2) + 0.1 * x.sin().powi(2));
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
@@ -48,7 +48,7 @@ fn nlp_with_abs_objective() {
     // min |x - 2| over x in [-10, 10]. Optimum at x = 2, objective = 0.
     let m = Model::new("nlp_abs");
     variable!(m, -10.0 <= x <= 10.0);
-    m.set_initial(x, 0.5);
+    m.set_initial(x, 0.5).unwrap();
     objective!(m, Min, (x - 2.0).abs());
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
@@ -66,7 +66,7 @@ fn minlp_binary_with_log() {
     let m = Model::new("minlp_log");
     variable!(m, b, Bin);
     variable!(m, 0.1 <= x <= 10.0);
-    m.set_initial(x, 0.5);
+    m.set_initial(x, 0.5).unwrap();
     objective!(m, Min, (x - 1.0).powi(2) + b * (1.0 + x).log());
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
@@ -82,10 +82,10 @@ fn div_by_linear_denominator() {
     // x / (y + z) == 3, with x = 12 and z = 1 fixed -> y + 1 = 4 -> y = 3.
     let m = Model::new("div_linear");
     variable!(m, x);
-    m.fix(x, 12.0);
+    m.fix(x, 12.0).unwrap();
     variable!(m, 0.1 <= y <= 100.0);
     variable!(m, z);
-    m.fix(z, 1.0);
+    m.fix(z, 1.0).unwrap();
     constraint!(m, c, x / (y + z) == 3.0);
     objective!(m, Min, y);
 
@@ -102,7 +102,7 @@ fn div_by_negative_denominator() {
     // the bilinear `d * recip == 1` pin can.
     let m = Model::new("div_negative");
     variable!(m, x);
-    m.fix(x, 12.0);
+    m.fix(x, 12.0).unwrap();
     variable!(m, -100.0 <= d <= -0.1);
     constraint!(m, c, x / d == -3.0);
     objective!(m, Min, d);
@@ -166,7 +166,7 @@ fn nonlinear_iis_maps_generated_abs_definition() {
     objective!(m, Min, x);
 
     let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute nonlinear IIS");
-    assert!(iis.constraints.contains(&conflict));
+    assert!(iis.constraints.contains(&conflict.id()));
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn newly_supported_native_unary_operators_solve_at_fixed_point() {
         ($method:ident, $expected:expr) => {{
             let m = Model::new(concat!("native_", stringify!($method)));
             variable!(m, -5.0 <= x <= 5.0);
-            m.fix(x, point);
+            m.fix(x, point).unwrap();
             objective!(m, Min, x.$method());
 
             let result = Gurobi
@@ -221,8 +221,8 @@ fn nested_min_max_use_native_general_constraints() {
     let m = Model::new("nested_extrema");
     variable!(m, -5.0 <= x <= 5.0);
     variable!(m, -5.0 <= y <= 5.0);
-    m.fix(x, -2.0);
-    m.fix(y, 3.0);
+    m.fix(x, -2.0).unwrap();
+    m.fix(y, 3.0).unwrap();
     objective!(m, Min, x.min(y).max(x + 1.0));
 
     let result = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve nested extrema");

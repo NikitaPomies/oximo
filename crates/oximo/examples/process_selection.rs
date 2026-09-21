@@ -78,7 +78,7 @@ mod model {
             for (name, y) in [("process 1", y1), ("process 2", y2), ("process 3", y3)] {
                 println!(
                     "  {name}: {}",
-                    if (result.value_of(y).unwrap_or(0.0) - 1.0).abs() < f64::EPSILON {
+                    if (result.value_of(y)?.unwrap_or(0.0) - 1.0).abs() < f64::EPSILON {
                         "ON"
                     } else {
                         "OFF"
@@ -87,18 +87,18 @@ mod model {
             }
 
             println!("flows:");
-            println!("  c1 (C produced)   = {:.4}", result.value_of(c1).unwrap_or(0.0));
-            println!("  b1 (B into 1)     = {:.4}", result.value_of(b1).unwrap_or(0.0));
+            println!("  c1 (C produced)   = {:.4}", result.value_of(c1)?.unwrap_or(0.0));
+            println!("  b1 (B into 1)     = {:.4}", result.value_of(b1)?.unwrap_or(0.0));
             println!(
                 "  b2, b3 (B from A) = {:.4}, {:.4}",
-                result.value_of(b2).unwrap_or(0.0),
-                result.value_of(b3).unwrap_or(0.0)
+                result.value_of(b2)?.unwrap_or(0.0),
+                result.value_of(b3)?.unwrap_or(0.0)
             );
-            println!("  bp (B purchased)  = {:.4}", result.value_of(bp).unwrap_or(0.0));
+            println!("  bp (B purchased)  = {:.4}", result.value_of(bp)?.unwrap_or(0.0));
             println!(
                 "  a2, a3 (A used)   = {:.4}, {:.4}",
-                result.value_of(a2).unwrap_or(0.0),
-                result.value_of(a3).unwrap_or(0.0)
+                result.value_of(a2)?.unwrap_or(0.0),
+                result.value_of(a3)?.unwrap_or(0.0)
             );
         } else {
             println!("--- {label} ---");

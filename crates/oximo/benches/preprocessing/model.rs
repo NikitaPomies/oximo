@@ -1,4 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput};
+use oximo::{Model, SolutionPoint, SolverResult, param, variable};
 use oximo_core::model::benchmark_support::{self, IndexedBuildCase};
 
 use super::common::{LARGE, crossover_sizes, pair, sizes};
@@ -62,4 +63,54 @@ pub fn bench(criterion: &mut Criterion) {
         });
     }
     scalar.finish();
+
+    let mut provenance = criterion.benchmark_group("model/handle_provenance");
+
+    provenance.bench_function("model_new", |bencher| {
+        bencher.iter(|| std::hint::black_box(Model::new("model_id_bench")));
+    });
+
+    provenance.bench_function("fix", |bencher| {
+        let model = Model::new("fix_provenance_bench");
+        variable!(model, -1.0 <= x <= 1.0);
+        bencher.iter(|| model.fix(std::hint::black_box(x), 0.0).unwrap());
+    });
+
+    provenance.bench_function("set_initial", |bencher| {
+        let model = Model::new("initial_provenance_bench");
+        variable!(model, x);
+        bencher.iter(|| model.set_initial(std::hint::black_box(x), 0.0).unwrap());
+    });
+
+    provenance.bench_function("set_param", |bencher| {
+        let model = Model::new("param_provenance_bench");
+        param!(model, p = 1.0);
+        bencher.iter(|| model.set_param(std::hint::black_box(p), 2.0).unwrap());
+    });
+
+    provenance.bench_function("solution_point_value_of", |bencher| {
+        let model = Model::new("point_provenance_bench");
+        variable!(model, x);
+        let point = SolutionPoint {
+            model_id: model.id(),
+            primal: [(x.var_id().unwrap(), 1.0)].into_iter().collect(),
+            objective: None,
+        };
+        bencher.iter(|| std::hint::black_box(&point).value_of(std::hint::black_box(x)).unwrap());
+    });
+
+    provenance.bench_function("solver_result_value_of", |bencher| {
+        let model = Model::new("result_provenance_bench");
+        variable!(model, x);
+        let point = SolutionPoint {
+            model_id: model.id(),
+            primal: [(x.var_id().unwrap(), 1.0)].into_iter().collect(),
+            objective: None,
+        };
+        let result =
+            SolverResult { model_id: model.id(), solutions: vec![point], ..Default::default() };
+        bencher.iter(|| std::hint::black_box(&result).value_of(std::hint::black_box(x)).unwrap());
+    });
+
+    provenance.finish();
 }

@@ -12,7 +12,7 @@ fn mosek_feature_exposes_public_solver_and_options() {
 
     let result = Mosek.solve(&model, &MosekOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
-    assert!((result.value_of(x).unwrap() - 1.0).abs() < 1e-7);
+    assert!((result.value_of(x).unwrap().unwrap() - 1.0).abs() < 1e-7);
     assert!((result.objective().unwrap() - 3.0).abs() < 1e-7);
 }
 
@@ -23,7 +23,7 @@ fn mosek_feature_solves_public_mip_qp_and_socp_apis() {
     objective!(mip, Max, 2.0 * x);
     let result = Mosek.solve(&mip, &MosekOptions::default().mio_tol_rel_gap(1e-4)).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
-    assert!((result.value_of(x).unwrap() - 1.0).abs() < 1e-7);
+    assert!((result.value_of(x).unwrap().unwrap() - 1.0).abs() < 1e-7);
 
     let qp = Model::new("umbrella_mosek_qp");
     variable!(qp, qx >= 0.0);
@@ -31,7 +31,7 @@ fn mosek_feature_solves_public_mip_qp_and_socp_apis() {
     objective!(qp, Min, qx.powi(2));
     let result = Mosek.solve(&qp, &MosekOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
-    assert!((result.value_of(qx).unwrap() - 2.0).abs() < 1e-6);
+    assert!((result.value_of(qx).unwrap().unwrap() - 2.0).abs() < 1e-6);
 
     let socp = Model::new("umbrella_mosek_socp");
     variable!(socp, sx);
@@ -43,7 +43,7 @@ fn mosek_feature_solves_public_mip_qp_and_socp_apis() {
     objective!(socp, Min, t);
     let result = Mosek.solve(&socp, &MosekOptions::default()).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
-    assert!((result.value_of(t).unwrap() - 5.0).abs() < 1e-6);
+    assert!((result.value_of(t).unwrap().unwrap() - 5.0).abs() < 1e-6);
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn mosek_feature_exposes_persistent_solver_through_prelude() {
         model.unfix_var(x.var_id().unwrap(), 0.0, upper);
         let result = solver.solve(&model, &MosekOptions::default()).unwrap();
         assert_eq!(result.termination, TerminationStatus::Optimal);
-        assert!((result.value_of(x).unwrap() - upper).abs() < 1e-7);
+        assert!((result.value_of(x).unwrap().unwrap() - upper).abs() < 1e-7);
         assert!((result.objective().unwrap() - coefficient * upper).abs() < 1e-7);
     }
 }

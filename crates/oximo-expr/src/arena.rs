@@ -2,10 +2,68 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use parking_lot::{Mutex, MutexGuard};
 use smallvec::SmallVec;
+use thiserror::Error;
+
+static NEXT_MODEL_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Stable identity shared by a model, its expression handles, and its results.
+///
+/// IDs are unique within a process. A transformed or cloned model receives a new
+/// identity even when it preserves the source model's numeric variable IDs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ModelId(u32);
+
+impl ModelId {
+    /// Sentinel used by detached/default result values that have not been
+    /// associated with a model.
+    pub const UNASSIGNED: Self = Self(0);
+
+    fn fresh() -> Self {
+        let mut id = NEXT_MODEL_ID.load(Ordering::Relaxed);
+        loop {
+            let next = id.checked_add(1).expect("model ID space exhausted");
+            match NEXT_MODEL_ID.compare_exchange_weak(
+                id,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Self(id),
+                Err(actual) => id = actual,
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ModelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// An expression, indexed family, model, or result came from another model.
+#[derive(Copy, Clone, Debug, Error, PartialEq, Eq)]
+#[error("model mismatch: expected model {expected}, got model {actual}")]
+pub struct ModelMismatchError {
+    pub expected: ModelId,
+    pub actual: ModelId,
+}
+
+impl ModelMismatchError {
+    #[must_use]
+    pub const fn new(expected: ModelId, actual: ModelId) -> Self {
+        Self { expected, actual }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExprId(pub u32);
@@ -428,15 +486,22 @@ impl Drop for InstalledWriteGuard {
 /// Ordinary construction writes the canonical arena. Indexed batch builders
 /// temporarily route expression operations to worker-local forks and merge the
 /// resulting nodes in deterministic index order.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ExprArenaCell {
+    model_id: ModelId,
     inner: Mutex<ExprArena>,
     state: AtomicU8,
 }
 
 impl ExprArenaCell {
     pub fn new(arena: ExprArena) -> Self {
-        Self { inner: Mutex::new(arena), state: AtomicU8::new(0) }
+        Self { model_id: ModelId::fresh(), inner: Mutex::new(arena), state: AtomicU8::new(0) }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn model_id(&self) -> ModelId {
+        self.model_id
     }
 
     /// Take a cheap immutable snapshot of the canonical arena.
@@ -571,6 +636,12 @@ impl ExprArenaCell {
         let value = f();
         let arena = installed.take();
         ForkOutput { value, base: arena.base, nodes: arena.nodes }
+    }
+}
+
+impl Default for ExprArenaCell {
+    fn default() -> Self {
+        Self::new(ExprArena::default())
     }
 }
 

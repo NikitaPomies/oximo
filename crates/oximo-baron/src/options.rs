@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
 
-use oximo_core::ConstraintId;
+use oximo_core::ConstraintHandle;
 use oximo_solver::{HasUniversal, UniversalOptions};
 
 /// BARON-specific solver options.
@@ -31,7 +31,7 @@ pub struct BaronOptions {
     dbl_opts: Vec<(&'static str, f64)>,
     str_opts: Vec<(&'static str, String)>,
     raw: Vec<(String, String)>,
-    convex_equation_ids: Vec<ConstraintId>,
+    convex_equation_handles: Vec<ConstraintHandle>,
 }
 
 /// BARON keywords the backend writes itself; user attempts to set these via
@@ -266,7 +266,7 @@ impl BaronOptions {
     /// single-sided constraints and mark only sides whose feasible sets are known
     /// to be convex.
     #[must_use]
-    pub fn convex_equation(self, constraint: ConstraintId) -> Self {
+    pub fn convex_equation(self, constraint: ConstraintHandle) -> Self {
         self.convex_equations([constraint])
     }
 
@@ -276,10 +276,13 @@ impl BaronOptions {
     /// See [`Self::convex_equation`] for correctness and range-constraint
     /// requirements.
     #[must_use]
-    pub fn convex_equations(mut self, constraints: impl IntoIterator<Item = ConstraintId>) -> Self {
+    pub fn convex_equations<I>(mut self, constraints: I) -> Self
+    where
+        I: IntoIterator<Item = ConstraintHandle>,
+    {
         for constraint in constraints {
-            if !self.convex_equation_ids.contains(&constraint) {
-                self.convex_equation_ids.push(constraint);
+            if !self.convex_equation_handles.contains(&constraint) {
+                self.convex_equation_handles.push(constraint);
             }
         }
         self
@@ -306,8 +309,8 @@ impl BaronOptions {
             || self.raw.iter().any(|(k, _)| k.eq_ignore_ascii_case("CompIIS"))
     }
 
-    pub(crate) fn convex_equation_ids(&self) -> &[ConstraintId] {
-        &self.convex_equation_ids
+    pub(crate) fn convex_equation_handles(&self) -> &[ConstraintHandle] {
+        &self.convex_equation_handles
     }
 }
 
@@ -389,7 +392,7 @@ pub fn write_options(bar: &mut String, o: &BaronOptions, res_name: &str, tim_nam
 mod tests {
     use std::time::Duration;
 
-    use oximo_core::ConstraintId;
+    use oximo_core::prelude::*;
     use oximo_solver::UniversalOptionsExt;
 
     use super::*;
@@ -417,16 +420,14 @@ mod tests {
 
     #[test]
     fn convex_equation_builders_preserve_order_and_deduplicate() {
-        let options = BaronOptions::default().convex_equation(ConstraintId(2)).convex_equations([
-            ConstraintId(0),
-            ConstraintId(2),
-            ConstraintId(1),
-        ]);
+        let model = Model::new("convex_options");
+        variable!(model, x);
+        let c0 = constraint!(model, c0, x <= 0.0);
+        let c1 = constraint!(model, c1, x <= 1.0);
+        let c2 = constraint!(model, c2, x <= 2.0);
+        let options = BaronOptions::default().convex_equation(c2).convex_equations([c0, c2, c1]);
 
-        assert_eq!(
-            options.convex_equation_ids(),
-            &[ConstraintId(2), ConstraintId(0), ConstraintId(1)]
-        );
+        assert_eq!(options.convex_equation_handles(), &[c2, c0, c1]);
     }
 
     #[test]

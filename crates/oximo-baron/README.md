@@ -87,8 +87,9 @@ absolute-value rewrite `abs(x) = (x^2)^0.5`, and the base-10 logarithm rewrite
 ### Convex equation hints
 
 BARON can generate supporting hyperplanes for an entire convex feasible set
-instead of relaxing its expression term by term. Pass the corresponding
-algebraic constraint IDs to [`BaronOptions::convex_equations`]:
+instead of relaxing its expression term by term. Pass a model-bound
+`ConstraintHandle` to [`BaronOptions::convex_equation`] or an iterable of
+handles to [`BaronOptions::convex_equations`]:
 
 ```rust,no_run
 use oximo_baron::BaronOptions;
@@ -97,10 +98,12 @@ use oximo_core::prelude::*;
 let m = Model::new("convex_hint");
 variable!(m, -1.0 <= x <= 1.0);
 variable!(m, -1.0 <= y <= 1.0);
-let disk = constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
+constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
 objective!(m, Min, x + y);
 
-let options = BaronOptions::default().convex_equations([disk]);
+let disk = m.constraint_handle("disk").expect("constraint exists");
+let options = BaronOptions::default().convex_equation(disk);
+let options = options.convex_equations([disk]);
 ```
 
 ### BARON-specific options

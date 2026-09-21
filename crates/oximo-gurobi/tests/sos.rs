@@ -15,8 +15,8 @@ fn native_sos1_and_sos2_solve() {
     let result = Gurobi.solve(&m, &GurobiOptions::default()).expect("Gurobi SOS solve");
     assert!(result.has_solution());
     assert_eq!(m.kind(), ModelKind::MILP);
-    assert!(result.value_of(y).unwrap() > 19.0);
-    assert!(result.value_of(x).unwrap().abs() < 1e-6);
+    assert!(result.value_of(y).unwrap().unwrap() > 19.0);
+    assert!(result.value_of(x).unwrap().unwrap().abs() < 1e-6);
 }
 
 #[test]
@@ -30,8 +30,8 @@ fn native_sos2_rejects_nonadjacent_optimum() {
     sos_constraint!(m, adjacent, SOS2, [(x, 1.0), (y, 2.0), (z, 3.0)]);
 
     let result = Gurobi.solve(&m, &GurobiOptions::default()).expect("Gurobi SOS2 solve");
-    let x_value = result.value_of(x).expect("x solution");
-    let z_value = result.value_of(z).expect("z solution");
+    let x_value = result.value_of(x).expect("matching model").expect("x solution");
+    let z_value = result.value_of(z).expect("matching model").expect("z solution");
     assert!(result.objective().expect("objective") <= 1.0 + 1e-6);
     assert!(
         x_value <= 1e-6 || z_value <= 1e-6,
@@ -52,9 +52,13 @@ fn reformulated_sos1_solves_and_preserves_original_ids() {
     let result = Gurobi
         .solve(&transformed, &GurobiOptions::default())
         .expect("Gurobi reformulated SOS solve");
+    let tx = transformed.variable_handle(x.var_id().unwrap());
+    let ty = transformed.variable_handle(y.var_id().unwrap());
 
     assert!((result.objective().unwrap() - 1.0).abs() < 1e-6);
-    assert!(result.value_of(x).unwrap() + result.value_of(y).unwrap() <= 1.0 + 1e-6);
+    assert!(
+        result.value_of(tx).unwrap().unwrap() + result.value_of(ty).unwrap().unwrap() <= 1.0 + 1e-6
+    );
     assert_eq!(choice.id().index(), 0);
     assert!(!transformed.sos_constraints()[choice.index()].active);
 }

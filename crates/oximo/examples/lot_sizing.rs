@@ -114,9 +114,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut total_check = 0.0;
     for t in 0..T {
-        let xt = result.value_of(x[t]).unwrap_or(0.0);
-        let ht = result.value_of(h[t]).unwrap_or(0.0);
-        let st = result.value_of(s[t]).unwrap_or(0.0);
+        let xt = result.value_of(x[t])?.unwrap_or(0.0);
+        let ht = result.value_of(h[t])?.unwrap_or(0.0);
+        let st = result.value_of(s[t])?.unwrap_or(0.0);
         let period_cost = prod_cost[t] * xt + setup_cost * st + hold_cost * ht;
         total_check += period_cost;
         println!(

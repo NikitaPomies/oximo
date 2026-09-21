@@ -72,8 +72,8 @@ fn rosenbrock_via_solver() {
     let m = Model::new("rosenbrock");
     variable!(m, -5.0 <= x0 <= 5.0);
     variable!(m, -5.0 <= x1 <= 5.0);
-    m.set_initial(x0, -1.2);
-    m.set_initial(x1, 1.0);
+    m.set_initial(x0, -1.2).unwrap();
+    m.set_initial(x1, 1.0).unwrap();
     objective!(m, Min, (1.0 - x0).powi(2) + 100.0 * (x1 - x0.powi(2)).powi(2));
     write_and_solve(&m, 0.0, 1e-4);
 }

@@ -23,7 +23,8 @@ pub mod sum;
 pub mod var;
 
 pub use constraint::{
-    Constraint, ConstraintExpr, ConstraintId, IntoRhs, RangeConstraintIds, Relate, Sense,
+    Constraint, ConstraintExpr, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
+    RangeConstraintIds, Relate, Sense,
 };
 pub use display::{ConstraintDisplay, ExprDisplay, ObjectiveDisplay, SocDisplay, SosDisplay};
 pub use domain::Domain;
@@ -43,7 +44,7 @@ pub use set::{
 };
 #[doc(hidden)]
 pub use soc::__detect_soc_from_quadratic;
-pub use soc::{SocConstraint, SocConstraintId, SocForm};
+pub use soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;
 pub use var::{VarBuilder, Variable, var_name};
@@ -52,8 +53,8 @@ pub use var::{VarBuilder, Variable, var_name};
 // `oximo-expr` import.
 pub use oximo_expr::{
     Children, EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot, ExprArenaWriteGuard,
-    ExprId, ExprNode, ParamId, UnaryOp, VarId, describe_nonlinear_term, dot, render_expr,
-    render_linear_terms,
+    ExprId, ExprNode, ModelId, ModelMismatchError, ParamId, UnaryOp, VarId,
+    describe_nonlinear_term, dot, render_expr, render_linear_terms,
 };
 
 pub use oximo_macros::{

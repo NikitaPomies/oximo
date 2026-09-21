@@ -128,6 +128,7 @@ impl HighsPersistent {
             st.meta.obj_constant,
             st.meta.num_constraints,
             st.meta.cols.len(),
+            model.id(),
             elapsed,
         );
         st.live = Some(HighsModel::from(solved));
@@ -187,8 +188,12 @@ mod tests {
                 (s.objective().unwrap() - c.objective().unwrap()).abs() < 1e-9,
                 "price {price}"
             );
-            assert!((s.value_of(x1).unwrap() - c.value_of(x1).unwrap()).abs() < 1e-9);
-            assert!((s.value_of(x2).unwrap() - c.value_of(x2).unwrap()).abs() < 1e-9);
+            assert!(
+                (s.value_of(x1).unwrap().unwrap() - c.value_of(x1).unwrap().unwrap()).abs() < 1e-9
+            );
+            assert!(
+                (s.value_of(x2).unwrap().unwrap() - c.value_of(x2).unwrap().unwrap()).abs() < 1e-9
+            );
         }
     }
 
@@ -228,11 +233,11 @@ mod tests {
         let mut solver = Highs.persistent();
         let r = solver.solve(&m, &HighsOptions::default()).unwrap();
         assert!(r.has_solution(), "termination = {:?}", r.termination);
-        m.fix(x, 2.0);
+        m.fix(x, 2.0).unwrap();
         let r2 = solver.solve(&m, &HighsOptions::default()).unwrap();
         assert!(r2.has_solution());
-        assert!((r2.value_of(x).unwrap() - 2.0).abs() < 1e-9);
-        assert!((r2.value_of(y).unwrap() - 3.0).abs() < 1e-9);
+        assert!((r2.value_of(x).unwrap().unwrap() - 2.0).abs() < 1e-9);
+        assert!((r2.value_of(y).unwrap().unwrap() - 3.0).abs() < 1e-9);
     }
 
     #[test]
@@ -271,12 +276,13 @@ mod tests {
             let cold = Highs.solve(&m, &HighsOptions::default()).unwrap();
             assert_eq!(warm.termination, TerminationStatus::Optimal, "ub {ub}");
             assert!(
-                (warm.value_of(s).unwrap() - 5.0).abs() < 1e-6,
+                (warm.value_of(s).unwrap().unwrap() - 5.0).abs() < 1e-6,
                 "ub {ub}: s = {:?}",
                 warm.value_of(s)
             );
             assert!(
-                (warm.value_of(s).unwrap() - cold.value_of(s).unwrap()).abs() < 1e-9,
+                (warm.value_of(s).unwrap().unwrap() - cold.value_of(s).unwrap().unwrap()).abs()
+                    < 1e-9,
                 "ub {ub}"
             );
             assert!(

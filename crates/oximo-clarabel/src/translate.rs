@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use oximo_core::{
-    ConstraintId, Model, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable, var_name,
+    ConstraintId, Model, ModelId, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable,
+    var_name,
 };
 use oximo_expr::{LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
@@ -165,7 +166,7 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
     let started = Instant::now();
     solver.solve();
     let elapsed = started.elapsed();
-    Ok(read_result(&solver, &problem.meta, elapsed))
+    Ok(read_result(&solver, &problem.meta, model.id(), elapsed))
 }
 
 /// Translate `model` into Clarabel's conic form without solving.
@@ -484,6 +485,7 @@ fn build_cones(m_zero: usize, m_nonneg: usize, soc_sizes: &[usize]) -> Vec<Suppo
 pub(crate) fn read_result(
     solver: &DefaultSolver<f64>,
     meta: &Meta,
+    model_id: ModelId,
     elapsed: Duration,
 ) -> SolverResult {
     let native_status = solver.solution.status;
@@ -499,7 +501,7 @@ pub(crate) fn read_result(
                 .unwrap_or_default();
         let objective = ObjectiveTransform { sign: meta.sign, offset: meta.obj_constant }
             .restore(solver.solution.obj_val);
-        solutions.push(SolutionPoint { primal, objective });
+        solutions.push(SolutionPoint { model_id, primal, objective });
 
         for (r, &z) in solver.solution.z.iter().enumerate() {
             if let Some(Some(projection)) = meta.row_duals.get(r) {
@@ -521,6 +523,7 @@ pub(crate) fn read_result(
 
     normalize_result(
         SolverResult {
+            model_id,
             termination,
             primal_status,
             dual_status: if native_status == SolverStatus::Solved {
@@ -920,8 +923,8 @@ mod tests {
         let res = solve(&m, &ClarabelOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!(close(res.objective().unwrap(), 11.0, 1e-6));
-        assert!(close(res.value_of(x).unwrap(), 3.0, 1e-6));
-        assert!(close(res.value_of(y).unwrap(), 1.0, 1e-6));
+        assert!(close(res.value_of(x).unwrap().unwrap(), 3.0, 1e-6));
+        assert!(close(res.value_of(y).unwrap().unwrap(), 1.0, 1e-6));
     }
 
     #[test]
@@ -951,8 +954,8 @@ mod tests {
 
         let res = solve(&m, &ClarabelOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!(close(res.value_of(x0).unwrap(), 0.25, 1e-5));
-        assert!(close(res.value_of(x1).unwrap(), 0.75, 1e-5));
+        assert!(close(res.value_of(x0).unwrap().unwrap(), 0.25, 1e-5));
+        assert!(close(res.value_of(x1).unwrap().unwrap(), 0.75, 1e-5));
         assert!(close(res.objective().unwrap(), 1.875, 1e-5));
     }
 
@@ -966,7 +969,7 @@ mod tests {
 
         let res = solve(&m, &ClarabelOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
-        assert!(close(res.value_of(x).unwrap(), 1.0, 1e-5));
+        assert!(close(res.value_of(x).unwrap().unwrap(), 1.0, 1e-5));
         assert!(res.objective().unwrap().abs() < 1e-5);
     }
 
@@ -978,7 +981,7 @@ mod tests {
         variable!(m, x);
         variable!(m, y);
         variable!(m, t >= 0.0);
-        m.fix(t, 1.0);
+        m.fix(t, 1.0).unwrap();
         let disk = m.add_soc_constraint("disk", [x, y], t);
         objective!(m, Min, x + y);
         assert_eq!(m.kind(), ModelKind::SOCP);
@@ -987,7 +990,7 @@ mod tests {
         assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!(close(res.objective().unwrap(), -std::f64::consts::SQRT_2, 1e-6));
 
-        let z0 = res.soc_dual_of(disk).expect("SOC dual missing");
+        let z0 = res.soc_dual_of(disk).expect("matching model").expect("SOC dual missing");
         assert!(close(z0, std::f64::consts::SQRT_2, 1e-6), "z0 = {z0}");
     }
 
@@ -998,8 +1001,8 @@ mod tests {
         variable!(m, x);
         variable!(m, y);
         variable!(m, t >= 0.0);
-        m.fix(x, 3.0);
-        m.fix(y, 4.0);
+        m.fix(x, 3.0).unwrap();
+        m.fix(y, 4.0).unwrap();
         constraint!(m, cone, x.powi(2) + y.powi(2) <= t.powi(2));
         objective!(m, Min, t);
         assert_eq!(m.kind(), ModelKind::SOCP);
@@ -1017,7 +1020,7 @@ mod tests {
         variable!(m, x);
         variable!(m, y);
         variable!(m, t >= 0.0);
-        m.fix(t, 2.0);
+        m.fix(t, 2.0).unwrap();
         m.add_soc_constraint("disk", [x, y], t);
         objective!(m, Min, x.powi(2) + y);
         assert_eq!(m.kind(), ModelKind::SOCP);

@@ -175,7 +175,7 @@ mod tests {
         constraint!(model, second, shared <= 2.0);
 
         for (expected, exponent) in [(2, 2.0), (3, 3.0)] {
-            model.set_param(p, exponent);
+            model.set_param(p, exponent).expect("parameter belongs to model");
             let tapes = constraint_tapes(&model);
             for tape in tapes.into_iter().flatten() {
                 assert_eq!(tape.first_invalid_slot(), None);
