@@ -482,6 +482,56 @@ fn writer_round_trips_every_domain() {
 
     assert_eq!(var_shapes(&export_import(&model)), var_shapes(&model));
 }
+// ---------------------------------------------------------------------------
+// Writer refusals.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn writer_rejects_a_model_without_an_objective() {
+    let model = Model::new("no_objective");
+    variable!(model, x);
+    constraint!(model, c, x <= 1.0);
+
+    assert!(matches!(to_lp_string(&model), Err(IoError::NoObjective)));
+}
+
+#[test]
+fn writer_rejects_a_non_quadratic_objective() {
+    let model = Model::new("non_quadratic_objective");
+    variable!(model, x);
+    objective!(model, Min, x.sin());
+
+    let Err(IoError::NonLinearNorQuadratic { location, term }) = to_lp_string(&model) else {
+        panic!("a non_quadratic objective must not be written as LP");
+    };
+    assert_eq!(location, "the objective");
+    assert_eq!(term, "sin(x)");
+}
+
+#[test]
+fn writer_rejects_a_non_quadratic_constraint() {
+    let model = Model::new("non_quadratic_constraint");
+    variable!(model, x);
+    constraint!(model, c, x.exp() <= 1.0);
+    objective!(model, Min, x);
+
+    let Err(IoError::NonLinearNorQuadratic { location, term }) = to_lp_string(&model) else {
+        panic!("a nonlinear constraint must not be written as LP");
+    };
+    assert_eq!(location, "constraint \"c\"");
+    assert_eq!(term, "exp(x)");
+}
+
+#[test]
+fn writer_rejects_a_conic_model() {
+    let model = Model::new("conic");
+    variable!(model, t >= 0.0);
+    variable!(model, x);
+    soc_constraint!(model, cone, [x] <= t);
+    objective!(model, Min, t);
+
+    assert!(matches!(to_lp_string(&model), Err(IoError::Conic)));
+}
 #[test]
 fn leading_negative_coefficient_uses_implicit_multiplication() {
     let model = read_lp("Minimize\n obj: - 2 x + y\nEnd\n".as_bytes()).expect("negative objective");

@@ -1290,7 +1290,7 @@ pub fn write_mps_with<W: Write>(
     let con_terms: Vec<QuadraticTerms> = constraints
         .iter()
         .map(|c| {
-            extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+            extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::NonLinearNorQuadratic {
                 location: format!("constraint {:?}", c.name),
                 term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
                     .unwrap_or_else(|| "<nonlinear>".into()),

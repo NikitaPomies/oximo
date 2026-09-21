@@ -32,7 +32,7 @@ fn nonlinear_constraint_model() -> Model {
 #[test]
 fn lp_names_the_constraint_and_renders_the_term() {
     match to_lp_string(&nonlinear_constraint_model()) {
-        Err(IoError::Nonlinear { location, term }) => {
+        Err(IoError::NonLinearNorQuadratic { location, term }) => {
             assert_eq!(location, "constraint \"capacity\"");
             assert_eq!(term, "sin(theta)");
         }
@@ -45,14 +45,14 @@ fn lp_nonlinear_message_is_user_facing() {
     let msg = to_lp_string(&nonlinear_constraint_model()).unwrap_err().to_string();
     assert_eq!(
         msg,
-        "expected a linear or quadratic expression in constraint \"capacity\", found nonlinear term: sin(theta)"
+        "expected a linear or quadratic expression in constraint \"capacity\", found term: sin(theta)"
     );
 }
 
 #[test]
 fn lp_names_the_objective() {
     match to_lp_string(&nonlinear_objective_model()) {
-        Err(IoError::Nonlinear { location, term }) => {
+        Err(IoError::NonLinearNorQuadratic { location, term }) => {
             assert_eq!(location, "the objective");
             assert_eq!(term, "sin(theta)");
         }

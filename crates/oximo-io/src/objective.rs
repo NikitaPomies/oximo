@@ -26,10 +26,11 @@ pub(crate) fn export_terms(
     let Some(objective) = model.objective().clone() else {
         return Ok((ObjectiveSense::Minimize, QuadraticTerms::default()));
     };
-    let terms = extract_quadratic(arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
-        location: "the objective".into(),
-        term: describe_nonlinear_term(arena, objective.expr, &|v| var_name(vars, v))
-            .unwrap_or_else(|| "<nonlinear>".into()),
-    })?;
+    let terms =
+        extract_quadratic(arena, objective.expr).ok_or_else(|| IoError::NonLinearNorQuadratic {
+            location: "the objective".into(),
+            term: describe_nonlinear_term(arena, objective.expr, &|v| var_name(vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
     Ok((objective.sense, terms))
 }

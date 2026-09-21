@@ -1011,7 +1011,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     writeln!(out, "Subject To")?;
     for c in constraints {
-        let t = extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+        let t = extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::NonLinearNorQuadratic {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
                 .unwrap_or_else(|| "<nonlinear>".into()),
