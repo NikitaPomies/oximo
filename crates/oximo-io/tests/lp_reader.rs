@@ -4,6 +4,24 @@ use oximo_core::prelude::*;
 use oximo_expr::extract_quadratic;
 use oximo_io::{IoError, read_lp, read_lp_file, to_lp_string};
 
+/// Text -> model -> text -> model.
+fn roundtrip(lp: &str) -> Model {
+    let written =
+        to_lp_string(&read_lp(lp.as_bytes()).expect("LP should parse")).expect("write LP");
+    read_lp(written.as_bytes()).expect("read written LP")
+}
+
+/// Model -> text -> model.
+fn export_import(model: &Model) -> Model {
+    let text = to_lp_string(model).expect("write LP");
+    read_lp(text.as_bytes())
+        .unwrap_or_else(|e| panic!("writer emitted LP the reader rejects: {e}\n{text}"))
+}
+
+fn close(left: f64, right: f64) -> bool {
+    (left - right).abs() < 1e-12
+}
+
 fn objective_terms(model: &Model) -> oximo_expr::QuadraticTerms {
     let arena = model.arena();
     extract_quadratic(&arena, model.try_objective().expect("objective").expr)
@@ -338,6 +356,131 @@ fn missing_objective_section_is_reported_with_position() {
         }
         other => panic!("expected InvalidLp, got {other:?}"),
     }
+}
+
+#[test]
+fn roundtrip_bounds_upper_only() {
+    let model = roundtrip("Minimize\n obj: x\nBounds\n x <= 5\nEnd\n");
+    let vars = model.variables();
+    assert!((vars[0].lb - 0.0).abs() < f64::EPSILON);
+    assert!((vars[0].ub - 5.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn roundtrip_integers_domain() {
+    let model = roundtrip("Minimize\n obj: x\nSubject To\n c1: x <= 10\nGeneral\n x\nEnd\n");
+    assert!(matches!(model.variables()[0].domain, Domain::Integer));
+
+    let model = roundtrip("Minimize\n obj: x\nSubject To\n c1: x <= 10\nBinary\n x\nEnd\n");
+    assert!(matches!(model.variables()[0].domain, Domain::Binary));
+}
+
+#[test]
+fn roundtrip_semi_domains() {
+    let model = roundtrip("Minimize\n obj: x\nBounds\n 2 <= x <= 5\nSemi-Continuous\n x\nEnd\n");
+    assert!(matches!(model.variables()[0].domain, Domain::SemiContinuous { threshold: 2.0 }));
+
+    let model = roundtrip("Minimize\n obj: x\nGeneral\n x\nSemi-Continuous\n x\nEnd\n");
+    assert!(matches!(model.variables()[0].domain, Domain::SemiInteger { threshold: 0.0 }));
+}
+
+#[test]
+fn roundtrip_quadratic_objective() {
+    let model =
+        roundtrip("Minimize\n obj: x + [x^2 + 4*x*y]/2\nSubject To\n c1: x + y <= 10\nEnd\n");
+    assert_eq!(model.num_variables(), 2);
+    assert_eq!(model.num_constraints(), 1);
+    assert!(matches!(model.kind(), ModelKind::QCP | ModelKind::QP));
+}
+
+#[test]
+fn roundtrip_quadratic_constraint() {
+    let model = roundtrip("Minimize\n obj: x + y\nSubject To\n c1: [x^2 + y^2] <= 9\nEnd\n");
+    assert_eq!(model.num_variables(), 2);
+    assert_eq!(model.num_constraints(), 1);
+    assert!(matches!(model.kind(), ModelKind::QCP | ModelKind::QP));
+}
+
+#[test]
+fn roundtrip_constant_objective() {
+    let model = roundtrip("Minimize\n obj: x + 4\nSubject To\n c1: x <= 10\nEnd\n");
+    assert_eq!(model.display_objective().to_string(), "minimize x + 4");
+    assert!(close(objective_terms(&model).constant, 4.0));
+}
+
+#[test]
+fn roundtrip_negative_constant_objective() {
+    let model = roundtrip("Minimize\n obj: x - 4\nSubject To\n c1: x <= 10\nEnd\n");
+    assert_eq!(model.display_objective().to_string(), "minimize x - 4");
+    assert!(close(objective_terms(&model).constant, -4.0));
+}
+
+// ---------------------------------------------------------------------------
+// Model -> LP text -> model.
+//
+// The reader can only build the models LP syntax can express, so text-first
+// round trips never reach the writer branches for free/fixed bounds, range
+// expansion, free rows, or an infinite-upper-bound semicontinuous variable.
+// These start from a `Model` instead.
+// ---------------------------------------------------------------------------
+
+/// Bounds and domain of every variable, in declaration order.
+fn var_shapes(model: &Model) -> Vec<(String, f64, f64, Domain)> {
+    model.variables().iter().map(|v| (v.name.to_string(), v.lb, v.ub, v.domain)).collect()
+}
+
+#[test]
+fn writer_round_trips_every_bound_shape() {
+    let model = Model::new("bounds");
+    variable!(model, f64::NEG_INFINITY <= free_var <= f64::INFINITY);
+    variable!(model, f64::NEG_INFINITY <= ub_var <= 5.0);
+    variable!(model, lb_var >= 2.0);
+    variable!(model, -2.0 <= ub_lb_var <= 7.0);
+    variable!(model, 3.0 <= fixed_var <= 3.0);
+    variable!(model, default_var);
+    variable!(model, lp_default_var >= 0.0);
+    objective!(
+        model,
+        Min,
+        free_var + ub_var + fixed_var + ub_lb_var + default_var + lb_var + lp_default_var
+    );
+
+    let text = to_lp_string(&model).expect("write LP");
+    assert!(text.contains(" free_var free"), "free_var variable needs the `free` keyword:\n{text}");
+    assert!(text.contains("-inf <= ub_var <= 5"), "{text}");
+
+    assert!(text.contains(" default_var free"), "{text}");
+    assert!(!text.contains("default_var <="), "{text}");
+    assert!(!text.contains("default_var >="), "{text}");
+
+    // `[0, inf)` is the LP default, so this one is omitted from Bounds entirely.
+    let bounds_section = text
+        .lines()
+        .skip_while(|line| !line.starts_with("Bounds"))
+        .take_while(|line| !line.starts_with("End"));
+    assert!(
+        !bounds_section.into_iter().any(|line| line.contains("lp_default_var")),
+        "an LP-default variable needs no Bounds line:\n{text}"
+    );
+
+    assert_eq!(var_shapes(&export_import(&model)), var_shapes(&model));
+}
+
+#[test]
+fn writer_round_trips_every_domain() {
+    let model = Model::new("domains");
+    variable!(model, 0.0 <= real <= 4.0);
+    variable!(model, 0.0 <= integer <= 9.0, Int);
+    variable!(model, 0.0 <= flag <= 1.0, Bin);
+    variable!(model, 2.0<=semi_continuous <= 10.0, SemiCont(2.0));
+    variable!(model, 1.0 <= semi_integer <= 5.0, SemiInt(1.0));
+    objective!(model, Min, real + integer + flag + semi_continuous + semi_integer);
+
+    let text = to_lp_string(&model).expect("write LP");
+    // Binaries carry their bounds in the section keyword, not in Bounds.
+    assert!(!text.contains("flag <="), "a binary must not get a Bounds line:\n{text}");
+
+    assert_eq!(var_shapes(&export_import(&model)), var_shapes(&model));
 }
 #[test]
 fn leading_negative_coefficient_uses_implicit_multiplication() {
