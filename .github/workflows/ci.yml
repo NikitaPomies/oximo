@@ -57,3 +57,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude oximo-gurobi --exclude oximo-mosek --features oximo/highs
+
+  scip:
+    name: Cargo test (SCIP bundled)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +stable test -p oximo-scip --tests
+      - run: cargo +stable run -p oximo --no-default-features --features scip --example scip_minlp
