@@ -26,6 +26,7 @@
 
 #[cfg(any(feature = "scip", feature = "scip-system"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use oximo::ScipOptions;
     use oximo::prelude::*;
     use oximo::solvers::Scip;
 
