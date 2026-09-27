@@ -93,6 +93,8 @@ solved depends on the selected backend:
 | `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend         | no      |
 | `pounce`        | POUNCE - pure-Rust LP/QP/QCP/NLP backend                     | no      |
 | `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)               | no      |
+| `scip`          | SCIP via russcip - LP/MILP/QP/QCP/SOCP/NLP/MINLP (bundled)   | no      |
+| `scip-system`   | SCIP via a system installation (set `SCIPOPTDIR`)            | no      |
 
 For example, use HiGHS for a bundled LP/MILP/QP solver:
 

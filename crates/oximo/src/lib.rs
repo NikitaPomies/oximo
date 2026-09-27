@@ -36,6 +36,15 @@ pub use oximo_solver::{
     SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt, VarBoundKind,
 };
 
+#[cfg(any(feature = "scip", feature = "scip-system"))]
+pub use oximo_scip::{ScipOptions, ScipPersistent, ScipSetting};
+
+/// SCIP backend and plugin interfaces.
+#[cfg(any(feature = "scip", feature = "scip-system"))]
+pub mod scip {
+    pub use oximo_scip::*;
+}
+
 #[cfg(feature = "io")]
 #[cfg_attr(docsrs, doc(cfg(feature = "io")))]
 pub use oximo_io as io;
@@ -137,6 +146,9 @@ pub mod prelude {
 
 pub mod solvers {
     //! Concrete solver backends, gated by cargo features.
+
+    #[cfg(any(feature = "scip", feature = "scip-system"))]
+    pub use oximo_scip::Scip;
 
     #[cfg(feature = "highs")]
     #[cfg_attr(docsrs, doc(cfg(feature = "highs")))]

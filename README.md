@@ -71,6 +71,8 @@ The modeling layer supports a range of algebraic optimization problems. The avai
 | `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend           | no      |
 | `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)        | no      |
 | `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)                 | no      |
+| `scip`          | SCIP via russcip - LP/MILP/QP/QCP/SOCP/NLP/MINLP (bundled)     | no      |
+| `scip-system`   | SCIP via a system installation (set `SCIPOPTDIR`)              | no      |
 
 ## Workspace layout
 
@@ -90,6 +92,7 @@ The modeling layer supports a range of algebraic optimization problems. The avai
 | `oximo-baron`    | BARON writer and backend                                  |
 | `oximo-clarabel` | Clarabel backend                                          |
 | `oximo-pounce`   | POUNCE (pure-Rust IPOPT) backend                          |
+| `oximo-scip`     | SCIP backend via russcip                                  |
 
 ## License
 
