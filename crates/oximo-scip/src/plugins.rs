@@ -548,8 +548,7 @@ impl russcip::Eventhdlr for Adapter<dyn ScipEventHandler> {
         self.events
     }
     fn execute(&mut self, model: Model<Solving>, _: russcip::SCIPEventhdlr, event: russcip::Event) {
-        let map = self.map.clone();
-        let mut context = ScipContext::new(model, &map, self.shared.clone());
+        let mut context = ScipContext::new(model, &self.map, self.shared.clone());
         guarded(&self.shared, || (), || self.plugin.execute(&mut context, event.event_type()));
     }
 }
@@ -559,9 +558,8 @@ impl russcip::Separator for Adapter<dyn ScipSeparator> {
         model: Model<Solving>,
         separator: russcip::SCIPSeparator,
     ) -> SeparationResult {
-        let map = self.map.clone();
         let mut context = ScipSeparationContext {
-            context: ScipContext::new(model, &map, self.shared.clone()),
+            context: ScipContext::new(model, &self.map, self.shared.clone()),
             separator,
         };
         guarded(&self.shared, || SeparationResult::DidNotRun, || self.plugin.execute(&mut context))
@@ -574,9 +572,8 @@ impl russcip::Pricer for Adapter<dyn ScipPricer> {
         _: russcip::SCIPPricer,
         farkas: bool,
     ) -> PricerResult {
-        let map = self.map.clone();
         let mut context = ScipPricingContext {
-            context: ScipContext::new(model, &map, self.shared.clone()),
+            context: ScipContext::new(model, &self.map, self.shared.clone()),
             farkas,
         };
         guarded(
@@ -593,8 +590,7 @@ impl russcip::BranchRule for Adapter<dyn ScipBranchRule> {
         _: russcip::SCIPBranchRule,
         candidates: Vec<russcip::BranchingCandidate>,
     ) -> russcip::BranchingResult {
-        let map = self.map.clone();
-        let mut context = ScipContext::new(model, &map, self.shared.clone());
+        let mut context = ScipContext::new(model, &self.map, self.shared.clone());
         guarded(
             &self.shared,
             || russcip::BranchingResult::DidNotRun,
@@ -629,8 +625,7 @@ impl russcip::BranchRule for Adapter<dyn ScipBranchRule> {
 }
 impl russcip::Heuristic for Adapter<dyn ScipHeuristic> {
     fn execute(&mut self, model: Model<Solving>, timing: HeurTiming, node_inf: bool) -> HeurResult {
-        let map = self.map.clone();
-        let mut context = ScipContext::new(model, &map, self.shared.clone());
+        let mut context = ScipContext::new(model, &self.map, self.shared.clone());
         guarded(
             &self.shared,
             || HeurResult::DidNotRun,
@@ -645,8 +640,8 @@ impl russcip::Conshdlr for Adapter<dyn ScipConstraintHandler> {
         _: russcip::SCIPConshdlr,
         solution: &russcip::Solution<'_>,
     ) -> bool {
-        let map = self.map.clone();
-        let mut context = ScipContext::new(model, &map, self.shared.clone());
+        let map = &self.map;
+        let mut context = ScipContext::new(model, map, self.shared.clone());
         guarded(
             &self.shared,
             || false,
@@ -670,16 +665,15 @@ impl russcip::Conshdlr for Adapter<dyn ScipConstraintHandler> {
     ///
     /// Errors invalidate the enclosing solve result.
     fn enforce(&mut self, model: Model<Solving>, _: russcip::SCIPConshdlr) -> ConshdlrResult {
-        let map = self.map.clone();
-        let mut context =
-            ScipConstraintContext { context: ScipContext::new(model, &map, self.shared.clone()) };
+        let mut context = ScipConstraintContext {
+            context: ScipContext::new(model, &self.map, self.shared.clone()),
+        };
         guarded(&self.shared, || ConshdlrResult::CutOff, || self.plugin.enforce(&mut context))
     }
 }
 impl russcip::NodeSel for Adapter<dyn ScipNodeSelector> {
     fn select(&mut self, model: Model<Solving>) -> Option<Node> {
-        let map = self.map.clone();
-        let mut context = ScipContext::new(model, &map, self.shared.clone());
+        let mut context = ScipContext::new(model, &self.map, self.shared.clone());
         guarded(&self.shared, || None, || self.plugin.select(&mut context))
     }
     fn comp(&mut self, a: Node, b: Node) -> Ordering {
@@ -898,37 +892,42 @@ impl russcip::Eventhdlr for Prices {
                 if model.lp_status() != russcip::LPStatus::Optimal {
                     return Ok(());
                 }
-                let map =
-                    self.shared.borrow().price_map.clone().unwrap_or_else(|| self.map.clone());
-                let ctx = ScipContext::new(model, &map, self.shared.clone());
-                let mut dual = FxHashMap::default();
-                let mut reduced = FxHashMap::default();
-                let mut values = FxHashMap::default();
-                for i in 0..map.vars.len() {
-                    let id = VarId(u32::try_from(i).map_err(crate::backend)?);
-                    if let Some(v) = ctx.variable(id) {
-                        values.insert(id, ctx.model.current_val(&v));
-                        if let Some(t) = v.transformed()
-                            && let Some(rc) = t.redcost().filter(|v| v.is_finite())
-                        {
-                            reduced.insert(id, rc);
+                let (dual, reduced, values, lp_objective) = {
+                    let shared = self.shared.borrow();
+                    let map = shared.price_map.as_ref().unwrap_or(&self.map);
+                    let ctx = ScipContext::new(model, map, self.shared.clone());
+                    let mut dual = FxHashMap::default();
+                    let mut reduced = FxHashMap::default();
+                    let mut values = FxHashMap::default();
+                    for i in 0..map.vars.len() {
+                        let id = VarId(u32::try_from(i).map_err(crate::backend)?);
+                        if let Some(v) = ctx.variable(id) {
+                            values.insert(id, ctx.model.current_val(&v));
+                            if let Some(t) = v.transformed()
+                                && let Some(rc) = t.redcost().filter(|v| v.is_finite())
+                            {
+                                reduced.insert(id, rc);
+                            }
                         }
                     }
-                }
-                for i in 0..map.constraints.len() {
-                    let id = crate::translate::id(i);
-                    if map.linear[i]
-                        && let Some(v) =
-                            ctx.constraint(id).and_then(|c| c.dual_sol()).filter(|v| v.is_finite())
-                    {
-                        dual.insert(id, v);
+                    for i in 0..map.constraints.len() {
+                        let id = crate::translate::id(i);
+                        if map.linear[i]
+                            && let Some(v) = ctx
+                                .constraint(id)
+                                .and_then(|c| c.dual_sol())
+                                .filter(|v| v.is_finite())
+                        {
+                            dual.insert(id, v);
+                        }
                     }
-                }
+                    (dual, reduced, values, ctx.model.lp_obj_val())
+                };
                 let mut shared = self.shared.borrow_mut();
                 shared.dual = dual;
                 shared.reduced = reduced;
                 shared.lp_values = values;
-                shared.lp_objective = Some(ctx.model.lp_obj_val());
+                shared.lp_objective = Some(lp_objective);
                 Ok(())
             },
         );
