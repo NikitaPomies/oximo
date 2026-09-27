@@ -179,6 +179,7 @@ pub struct ScipContext<'a> {
     model: Model<Solving>,
     map: &'a Map,
     shared: SharedState,
+    original_by_native_index: OnceCell<FxHashMap<usize, russcip::Variable>>,
     transformed_by_index: OnceCell<FxHashMap<usize, VarId>>,
 }
 impl std::fmt::Debug for ScipContext<'_> {
@@ -188,7 +189,13 @@ impl std::fmt::Debug for ScipContext<'_> {
 }
 impl ScipContext<'_> {
     fn new<'a>(model: Model<Solving>, map: &'a Map, shared: SharedState) -> ScipContext<'a> {
-        ScipContext { model, map, shared, transformed_by_index: OnceCell::new() }
+        ScipContext {
+            model,
+            map,
+            shared,
+            original_by_native_index: OnceCell::new(),
+            transformed_by_index: OnceCell::new(),
+        }
     }
     fn transformed_by_index(&self) -> &FxHashMap<usize, VarId> {
         self.transformed_by_index.get_or_init(|| {
@@ -212,7 +219,12 @@ impl ScipContext<'_> {
         match id.into() {
             ScipVarId::Original(v) => {
                 let index = *self.map.vars.get(v.index())?;
-                self.model.orig_vars().into_iter().find(|v| v.index() == index)
+                self.original_by_native_index
+                    .get_or_init(|| {
+                        self.model.orig_vars().into_iter().map(|v| (v.index(), v)).collect()
+                    })
+                    .get(&index)
+                    .cloned()
             }
             ScipVarId::Generated(v) => {
                 let index = self.shared.borrow().generated.get(v.0)?.index;
