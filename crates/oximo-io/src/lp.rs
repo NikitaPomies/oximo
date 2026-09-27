@@ -3,7 +3,10 @@
 //! CPLEX LP is a widely supported text format for linear and quadratic
 //! optimization problems. It supports a single objective, assumes variables
 //! are non-negative by default, and uses an explicit `Bounds` section for free
-//! variables. This module imports the LP/QP subset represented by `oximo-core`
+//! variables. Bounds are read strictly: each side of a variable may be declared
+//! once (`x = v` and `lo <= x <= hi` declare both), `free` only removes the
+//! implicit lower bound of 0, and inconsistent bounds are rejected on import.
+//! This module imports the LP/QP subset represented by `oximo-core`
 //! and exports linear and quadratic LP/MILP/QP/QCP models.
 //!
 //! [`write_lp`] writes an oximo [`Model`] to any `std::io::Write`.
@@ -409,7 +412,7 @@ fn lower<'a>(m: &'a Model, vars: &HashMap<String, Expr<'a>>, a: Ast) -> Result<E
 struct ParsedLp {
     sense: Option<ObjectiveSense>,
     rows: Vec<(String, Ast, Sense, f64)>,
-    bounds: HashMap<String, (f64, f64)>,
+    bounds: HashMap<String, DeclaredBounds>,
     general: Vec<String>,
     binary: Vec<String>,
     semi: Vec<String>,
@@ -417,6 +420,35 @@ struct ParsedLp {
     var_set: FxHashSet<String>,
     sos: Vec<ParsedLpSos>,
     indicators: Vec<ParsedLpIndicator>,
+}
+
+/// Bound sides explicitly declared in the `Bounds` section, with the line of
+/// each declaration for diagnostics.
+#[derive(Default)]
+struct DeclaredBounds {
+    lower: Option<(f64, usize)>,
+    upper: Option<(f64, usize)>,
+    free: Option<usize>,
+}
+
+impl DeclaredBounds {
+    fn resolve(&self) -> (f64, f64) {
+        let lb = match (self.lower, self.free) {
+            (Some((v, _)), _) => v,
+            (None, Some(_)) => f64::NEG_INFINITY,
+            (None, None) => 0.0,
+        };
+        (lb, self.upper.map_or(f64::INFINITY, |(v, _)| v))
+    }
+
+    /// Line of the declaration that made the bounds what they are.
+    fn last_line(&self) -> usize {
+        [self.lower.map(|(_, l)| l), self.upper.map(|(_, l)| l), self.free]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(1)
+    }
 }
 
 struct ParsedLpIndicator {
@@ -744,26 +776,35 @@ fn build_model(
     }
     let m = Model::new(model_name);
     let mut vars = HashMap::new();
-    for n in &p.vars {
-        let (lb, mut ub) = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
-        if binary_names.contains(n) && !p.bounds.contains_key(n) {
+    for var_name in &p.vars {
+        let declared = p.bounds.get(var_name);
+        let (lb, mut ub) = declared.map_or((0.0, f64::INFINITY), DeclaredBounds::resolve);
+        if binary_names.contains(var_name) && declared.is_none() {
             ub = 1.0;
         }
         if lb > ub {
-            return Err(invalid_lp(1, 1, format!("inconsistent bounds for variable {n}")));
+            let line = declared.map_or(1, DeclaredBounds::last_line);
+            return Err(invalid_lp(
+                line,
+                1,
+                format!("inconsistent bounds for variable {var_name}: {lb} > {ub}"),
+            ));
         }
-        let domain = if semi_names.contains(n) && general_names.contains(n) {
+        let domain = if semi_names.contains(var_name) && general_names.contains(var_name) {
             Domain::SemiInteger { threshold: lb }
-        } else if semi_names.contains(n) {
+        } else if semi_names.contains(var_name) {
             Domain::SemiContinuous { threshold: lb }
-        } else if binary_names.contains(n) {
+        } else if binary_names.contains(var_name) {
             Domain::Binary
-        } else if general_names.contains(n) {
+        } else if general_names.contains(var_name) {
             Domain::Integer
         } else {
             Domain::Real
         };
-        vars.insert(n.clone(), m.__var(n.clone()).bounds(lb, ub).domain(domain).build());
+        vars.insert(
+            var_name.clone(),
+            m.__var(var_name.clone()).bounds(lb, ub).domain(domain).build(),
+        );
     }
     let mut used_names = HashSet::new();
     for (name, _, _, _) in &p.rows {
@@ -975,13 +1016,53 @@ fn bound_value(toks: &[Token], pos: &mut usize) -> Option<f64> {
     Some(sign * value)
 }
 
+/// Record explicit bound sides for `name`. Bounds are strict: a side may be
+/// declared once, `=` and `lo <= x <= hi` declare both sides, and `free` only
+/// drops the implicit lower bound of 0.
+fn declare_bound(
+    p: &mut ParsedLp,
+    name: &str,
+    lower: Option<f64>,
+    upper: Option<f64>,
+    line: usize,
+    column: usize,
+) -> Result<(), IoError> {
+    let declared = p.bounds.entry(name.to_owned()).or_default();
+    for (side, value, slot) in
+        [("lower", lower, &mut declared.lower), ("upper", upper, &mut declared.upper)]
+    {
+        let Some(value) = value else { continue };
+        if let Some((_, first)) = slot {
+            return Err(invalid_lp(
+                line,
+                column,
+                format!(
+                    "repeated {side} bound for variable {name} (first declared on line {first})"
+                ),
+            ));
+        }
+        *slot = Some((value, line));
+    }
+    Ok(())
+}
+
 fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoError> {
     let toks = lex(line, line_no)?;
     if toks.len() == 2
         && matches!(&toks[1].kind, Tok::Word(x) if x.eq_ignore_ascii_case("free"))
         && let Tok::Word(n) = &toks[0].kind
     {
-        p.bounds.insert(n.clone(), (f64::NEG_INFINITY, f64::INFINITY));
+        let declared = p.bounds.entry(n.clone()).or_default();
+        if let Some(first) = declared.free {
+            return Err(invalid_lp(
+                line_no,
+                toks[0].column,
+                format!(
+                    "repeated free declaration for variable {n} (first declared on line {first})"
+                ),
+            ));
+        }
+        declared.free = Some(line_no);
         return Ok(());
     }
     if let Tok::Word(n) = &toks[0].kind {
@@ -990,8 +1071,7 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
             if let Some(v) = bound_value(&toks, &mut i)
                 && i == toks.len()
             {
-                p.bounds.insert(n.clone(), (v, v));
-                return Ok(());
+                return declare_bound(p, n, Some(v), Some(v), line_no, toks[0].column);
             }
         }
         if matches!(toks.get(1).map(|token| &token.kind), Some(Tok::Le | Tok::Ge)) {
@@ -999,13 +1079,12 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
             if let Some(v) = bound_value(&toks, &mut i)
                 && i == toks.len()
             {
-                let old = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
-                if matches!(&toks[1].kind, Tok::Le) {
-                    p.bounds.insert(n.clone(), (old.0, v));
+                let column = toks[0].column;
+                return if matches!(&toks[1].kind, Tok::Le) {
+                    declare_bound(p, n, None, Some(v), line_no, column)
                 } else {
-                    p.bounds.insert(n.clone(), (v, old.1));
-                }
-                return Ok(());
+                    declare_bound(p, n, Some(v), None, line_no, column)
+                };
             }
         }
     }
@@ -1014,30 +1093,18 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
         && matches!(toks.get(i).map(|token| &token.kind), Some(Tok::Le))
     {
         i += 1;
-        if let Some(Token { kind: Tok::Word(n), .. }) = toks.get(i) {
+        if let Some(Token { kind: Tok::Word(n), column }) = toks.get(i) {
             i += 1;
+            if i == toks.len() {
+                return declare_bound(p, n, Some(lo), None, line_no, *column);
+            }
             if matches!(toks.get(i).map(|token| &token.kind), Some(Tok::Le)) {
                 i += 1;
                 if let Some(hi) = bound_value(&toks, &mut i)
                     && i == toks.len()
                 {
-                    p.bounds.insert(n.clone(), (lo, hi));
-                    return Ok(());
+                    return declare_bound(p, n, Some(lo), Some(hi), line_no, *column);
                 }
-            }
-        }
-    }
-    let mut i = 0;
-    if let Some(lo) = bound_value(&toks, &mut i)
-        && matches!(toks.get(i).map(|token| &token.kind), Some(Tok::Le))
-    {
-        i += 1;
-        if let Some(Token { kind: Tok::Word(n), .. }) = toks.get(i) {
-            i += 1;
-            if i == toks.len() {
-                let old = p.bounds.get(n).copied().unwrap_or((0.0, f64::INFINITY));
-                p.bounds.insert(n.clone(), (lo, old.1));
-                return Ok(());
             }
         }
     }
