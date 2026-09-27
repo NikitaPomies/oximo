@@ -1,0 +1,25 @@
+[package]
+name = "oximo-scip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SCIP LP/MILP/QP/QCP/SOCP/NLP/MINLP backend for oximo"
+readme = "README.md"
+
+[features]
+default = ["bundled"]
+bundled = ["russcip/bundled"]
+system = ["russcip/bindgen"]
+
+[dependencies]
+oximo-core.workspace = true
+oximo-expr.workspace = true
+oximo-solver.workspace = true
+russcip = { workspace = true, features = ["serde"] }
+rustc-hash.workspace = true
+
+[lints]
+workspace = true

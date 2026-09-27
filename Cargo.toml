@@ -14,6 +14,7 @@ members = [
     "crates/oximo-clarabel",
     "crates/oximo-autodiff",
     "crates/oximo-pounce",
+    "crates/oximo-scip",
     "crates/oximo",
 ]
 
@@ -43,6 +44,7 @@ oximo-baron  = { path = "crates/oximo-baron",  version = "0.7.0" }
 oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.7.0" }
 oximo-autodiff = { path = "crates/oximo-autodiff", version = "0.7.0" }
 oximo-pounce = { path = "crates/oximo-pounce", version = "0.7.0" }
+oximo-scip = { path = "crates/oximo-scip", version = "0.7.0", default-features = false }
 
 rayon            = "1.12"
 criterion        = "0.8"
@@ -62,6 +64,7 @@ gurobi-rs        = { version = "1.0.0", features = ["gurobi13"] }
 mosek            = "11.2"
 clarabel         = "0.11"
 pounce-rs        = { version = "0.12", features = ["convex", "qp"] }
+russcip = { version = "0.11.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

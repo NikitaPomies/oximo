@@ -22,6 +22,8 @@ baron = ["dep:oximo-baron"]
 clarabel = ["dep:oximo-clarabel"]
 clarabel-faer = ["clarabel", "oximo-clarabel/faer"]
 pounce = ["dep:oximo-pounce"]
+scip = ["dep:oximo-scip", "oximo-scip/bundled"]
+scip-system = ["dep:oximo-scip", "oximo-scip/system"]
 pounce-enzyme = ["pounce", "oximo-pounce/enzyme"]
 _benchmark-support = [
     "dep:criterion",
@@ -69,6 +71,7 @@ oximo-gams = { workspace = true, optional = true }
 oximo-baron = { workspace = true, optional = true }
 oximo-clarabel = { workspace = true, optional = true }
 oximo-pounce = { workspace = true, optional = true }
+oximo-scip = { workspace = true, optional = true }
 oximo-io = { workspace = true, optional = true }
 oximo-autodiff = { workspace = true, optional = true }
 criterion = { workspace = true, optional = true }
@@ -113,6 +116,9 @@ required-features = ["highs"]
 [[example]]
 name = "resource_investment_scheduling"
 required-features = ["highs"]
+
+[[example]]
+name = "scip_minlp"
 
 [[test]]
 name = "solve"
