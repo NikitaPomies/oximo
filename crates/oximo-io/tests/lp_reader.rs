@@ -107,7 +107,6 @@ Subject To
 Bounds
  -infinity <= x <= 10
  y >= 2
-  1 <= z
  z = 1
 General
  y
@@ -402,4 +401,48 @@ fn leading_negative_coefficient_uses_implicit_multiplication() {
         objective_terms(&model).hessian,
         vec![(model.variables()[0].id, model.variables()[0].id, -2.0)]
     );
+}
+
+fn bounds_of(bounds: &str) -> Result<(f64, f64), IoError> {
+    let text = format!("Minimize\n obj: x\nBounds\n{bounds}End\n");
+    let model = read_lp(text.as_bytes())?;
+    Ok((model.variables()[0].lb, model.variables()[0].ub))
+}
+
+fn assert_bound_error(bounds: &str, expected: &str) {
+    match bounds_of(bounds) {
+        Err(IoError::InvalidLp { message, .. }) => {
+            assert!(message.contains(expected), "{bounds:?}: {message:?} lacks {expected:?}");
+        }
+        other => panic!("expected InvalidLp for {bounds:?}, got {other:?}"),
+    }
+}
+
+#[test]
+fn complementary_bound_declarations_are_combined() {
+    let inf = f64::INFINITY;
+    assert_eq!(bounds_of(" x >= 1\n x <= 4\n").unwrap(), (1.0, 4.0));
+    assert_eq!(bounds_of(" x <= 4\n 1 <= x\n").unwrap(), (1.0, 4.0));
+    assert_eq!(bounds_of(" x free\n x <= 4\n").unwrap(), (-inf, 4.0));
+    // `free` only removes the implicit lower bound; explicit bounds survive.
+    assert_eq!(bounds_of(" x >= 1\n x free\n").unwrap(), (1.0, inf));
+    assert_eq!(bounds_of(" x free\n x = 3\n").unwrap(), (3.0, 3.0));
+}
+
+#[test]
+fn repeated_or_conflicting_bound_declarations_are_rejected() {
+    assert_bound_error(" x >= 2\n x >= 1\n", "repeated lower bound");
+    assert_bound_error(" x >= 1\n x >= 1\n", "repeated lower bound");
+    assert_bound_error(" x <= 4\n x <= 5\n", "repeated upper bound");
+    assert_bound_error(" 1 <= x\n x >= 1\n", "repeated lower bound");
+    assert_bound_error(" x <= 4\n x = 3\n", "repeated upper bound");
+    assert_bound_error(" x = 3\n x <= 4\n", "repeated upper bound");
+    assert_bound_error(" x >= 1\n 0 <= x <= 5\n", "repeated lower bound");
+    assert_bound_error(" x free\n x free\n", "repeated free declaration");
+}
+
+#[test]
+fn inconsistent_final_bounds_are_rejected() {
+    assert_bound_error(" x >= 5\n x <= 4\n", "inconsistent bounds");
+    assert_bound_error(" x <= -1\n", "inconsistent bounds");
 }
